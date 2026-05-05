@@ -98,7 +98,7 @@
 //! ## Status
 //!
 //! This module is a **planning skeleton with macOS deps locked in**.
-//! `cargo build -p wry-wgpu-interop-adapter` on macOS 12.3+ should
+//! `cargo build -p wry-scry` on macOS 12.3+ should
 //! succeed: the type satisfies `WryWebSurfaceProducer` via the
 //! crate-level default impls (`Unsupported` for navigate/resize/offset,
 //! `OverlayOnly` from `acquire_frame`). The actual WKWebView host,

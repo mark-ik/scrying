@@ -12,7 +12,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::Window;
 use wry::{Rect, WebViewBuilder};
-use wry_wgpu_interop_adapter::{
+use wry_scry::{
     OverlayOnlyProducer, WebSurfaceMode, WryWebSurfaceFrame, WryWebSurfaceProducer,
 };
 
@@ -109,7 +109,7 @@ impl AppState {
 
         let (instance, device, queue, adapter_info) = pollster::block_on(create_host_device())?;
         let host = HostWgpuContext::new(device.clone(), queue.clone());
-        let capabilities = wry_wgpu_interop_adapter::WryWebSurfaceCapabilities::probe(Some(&host));
+        let capabilities = wry_scry::WryWebSurfaceCapabilities::probe(Some(&host));
 
         println!("wgpu adapter: {}", adapter_info.name);
         println!("wgpu backend: {:?}", host.backend);
@@ -324,7 +324,7 @@ fn run_windows_shared_texture_probe(
     host: &HostWgpuContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use wry::WebViewExtWindows;
-    use wry_wgpu_interop_adapter::windows_capture::{
+    use wry_scry::windows_capture::{
         D3D11SharedTextureFactory, DxgiSharedHandleBridge, capture_window_frame_once,
         close_shared_handle, probe_graphics_capture_prerequisites,
     };
@@ -444,7 +444,7 @@ struct CapturedComposition {
     /// first `try_acquire_frame` lands a frame. The probe path no longer
     /// blocks on an initial acquire (it was an intermittent pump-hang).
     imported: Option<wgpu_native_texture_interop::ImportedTexture>,
-    producer: wry_wgpu_interop_adapter::webview2_composition_producer::WebView2CompositionProducer,
+    producer: wry_scry::webview2_composition_producer::WebView2CompositionProducer,
     #[allow(dead_code)]
     dispatcher_queue: Option<windows::System::DispatcherQueueController>,
 }
@@ -458,10 +458,10 @@ fn run_webview2_composition_visual_probe(
         CreateDispatcherQueueController, DQTAT_COM_STA, DQTYPE_THREAD_CURRENT,
         DispatcherQueueOptions,
     };
-    use wry_wgpu_interop_adapter::webview2_composition_producer::{
+    use wry_scry::webview2_composition_producer::{
         WebView2CompositionConfig, WebView2CompositionProducer,
     };
-    use wry_wgpu_interop_adapter::windows_capture::close_shared_handle;
+    use wry_scry::windows_capture::close_shared_handle;
 
     let parent_hwnd = hwnd_from_window(window)?;
     let dispatcher_queue = match unsafe {
@@ -958,8 +958,8 @@ impl WebViewRenderer {
     /// needs to be re-rendered. Only when the producer (re-)allocates (first
     /// frame, post-resize) do we re-import and rebuild the bind group.
     fn refresh_captured_texture(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
-        use wry_wgpu_interop_adapter::WryWebSurfaceFrame;
-        use wry_wgpu_interop_adapter::windows_capture::close_shared_handle;
+        use wry_scry::WryWebSurfaceFrame;
+        use wry_scry::windows_capture::close_shared_handle;
 
         // Diagnostic: if FORCE_REIMPORT_EVERY_FRAME=1 in the env, drop the
         // producer's persistent dest before each acquire so every frame goes

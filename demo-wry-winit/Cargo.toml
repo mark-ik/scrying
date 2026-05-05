@@ -3,18 +3,18 @@ name = "demo-wry-winit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Minimal winit + wgpu host probe for wry-wgpu-interop-adapter"
+description = "Minimal winit + wgpu host probe for wry-scry"
 
 [dependencies]
 pollster = "0.4.0"
 raw-window-handle = "0.6"
 webview2-com = "0.38.2"
 wgpu = { version = "29.0.1", features = ["metal"] }
-wgpu-native-texture-interop = { path = "../wgpu-native-texture-interop", default-features = false }
+wgpu-native-texture-interop = { path = "../../wgpu-graft/wgpu-native-texture-interop", default-features = false }
 winit = "0.30.12"
 windows-numerics = "0.2.0"
 wry = "0.55.0"
-wry-wgpu-interop-adapter = { path = "../wry-wgpu-interop-adapter" }
+wry-scry = { path = "../wry-scry" }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.61.3"

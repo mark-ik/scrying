@@ -106,7 +106,7 @@
 //! ## Status
 //!
 //! This module is a **planning skeleton with Linux deps locked in**.
-//! `cargo build -p wry-wgpu-interop-adapter` on a Linux box with the
+//! `cargo build -p wry-scry` on a Linux box with the
 //! apt packages installed should succeed: the type satisfies
 //! `WryWebSurfaceProducer` via the crate-level default impls
 //! (`Unsupported` for navigate/resize/offset, `OverlayOnly` from
