@@ -189,6 +189,89 @@ pub enum WryWebSurfaceError {
     Platform(String),
 }
 
+/// Lifecycle / state event emitted by the underlying webview.
+///
+/// Drained from a producer via [`WryWebSurfaceProducer::poll_navigation_event`].
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum NavigationEvent {
+    /// Navigation has started toward the given URL. Does not guarantee the
+    /// load will succeed.
+    Starting { url: String },
+    /// The committed source URL has changed (covers same-document
+    /// navigations and history pushState/replaceState).
+    SourceChanged { url: String },
+    /// Navigation finished. `success` reflects whether the load completed
+    /// without a top-level error; sub-resource failures do not affect it.
+    Completed { url: String, success: bool },
+    /// The document title changed.
+    TitleChanged { title: String },
+}
+
+/// Reason supplied to a focus move.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum FocusReason {
+    /// Programmatic focus (e.g. user clicked a host control that should
+    /// hand focus to the webview).
+    Programmatic,
+    /// User tabbed forward into the webview.
+    Next,
+    /// User shift-tabbed into the webview.
+    Previous,
+}
+
+/// One mouse / scroll event forwarded to the underlying webview.
+///
+/// Coordinates are in physical pixels, relative to the webview's top-left
+/// corner (i.e. the origin of the bounds set by the most recent
+/// [`WryWebSurfaceProducer::resize`] / `set_offset` pair).
+#[derive(Clone, Copy, Debug)]
+pub struct MouseInput {
+    pub kind: MouseEventKind,
+    /// Modifier and button state at the moment of the event.
+    pub virtual_keys: MouseVirtualKeys,
+    /// Wheel delta (for `Wheel` / `HorizontalWheel`) or X-button index
+    /// (for `XButton*`). Zero for other event kinds.
+    pub mouse_data: i32,
+    pub point: (i32, i32),
+}
+
+/// Discrete kinds of mouse / scroll event recognised by the underlying
+/// composition controller. Mirrors `COREWEBVIEW2_MOUSE_EVENT_KIND`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum MouseEventKind {
+    LeftButtonDown,
+    LeftButtonUp,
+    LeftButtonDoubleClick,
+    MiddleButtonDown,
+    MiddleButtonUp,
+    MiddleButtonDoubleClick,
+    RightButtonDown,
+    RightButtonUp,
+    RightButtonDoubleClick,
+    XButtonDown,
+    XButtonUp,
+    XButtonDoubleClick,
+    Move,
+    Wheel,
+    HorizontalWheel,
+    Leave,
+}
+
+/// Modifier and button state for a [`MouseInput`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MouseVirtualKeys {
+    pub control: bool,
+    pub shift: bool,
+    pub left_button: bool,
+    pub middle_button: bool,
+    pub right_button: bool,
+    pub x_button1: bool,
+    pub x_button2: bool,
+}
+
 /// Producer contract implemented by platform-specific Wry/WebView frame sources.
 ///
 /// The trait covers the cross-platform lifecycle (capabilities + navigate +
@@ -245,6 +328,77 @@ pub trait WryWebSurfaceProducer {
         let _ = (x, y);
         Err(WryWebSurfaceError::Unsupported(
             "WryWebSurfaceProducer::set_offset is not implemented for this platform",
+        ))
+    }
+
+    /// Navigate the underlying WebView to a URL and block until
+    /// `NavigationCompleted` fires (or the timeout elapses). Producers
+    /// that don't yet support URL navigation return
+    /// [`WryWebSurfaceError::Unsupported`].
+    fn navigate_to_url(
+        &mut self,
+        url: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), WryWebSurfaceError> {
+        let _ = (url, timeout);
+        Err(WryWebSurfaceError::Unsupported(
+            "WryWebSurfaceProducer::navigate_to_url is not implemented for this platform",
+        ))
+    }
+
+    /// Forward a mouse / scroll event to the underlying webview.
+    /// Coordinates are physical pixels relative to the webview's top-left
+    /// corner.
+    fn send_mouse_input(&mut self, event: MouseInput) -> Result<(), WryWebSurfaceError> {
+        let _ = event;
+        Err(WryWebSurfaceError::Unsupported(
+            "WryWebSurfaceProducer::send_mouse_input is not implemented for this platform",
+        ))
+    }
+
+    /// Move keyboard focus into the underlying webview. Hosts typically
+    /// call this when the user clicks the webview region or tabs into it
+    /// from a host control.
+    fn move_focus(&mut self, reason: FocusReason) -> Result<(), WryWebSurfaceError> {
+        let _ = reason;
+        Err(WryWebSurfaceError::Unsupported(
+            "WryWebSurfaceProducer::move_focus is not implemented for this platform",
+        ))
+    }
+
+    /// Drain the next pending [`NavigationEvent`], if any. Returns `None`
+    /// when no event is queued.
+    ///
+    /// Consumers should poll this each frame (or on demand) to reflect
+    /// load progress in their UI. Events are queued FIFO per producer.
+    fn poll_navigation_event(&mut self) -> Option<NavigationEvent> {
+        None
+    }
+
+    /// Post a string message into the webview's `window.chrome.webview`
+    /// listener. Producers that don't support JS messaging return
+    /// [`WryWebSurfaceError::Unsupported`].
+    fn post_web_message(&mut self, message: &str) -> Result<(), WryWebSurfaceError> {
+        let _ = message;
+        Err(WryWebSurfaceError::Unsupported(
+            "WryWebSurfaceProducer::post_web_message is not implemented for this platform",
+        ))
+    }
+
+    /// Drain the next pending message posted from JS via
+    /// `window.chrome.webview.postMessage(...)`, if any. Messages are
+    /// queued FIFO per producer.
+    fn poll_web_message(&mut self) -> Option<String> {
+        None
+    }
+
+    /// Take a one-shot PNG snapshot of the current webview document.
+    /// Useful for thumbnails / previews / diagnostics; not a substitute
+    /// for the live capture path. Producers that don't support snapshot
+    /// capture return [`WryWebSurfaceError::Unsupported`].
+    fn capture_snapshot_png(&mut self) -> Result<Vec<u8>, WryWebSurfaceError> {
+        Err(WryWebSurfaceError::Unsupported(
+            "WryWebSurfaceProducer::capture_snapshot_png is not implemented for this platform",
         ))
     }
 }

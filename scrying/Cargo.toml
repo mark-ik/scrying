@@ -1,9 +1,9 @@
 [package]
 name = "scrying"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MPL-2.0"
-repository = "https://github.com/mark-ik/wry-scry"
+repository = "https://github.com/mark-ik/scrying"
 description = "Capability-driven system-webview frame adapter — scry into WebView2/WKWebView/WebKitGTK and produce wgpu-importable frames"
 
 [dependencies]
@@ -55,9 +55,9 @@ block2 = "0.6.2"
 dispatch2 = "0.3.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-webview2-com = "0.38.2"
-windows-numerics = "0.2.0"
-windows = { version = "0.61.3", features = [
+webview2-com = "0.39.1"
+windows-numerics = "0.3"
+windows = { version = "0.62", features = [
     "Foundation",
     "System",
     "UI",

@@ -16,6 +16,18 @@ The shared contract:
 - `WryWebSurfaceProducer` — producer trait that platform implementations satisfy.
 - `OverlayOnlyProducer` — conservative fallback when no capture backend is available.
 
+`WryWebSurfaceProducer` covers the full embeddable-webview surface, not just frame production:
+
+- **Frame acquisition** — `acquire_frame`, plus producer-specific fast paths.
+- **Layout** — `resize`, `set_offset`.
+- **Navigation** — `navigate_to_string`, `navigate_to_url`. Both block until `NavigationCompleted`.
+- **Input** — `send_mouse_input` (mouse + scroll + leave), `move_focus` (Programmatic / Next / Previous tab order).
+- **Lifecycle events** — `poll_navigation_event` drains a FIFO queue of `Starting` / `SourceChanged` / `Completed` / `TitleChanged` events.
+- **JS messaging** — `post_web_message` (Rust → JS via `window.chrome.webview` listeners), `poll_web_message` (JS → Rust via `window.chrome.webview.postMessage`).
+- **Snapshots** — `capture_snapshot_png` returns encoded PNG bytes via the underlying engine's preview API.
+
+Methods that aren't yet implemented on a given platform return [`WryWebSurfaceError::Unsupported`] rather than panicking, so consumers can probe the surface incrementally.
+
 Per-platform producer modules:
 
 | Platform | Module | Status | Capture path |
@@ -71,6 +83,6 @@ A more rigorous alternative is to share a `D3D12_FENCE_FLAG_SHARED` fence across
 
 **What this buys:** standards-correct ordering between the producer's writes and the consumer's reads (today's design relies on the consumer-side transition barrier flushing caches, which is not contractual); robustness against future driver changes; reusable for D3D12↔Vulkan / cross-process interop.
 
-**Cost:** ~150–250 lines crossing the wgpu-hal escape hatch (`device.as_hal::<Dx12>()` for the queue), `ID3D11Device5` / `ID3D11DeviceContext4` plumbing, fence-value tracking, and a pre-submit injection point (probably a tiny no-op command buffer that runs `Wait` before the real submit). The previous `windows 0.61` ↔ `windows 0.62` boundary in this crate goes away once the `webview2-com` dep is bumped to `0.39.1` (already shipped upstream, depends on `windows 0.62`); the demo crate may still see a split via `wry`'s transitive `windows 0.61` until wry bumps.
+**Cost:** ~150–250 lines crossing the wgpu-hal escape hatch (`device.as_hal::<Dx12>()` for the queue), `ID3D11Device5` / `ID3D11DeviceContext4` plumbing, fence-value tracking, and a pre-submit injection point (probably a tiny no-op command buffer that runs `Wait` before the real submit). As of 0.2.0 this crate is unified on `windows 0.62` (via `webview2-com 0.39.1`), so the typed-COM bridge is a single-version path; the `demo-wry-winit` host still pulls `windows 0.61` transitively from wry until wry bumps its own webview2-com pin, but that's a demo-side artifact, not a contract on consumers.
 
 Worth doing when (a) the adapter ships beyond this development box and a driver gives someone stale frames, (b) GraphShell's interop story expands beyond WebView2 capture, or (c) the code wants to be canonically correct rather than empirically correct.

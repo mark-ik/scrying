@@ -6,8 +6,6 @@ The name comes from *scrying* — gazing into a reflective surface for visions. 
 
 This repo was extracted from [`wgpu-graft`](https://github.com/mark-ik/wgpu-graft) on 2026-05-05 so that system-webview frame production has its own place to evolve. `wgpu-graft` continues to own the `wgpu-native-texture-interop` core (native GPU resource import/export) plus Servo-side adapters; `scrying` consumes the interop crate as a downstream consumer.
 
-> The repo is still hosted at `github.com/mark-ik/wry-scry` from the original extraction; the library crate has been renamed to `scrying`.
-
 ## Workspace
 
 | Crate | Purpose |

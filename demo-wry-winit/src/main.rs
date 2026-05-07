@@ -38,6 +38,15 @@ struct AppState {
     _queue: wgpu::Queue,
     #[cfg(target_os = "windows")]
     renderer: Option<WebViewRenderer>,
+    /// Last reported cursor position in physical pixels (host window
+    /// coordinates). Used to map mouse input into composition-WebView
+    /// space.
+    cursor: Option<winit::dpi::PhysicalPosition<f64>>,
+    /// Bitmask of currently-held mouse buttons, in the layout
+    /// `MouseVirtualKeys` expects.
+    mouse_buttons: scrying::MouseVirtualKeys,
+    /// Bitmask of currently-held modifier keys (Ctrl / Shift).
+    modifiers: scrying::MouseVirtualKeys,
 }
 
 impl ApplicationHandler for App {
@@ -83,7 +92,95 @@ impl ApplicationHandler for App {
                         if let Err(error) = renderer.render() {
                             eprintln!("demo-wry-winit: render failed: {error}");
                         }
+                        drain_composition_events(renderer);
                     }
+                }
+            }
+            #[cfg(target_os = "windows")]
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(state) = self.state.as_mut() {
+                    state.cursor = Some(position);
+                    forward_mouse_to_composition(state, scrying::MouseEventKind::Move, 0);
+                }
+            }
+            #[cfg(target_os = "windows")]
+            WindowEvent::MouseInput { state: btn_state, button, .. } => {
+                if let Some(state) = self.state.as_mut() {
+                    use winit::event::{ElementState, MouseButton};
+                    let pressed = matches!(btn_state, ElementState::Pressed);
+                    let kind = match (button, pressed) {
+                        (MouseButton::Left, true) => {
+                            state.mouse_buttons.left_button = true;
+                            scrying::MouseEventKind::LeftButtonDown
+                        }
+                        (MouseButton::Left, false) => {
+                            state.mouse_buttons.left_button = false;
+                            scrying::MouseEventKind::LeftButtonUp
+                        }
+                        (MouseButton::Right, true) => {
+                            state.mouse_buttons.right_button = true;
+                            scrying::MouseEventKind::RightButtonDown
+                        }
+                        (MouseButton::Right, false) => {
+                            state.mouse_buttons.right_button = false;
+                            scrying::MouseEventKind::RightButtonUp
+                        }
+                        (MouseButton::Middle, true) => {
+                            state.mouse_buttons.middle_button = true;
+                            scrying::MouseEventKind::MiddleButtonDown
+                        }
+                        (MouseButton::Middle, false) => {
+                            state.mouse_buttons.middle_button = false;
+                            scrying::MouseEventKind::MiddleButtonUp
+                        }
+                        _ => return,
+                    };
+                    if pressed {
+                        // Click into the composition WebView region also
+                        // hands keyboard focus to it.
+                        if let (Some(pos), Some(renderer)) =
+                            (state.cursor, state.renderer.as_mut())
+                            && composition_contains(pos)
+                        {
+                            let _ = renderer
+                                .captured
+                                .producer
+                                .move_focus(scrying::FocusReason::Programmatic);
+                        }
+                    }
+                    forward_mouse_to_composition(state, kind, 0);
+                }
+            }
+            #[cfg(target_os = "windows")]
+            WindowEvent::MouseWheel { delta, .. } => {
+                use winit::event::MouseScrollDelta;
+                if let Some(state) = self.state.as_mut() {
+                    let (kind, mouse_data) = match delta {
+                        MouseScrollDelta::LineDelta(x, y) => {
+                            // 120 units == one wheel notch, per the Win32 convention.
+                            if y.abs() >= x.abs() {
+                                (scrying::MouseEventKind::Wheel, (y * 120.0) as i32)
+                            } else {
+                                (scrying::MouseEventKind::HorizontalWheel, (x * 120.0) as i32)
+                            }
+                        }
+                        MouseScrollDelta::PixelDelta(p) => {
+                            if p.y.abs() >= p.x.abs() {
+                                (scrying::MouseEventKind::Wheel, p.y as i32)
+                            } else {
+                                (scrying::MouseEventKind::HorizontalWheel, p.x as i32)
+                            }
+                        }
+                    };
+                    forward_mouse_to_composition(state, kind, mouse_data);
+                }
+            }
+            #[cfg(target_os = "windows")]
+            WindowEvent::ModifiersChanged(modifiers) => {
+                if let Some(state) = self.state.as_mut() {
+                    let mods = modifiers.state();
+                    state.modifiers.control = mods.control_key();
+                    state.modifiers.shift = mods.shift_key();
                 }
             }
             _ => {}
@@ -165,6 +262,9 @@ impl AppState {
             _queue: queue,
             #[cfg(target_os = "windows")]
             renderer,
+            cursor: None,
+            mouse_buttons: scrying::MouseVirtualKeys::default(),
+            modifiers: scrying::MouseVirtualKeys::default(),
         })
     }
 }
@@ -177,6 +277,72 @@ const COMPOSITION_PROBE_Y: f32 = 48.0;
 const COMPOSITION_PROBE_WIDTH: f32 = 420.0;
 #[cfg(target_os = "windows")]
 const COMPOSITION_PROBE_HEIGHT: f32 = 260.0;
+
+#[cfg(target_os = "windows")]
+fn composition_contains(pos: winit::dpi::PhysicalPosition<f64>) -> bool {
+    let x = pos.x as f32;
+    let y = pos.y as f32;
+    x >= COMPOSITION_PROBE_X
+        && x < COMPOSITION_PROBE_X + COMPOSITION_PROBE_WIDTH
+        && y >= COMPOSITION_PROBE_Y
+        && y < COMPOSITION_PROBE_Y + COMPOSITION_PROBE_HEIGHT
+}
+
+#[cfg(target_os = "windows")]
+fn forward_mouse_to_composition(
+    state: &mut AppState,
+    kind: scrying::MouseEventKind,
+    mouse_data: i32,
+) {
+    let Some(pos) = state.cursor else {
+        return;
+    };
+    let Some(renderer) = state.renderer.as_mut() else {
+        return;
+    };
+    if !composition_contains(pos) {
+        return;
+    }
+    let local_x = (pos.x as f32 - COMPOSITION_PROBE_X) as i32;
+    let local_y = (pos.y as f32 - COMPOSITION_PROBE_Y) as i32;
+    let mut virtual_keys = state.modifiers;
+    virtual_keys.left_button = state.mouse_buttons.left_button;
+    virtual_keys.right_button = state.mouse_buttons.right_button;
+    virtual_keys.middle_button = state.mouse_buttons.middle_button;
+    let event = scrying::MouseInput {
+        kind,
+        virtual_keys,
+        mouse_data,
+        point: (local_x, local_y),
+    };
+    if let Err(error) = renderer.captured.producer.send_mouse_input(event) {
+        eprintln!("demo-wry-winit: send_mouse_input failed: {error}");
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn drain_composition_events(renderer: &mut WebViewRenderer) {
+    while let Some(event) = renderer.captured.producer.poll_navigation_event() {
+        match event {
+            scrying::NavigationEvent::Starting { url } => {
+                println!("[nav] starting -> {url}");
+            }
+            scrying::NavigationEvent::SourceChanged { url } => {
+                println!("[nav] source changed -> {url}");
+            }
+            scrying::NavigationEvent::Completed { url, success } => {
+                println!("[nav] completed (success={success}) -> {url}");
+            }
+            scrying::NavigationEvent::TitleChanged { title } => {
+                println!("[nav] title -> {title}");
+            }
+            _ => {}
+        }
+    }
+    while let Some(message) = renderer.captured.producer.poll_web_message() {
+        println!("[web message] {message}");
+    }
+}
 
 const PROBE_Y: i32 = 48;
 const WRY_PROBE_X: i32 = 24;

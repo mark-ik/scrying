@@ -17,35 +17,44 @@
 //! 6. Receive a `Bgra8Unorm` frame.
 //! 7. Bridge D3D11 capture output into a DX12-importable native frame.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use dpi::PhysicalSize;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2, ICoreWebView2CompositionController, ICoreWebView2Controller,
-    ICoreWebView2Environment, ICoreWebView2Environment3, ICoreWebView2EnvironmentOptions,
+    COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, COREWEBVIEW2_MOUSE_EVENT_KIND,
+    COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS, COREWEBVIEW2_MOVE_FOCUS_REASON, ICoreWebView2,
+    ICoreWebView2CompositionController, ICoreWebView2Controller, ICoreWebView2Environment,
+    ICoreWebView2Environment3, ICoreWebView2EnvironmentOptions,
 };
 use webview2_com::{
     CoTaskMemPWSTR, CoreWebView2EnvironmentOptions,
     CreateCoreWebView2CompositionControllerCompletedHandler,
-    CreateCoreWebView2EnvironmentCompletedHandler, ExecuteScriptCompletedHandler,
-    NavigationCompletedEventHandler,
+    CreateCoreWebView2EnvironmentCompletedHandler, DocumentTitleChangedEventHandler,
+    ExecuteScriptCompletedHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler,
+    SourceChangedEventHandler, WebMessageReceivedEventHandler,
 };
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
 use windows::Graphics::DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat};
 use windows::UI::Composition::{Compositor, ContainerVisual, Visual};
-use windows::Win32::Foundation::{E_POINTER, HWND, RECT};
+use windows::Win32::Foundation::{E_POINTER, HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+use windows::Win32::System::Com::{CoTaskMemFree, IStream};
+use windows::Win32::System::Com::StructuredStorage::{CreateStreamOnHGlobal, GetHGlobalFromStream};
+use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
 use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
 };
-use windows::core::{Interface, PCWSTR};
+use windows::core::{Interface, PCWSTR, PWSTR};
 use windows_numerics::{Vector2, Vector3};
+
+use crate::{FocusReason, MouseEventKind, MouseInput, NavigationEvent};
 
 use crate::windows_capture::{
     D3D11SharedTexture, D3D11SharedTextureFactory, WebView2D3D11CaptureFrame,
@@ -147,6 +156,17 @@ pub struct WebView2CompositionProducer {
     capture_device: IDirect3DDevice,
     capture_state: Option<CaptureState>,
     persistent_dest: Option<PersistentDest>,
+
+    // Persistent event queues drained by `poll_navigation_event` and
+    // `poll_web_message`. Handler closures own clones of these `Arc`s and
+    // push from the COM thread; consumer code drains from any thread.
+    nav_event_queue: Arc<Mutex<VecDeque<NavigationEvent>>>,
+    web_message_queue: Arc<Mutex<VecDeque<String>>>,
+    nav_starting_token: i64,
+    nav_completed_token: i64,
+    source_changed_token: i64,
+    title_changed_token: i64,
+    web_message_token: i64,
 }
 
 /// A reusable shared D3D11 destination texture and its NT handle. The handle
@@ -283,6 +303,23 @@ impl WebView2CompositionProducer {
         let capture_factory = D3D11SharedTextureFactory::new_hardware()?;
         let capture_device = capture_factory.create_winrt_direct3d_device()?;
 
+        let nav_event_queue: Arc<Mutex<VecDeque<NavigationEvent>>> =
+            Arc::new(Mutex::new(VecDeque::new()));
+        let web_message_queue: Arc<Mutex<VecDeque<String>>> =
+            Arc::new(Mutex::new(VecDeque::new()));
+
+        let (
+            nav_starting_token,
+            nav_completed_token,
+            source_changed_token,
+            title_changed_token,
+            web_message_token,
+        ) = register_persistent_handlers(
+            &webview,
+            nav_event_queue.clone(),
+            web_message_queue.clone(),
+        )?;
+
         Ok(Self {
             parent_hwnd,
             size: config.size,
@@ -299,6 +336,13 @@ impl WebView2CompositionProducer {
             capture_device,
             capture_state: None,
             persistent_dest: None,
+            nav_event_queue,
+            web_message_queue,
+            nav_starting_token,
+            nav_completed_token,
+            source_changed_token,
+            title_changed_token,
+            web_message_token,
         })
     }
 
@@ -356,6 +400,175 @@ impl WebView2CompositionProducer {
         }))()"#
             .to_string();
         execute_script_blocking(&self.webview, script)
+    }
+
+    /// Navigate the underlying WebView2 to a URL and block until
+    /// `NavigationCompleted` fires (or the timeout elapses). The
+    /// completion signal is delivered via the persistent
+    /// `NavigationCompleted` handler — drain
+    /// [`Self::poll_navigation_event`] separately if the consumer also
+    /// wants the structured event for UI state.
+    pub fn navigate_to_url(
+        &self,
+        url: &str,
+        timeout: Duration,
+    ) -> Result<(), WryWebSurfaceError> {
+        let (tx, rx) = mpsc::channel::<()>();
+        let mut navigation_token = 0;
+        let handler = NavigationCompletedEventHandler::create(Box::new(move |_sender, _args| {
+            let _ = tx.send(());
+            Ok(())
+        }));
+
+        unsafe {
+            self.webview
+                .add_NavigationCompleted(&handler, &mut navigation_token)
+                .map_err(platform("add_NavigationCompleted (navigate_to_url)"))?;
+            let url = CoTaskMemPWSTR::from(url);
+            self.webview
+                .Navigate(*url.as_ref().as_pcwstr())
+                .map_err(platform("Navigate"))?;
+        }
+
+        let result = pump_until(timeout, &rx);
+
+        unsafe {
+            let _ = self
+                .webview
+                .remove_NavigationCompleted(navigation_token)
+                .map_err(webview2_com::Error::WindowsError);
+        }
+
+        result.map_err(|()| {
+            WryWebSurfaceError::Platform(format!(
+                "WebView2 navigation did not complete within {timeout:?}"
+            ))
+        })?;
+
+        // Same render-tick wait as navigate_to_string so callers don't
+        // see a blank visual immediately after navigation.
+        self.wait_for_render_tick()
+    }
+
+    /// Forward a mouse / scroll event to the composition WebView2.
+    ///
+    /// `event.point` is in physical pixels relative to the webview's
+    /// top-left corner (the same coordinate space the controller's
+    /// `Bounds` uses).
+    pub fn send_mouse_input(&self, event: MouseInput) -> Result<(), WryWebSurfaceError> {
+        let kind = mouse_event_kind(event.kind);
+        let virtual_keys = COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(virtual_keys_bits(event.virtual_keys) as i32);
+        let point = POINT {
+            x: event.point.0,
+            y: event.point.1,
+        };
+        unsafe {
+            self.composition_controller
+                .SendMouseInput(kind, virtual_keys, event.mouse_data as u32, point)
+                .map_err(platform("SendMouseInput"))
+        }
+    }
+
+    /// Move keyboard focus into the WebView2.
+    pub fn move_focus(&self, reason: FocusReason) -> Result<(), WryWebSurfaceError> {
+        let reason = focus_reason(reason);
+        unsafe {
+            self.controller
+                .MoveFocus(reason)
+                .map_err(platform("MoveFocus"))
+        }
+    }
+
+    /// Drain the next pending [`NavigationEvent`] from the producer's
+    /// queue. Returns `None` when no event is available. Events are
+    /// pushed FIFO from the COM thread by handlers registered in
+    /// `new`.
+    pub fn poll_navigation_event(&self) -> Option<NavigationEvent> {
+        self.nav_event_queue.lock().ok()?.pop_front()
+    }
+
+    /// Post a string message into `window.chrome.webview` for the page's
+    /// `addEventListener("message", ...)` handlers to consume.
+    pub fn post_web_message(&self, message: &str) -> Result<(), WryWebSurfaceError> {
+        let message = CoTaskMemPWSTR::from(message);
+        unsafe {
+            self.webview
+                .PostWebMessageAsString(*message.as_ref().as_pcwstr())
+                .map_err(platform("PostWebMessageAsString"))
+        }
+    }
+
+    /// Drain the next pending message posted from JS via
+    /// `window.chrome.webview.postMessage(...)`. Returns `None` when no
+    /// message is queued.
+    pub fn poll_web_message(&self) -> Option<String> {
+        self.web_message_queue.lock().ok()?.pop_front()
+    }
+
+    /// Take a one-shot PNG snapshot of the current document via
+    /// `ICoreWebView2::CapturePreview`. Returns the encoded PNG bytes.
+    /// The webview must have completed at least one navigation; calling
+    /// this against a newly-constructed producer that has not navigated
+    /// yields an empty / failed snapshot.
+    pub fn capture_snapshot_png(&self) -> Result<Vec<u8>, WryWebSurfaceError> {
+        let stream: IStream =
+            unsafe { CreateStreamOnHGlobal(windows::Win32::Foundation::HGLOBAL::default(), true) }
+                .map_err(platform("CreateStreamOnHGlobal"))?;
+        let (tx, rx) = mpsc::channel::<windows::core::Result<()>>();
+        let handler = webview2_com::CapturePreviewCompletedHandler::create(Box::new(
+            move |result: windows::core::Result<()>| {
+                let _ = tx.send(result);
+                Ok(())
+            },
+        ));
+        unsafe {
+            self.webview
+                .CapturePreview(
+                    COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+                    &stream,
+                    &handler,
+                )
+                .map_err(platform("CapturePreview"))?;
+        }
+
+        // Pump messages until the async completion handler fires. We
+        // don't accept a timeout here because PNG snapshot is a
+        // one-shot diagnostic; consumers that need bounded latency
+        // should wrap this in their own timeout / thread.
+        loop {
+            pump_messages_for(Duration::from_millis(16));
+            match rx.try_recv() {
+                Ok(result) => {
+                    result.map_err(platform("CapturePreview completion"))?;
+                    break;
+                }
+                Err(mpsc::TryRecvError::Empty) => continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(WryWebSurfaceError::Platform(
+                        "CapturePreview completion channel closed unexpectedly".into(),
+                    ));
+                }
+            }
+        }
+
+        // Read the stream's HGLOBAL contents into a Vec<u8>.
+        unsafe {
+            let hglobal = GetHGlobalFromStream(&stream)
+                .map_err(platform("GetHGlobalFromStream"))?;
+            let size = GlobalSize(hglobal);
+            if size == 0 {
+                return Ok(Vec::new());
+            }
+            let ptr = GlobalLock(hglobal);
+            if ptr.is_null() {
+                return Err(WryWebSurfaceError::Platform(
+                    "GlobalLock returned null".into(),
+                ));
+            }
+            let bytes = std::slice::from_raw_parts(ptr as *const u8, size).to_vec();
+            let _ = GlobalUnlock(hglobal);
+            Ok(bytes)
+        }
     }
 
     /// Tear down the capture session + frame pool. The next call to
@@ -805,6 +1018,13 @@ impl Drop for WebView2CompositionProducer {
             let _ = state;
         }
         unsafe {
+            let _ = self.webview.remove_NavigationStarting(self.nav_starting_token);
+            let _ = self.webview.remove_NavigationCompleted(self.nav_completed_token);
+            let _ = self.webview.remove_SourceChanged(self.source_changed_token);
+            let _ = self
+                .webview
+                .remove_DocumentTitleChanged(self.title_changed_token);
+            let _ = self.webview.remove_WebMessageReceived(self.web_message_token);
             let _ = self.controller.Close();
         }
     }
@@ -853,6 +1073,38 @@ impl crate::WryWebSurfaceProducer for WebView2CompositionProducer {
 
     fn set_offset(&mut self, x: f32, y: f32) -> Result<(), WryWebSurfaceError> {
         WebView2CompositionProducer::set_offset(self, x, y)
+    }
+
+    fn navigate_to_url(
+        &mut self,
+        url: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), WryWebSurfaceError> {
+        WebView2CompositionProducer::navigate_to_url(self, url, timeout)
+    }
+
+    fn send_mouse_input(&mut self, event: MouseInput) -> Result<(), WryWebSurfaceError> {
+        WebView2CompositionProducer::send_mouse_input(self, event)
+    }
+
+    fn move_focus(&mut self, reason: FocusReason) -> Result<(), WryWebSurfaceError> {
+        WebView2CompositionProducer::move_focus(self, reason)
+    }
+
+    fn poll_navigation_event(&mut self) -> Option<NavigationEvent> {
+        WebView2CompositionProducer::poll_navigation_event(self)
+    }
+
+    fn post_web_message(&mut self, message: &str) -> Result<(), WryWebSurfaceError> {
+        WebView2CompositionProducer::post_web_message(self, message)
+    }
+
+    fn poll_web_message(&mut self) -> Option<String> {
+        WebView2CompositionProducer::poll_web_message(self)
+    }
+
+    fn capture_snapshot_png(&mut self) -> Result<Vec<u8>, WryWebSurfaceError> {
+        WebView2CompositionProducer::capture_snapshot_png(self)
     }
 }
 
@@ -990,4 +1242,233 @@ fn pump_until(timeout: Duration, rx: &mpsc::Receiver<()>) -> Result<(), ()> {
 
 fn platform<E: std::fmt::Display>(context: &'static str) -> impl FnOnce(E) -> WryWebSurfaceError {
     move |error| WryWebSurfaceError::Platform(format!("{context} failed: {error}"))
+}
+
+unsafe fn consume_pwstr(p: PWSTR) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    let s = unsafe { p.to_string() }.unwrap_or_default();
+    unsafe { CoTaskMemFree(Some(p.0 as *const _)) };
+    s
+}
+
+fn mouse_event_kind(kind: MouseEventKind) -> COREWEBVIEW2_MOUSE_EVENT_KIND {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_MOUSE_EVENT_KIND_HORIZONTAL_WHEEL,
+        COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
+        COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOUBLE_CLICK,
+        COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOWN,
+        COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_UP,
+        COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_DOUBLE_CLICK,
+        COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_DOWN,
+        COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_UP, COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
+        COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOUBLE_CLICK,
+        COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOWN,
+        COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_UP, COREWEBVIEW2_MOUSE_EVENT_KIND_WHEEL,
+        COREWEBVIEW2_MOUSE_EVENT_KIND_X_BUTTON_DOUBLE_CLICK,
+        COREWEBVIEW2_MOUSE_EVENT_KIND_X_BUTTON_DOWN, COREWEBVIEW2_MOUSE_EVENT_KIND_X_BUTTON_UP,
+    };
+    match kind {
+        MouseEventKind::LeftButtonDown => COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOWN,
+        MouseEventKind::LeftButtonUp => COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_UP,
+        MouseEventKind::LeftButtonDoubleClick => {
+            COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOUBLE_CLICK
+        }
+        MouseEventKind::MiddleButtonDown => COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_DOWN,
+        MouseEventKind::MiddleButtonUp => COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_UP,
+        MouseEventKind::MiddleButtonDoubleClick => {
+            COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_DOUBLE_CLICK
+        }
+        MouseEventKind::RightButtonDown => COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOWN,
+        MouseEventKind::RightButtonUp => COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_UP,
+        MouseEventKind::RightButtonDoubleClick => {
+            COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOUBLE_CLICK
+        }
+        MouseEventKind::XButtonDown => COREWEBVIEW2_MOUSE_EVENT_KIND_X_BUTTON_DOWN,
+        MouseEventKind::XButtonUp => COREWEBVIEW2_MOUSE_EVENT_KIND_X_BUTTON_UP,
+        MouseEventKind::XButtonDoubleClick => COREWEBVIEW2_MOUSE_EVENT_KIND_X_BUTTON_DOUBLE_CLICK,
+        MouseEventKind::Move => COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
+        MouseEventKind::Wheel => COREWEBVIEW2_MOUSE_EVENT_KIND_WHEEL,
+        MouseEventKind::HorizontalWheel => COREWEBVIEW2_MOUSE_EVENT_KIND_HORIZONTAL_WHEEL,
+        MouseEventKind::Leave => COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
+    }
+}
+
+fn virtual_keys_bits(keys: crate::MouseVirtualKeys) -> u32 {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_CONTROL,
+        COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_LEFT_BUTTON,
+        COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_MIDDLE_BUTTON,
+        COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_RIGHT_BUTTON,
+        COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_SHIFT,
+        COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_X_BUTTON1,
+        COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_X_BUTTON2,
+    };
+    let mut bits = 0u32;
+    if keys.control {
+        bits |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_CONTROL.0 as u32;
+    }
+    if keys.shift {
+        bits |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_SHIFT.0 as u32;
+    }
+    if keys.left_button {
+        bits |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_LEFT_BUTTON.0 as u32;
+    }
+    if keys.middle_button {
+        bits |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_MIDDLE_BUTTON.0 as u32;
+    }
+    if keys.right_button {
+        bits |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_RIGHT_BUTTON.0 as u32;
+    }
+    if keys.x_button1 {
+        bits |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_X_BUTTON1.0 as u32;
+    }
+    if keys.x_button2 {
+        bits |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_X_BUTTON2.0 as u32;
+    }
+    bits
+}
+
+fn focus_reason(reason: FocusReason) -> COREWEBVIEW2_MOVE_FOCUS_REASON {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT, COREWEBVIEW2_MOVE_FOCUS_REASON_PREVIOUS,
+        COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
+    };
+    match reason {
+        FocusReason::Programmatic => COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
+        FocusReason::Next => COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT,
+        FocusReason::Previous => COREWEBVIEW2_MOVE_FOCUS_REASON_PREVIOUS,
+    }
+}
+
+fn register_persistent_handlers(
+    webview: &ICoreWebView2,
+    nav_queue: Arc<Mutex<VecDeque<NavigationEvent>>>,
+    web_message_queue: Arc<Mutex<VecDeque<String>>>,
+) -> Result<(i64, i64, i64, i64, i64), WryWebSurfaceError> {
+    // NavigationStarting -> NavigationEvent::Starting { url }
+    let queue = nav_queue.clone();
+    let nav_starting_handler = NavigationStartingEventHandler::create(Box::new(move |_, args| {
+        if let Some(args) = args {
+            let mut uri = PWSTR::null();
+            if unsafe { args.Uri(&mut uri) }.is_ok() {
+                let url = unsafe { consume_pwstr(uri) };
+                if let Ok(mut q) = queue.lock() {
+                    q.push_back(NavigationEvent::Starting { url });
+                }
+            }
+        }
+        Ok(())
+    }));
+    let mut nav_starting_token = 0i64;
+    unsafe {
+        webview
+            .add_NavigationStarting(&nav_starting_handler, &mut nav_starting_token)
+            .map_err(platform("add_NavigationStarting"))?;
+    }
+
+    // NavigationCompleted -> NavigationEvent::Completed { url, success }
+    let queue = nav_queue.clone();
+    let webview_for_handler = webview.clone();
+    let nav_completed_handler =
+        NavigationCompletedEventHandler::create(Box::new(move |_, args| {
+            let success = args
+                .as_ref()
+                .and_then(|a| {
+                    let mut b = windows::core::BOOL::default();
+                    unsafe { a.IsSuccess(&mut b) }.ok().map(|()| b.as_bool())
+                })
+                .unwrap_or(false);
+            let mut source = PWSTR::null();
+            let url = if unsafe { webview_for_handler.Source(&mut source) }.is_ok() {
+                unsafe { consume_pwstr(source) }
+            } else {
+                String::new()
+            };
+            if let Ok(mut q) = queue.lock() {
+                q.push_back(NavigationEvent::Completed { url, success });
+            }
+            Ok(())
+        }));
+    let mut nav_completed_token = 0i64;
+    unsafe {
+        webview
+            .add_NavigationCompleted(&nav_completed_handler, &mut nav_completed_token)
+            .map_err(platform("add_NavigationCompleted (persistent)"))?;
+    }
+
+    // SourceChanged -> NavigationEvent::SourceChanged { url }
+    let queue = nav_queue.clone();
+    let webview_for_handler = webview.clone();
+    let source_changed_handler = SourceChangedEventHandler::create(Box::new(move |_, _args| {
+        let mut source = PWSTR::null();
+        let url = if unsafe { webview_for_handler.Source(&mut source) }.is_ok() {
+            unsafe { consume_pwstr(source) }
+        } else {
+            String::new()
+        };
+        if let Ok(mut q) = queue.lock() {
+            q.push_back(NavigationEvent::SourceChanged { url });
+        }
+        Ok(())
+    }));
+    let mut source_changed_token = 0i64;
+    unsafe {
+        webview
+            .add_SourceChanged(&source_changed_handler, &mut source_changed_token)
+            .map_err(platform("add_SourceChanged"))?;
+    }
+
+    // DocumentTitleChanged -> NavigationEvent::TitleChanged { title }
+    let queue = nav_queue;
+    let webview_for_handler = webview.clone();
+    let title_changed_handler =
+        DocumentTitleChangedEventHandler::create(Box::new(move |_, _args| {
+            let mut title_pw = PWSTR::null();
+            let title = if unsafe { webview_for_handler.DocumentTitle(&mut title_pw) }.is_ok() {
+                unsafe { consume_pwstr(title_pw) }
+            } else {
+                String::new()
+            };
+            if let Ok(mut q) = queue.lock() {
+                q.push_back(NavigationEvent::TitleChanged { title });
+            }
+            Ok(())
+        }));
+    let mut title_changed_token = 0i64;
+    unsafe {
+        webview
+            .add_DocumentTitleChanged(&title_changed_handler, &mut title_changed_token)
+            .map_err(platform("add_DocumentTitleChanged"))?;
+    }
+
+    // WebMessageReceived -> string queue
+    let queue = web_message_queue;
+    let web_message_handler = WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
+        if let Some(args) = args {
+            let mut message = PWSTR::null();
+            if unsafe { args.TryGetWebMessageAsString(&mut message) }.is_ok() {
+                let s = unsafe { consume_pwstr(message) };
+                if let Ok(mut q) = queue.lock() {
+                    q.push_back(s);
+                }
+            }
+        }
+        Ok(())
+    }));
+    let mut web_message_token = 0i64;
+    unsafe {
+        webview
+            .add_WebMessageReceived(&web_message_handler, &mut web_message_token)
+            .map_err(platform("add_WebMessageReceived"))?;
+    }
+
+    Ok((
+        nav_starting_token,
+        nav_completed_token,
+        source_changed_token,
+        title_changed_token,
+        web_message_token,
+    ))
 }
