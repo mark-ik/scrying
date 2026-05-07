@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 #[cfg(target_os = "windows")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+#[cfg(target_os = "windows")]
+use wgpu_native_texture_interop::Dx12FenceSynchronizer;
 use wgpu_native_texture_interop::{
     HostWgpuContext, ImportOptions, TextureImporter, WgpuTextureImporter,
 };
@@ -238,8 +240,49 @@ impl AppState {
         #[cfg(target_os = "windows")]
         run_windows_shared_texture_probe(&window, &webview, &host)?;
 
+        // Opt into the explicit-fence cross-API sync path
+        // (wgpu D3D12 `Wait` on a `D3D12_FENCE_FLAG_SHARED` fence the WebView2
+        // producer signals after `CopyResource`). Disabled by default so the
+        // existing keyed-mutex + CPU-spin path stays the verified default.
+        // Setting `WEBVIEW_FENCE_SYNC=1` enables it. Mutually exclusive with
+        // `WEBVIEW_READBACK_VALIDATE` because that path uses a separate
+        // importer that doesn't carry the synchronizer.
         #[cfg(target_os = "windows")]
-        let captured = run_webview2_composition_visual_probe(&window, &host)?;
+        let fence_synchronizer: Option<Dx12FenceSynchronizer> = if std::env::var(
+            "WEBVIEW_FENCE_SYNC",
+        )
+        .ok()
+        .filter(|v| !v.is_empty() && v != "0")
+        .is_some()
+        {
+            if std::env::var("WEBVIEW_READBACK_VALIDATE")
+                .ok()
+                .filter(|v| !v.is_empty() && v != "0")
+                .is_some()
+            {
+                println!(
+                    "WEBVIEW_FENCE_SYNC ignored: incompatible with WEBVIEW_READBACK_VALIDATE (separate importer)"
+                );
+                None
+            } else {
+                let sync = Dx12FenceSynchronizer::new(&host)?;
+                println!(
+                    "WEBVIEW_FENCE_SYNC enabled: shared fence handle {:p}",
+                    sync.shared_handle().0
+                );
+                Some(sync)
+            }
+        } else {
+            None
+        };
+
+        #[cfg(target_os = "windows")]
+        let fence_handle = fence_synchronizer
+            .as_ref()
+            .map(|s| s.shared_handle().0 as *mut std::ffi::c_void);
+
+        #[cfg(target_os = "windows")]
+        let captured = run_webview2_composition_visual_probe(&window, &host, fence_handle)?;
 
         #[cfg(target_os = "windows")]
         let renderer = match captured {
@@ -248,6 +291,7 @@ impl AppState {
                 window.clone(),
                 host.clone(),
                 captured,
+                fence_synchronizer,
             )?),
             None => {
                 drop(instance);
@@ -622,6 +666,7 @@ struct CapturedComposition {
 fn run_webview2_composition_visual_probe(
     window: &Window,
     host: &HostWgpuContext,
+    fence_shared_handle: Option<*mut std::ffi::c_void>,
 ) -> Result<Option<CapturedComposition>, Box<dyn std::error::Error>> {
     use windows::Win32::System::WinRT::{
         CreateDispatcherQueueController, DQTAT_COM_STA, DQTYPE_THREAD_CURRENT,
@@ -650,12 +695,15 @@ fn run_webview2_composition_visual_probe(
     };
 
     let user_data_dir = std::env::temp_dir().join("demo-wry-winit-composition-controller-webview2");
-    let config = WebView2CompositionConfig::new(
+    let mut config = WebView2CompositionConfig::new(
         winit::dpi::PhysicalSize::new(COMPOSITION_PROBE_WIDTH as u32, COMPOSITION_PROBE_HEIGHT as u32),
         user_data_dir,
     )
     .with_offset(COMPOSITION_PROBE_X, COMPOSITION_PROBE_Y)
     .with_diagnostic_backdrop((27, 86, 96));
+    if let Some(handle) = fence_shared_handle {
+        config = config.with_fence_shared_handle(handle);
+    }
 
     let producer = unsafe { WebView2CompositionProducer::new(parent_hwnd, config)? };
     producer.navigate_to_string(COMPOSITION_WEBVIEW_PROBE_HTML, std::time::Duration::from_secs(5))?;
@@ -957,10 +1005,16 @@ impl WebViewRenderer {
         window: Arc<Window>,
         host: HostWgpuContext,
         captured: CapturedComposition,
+        fence_synchronizer: Option<Dx12FenceSynchronizer>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let device = host.device.clone();
         let queue = host.queue.clone();
-        let importer = WgpuTextureImporter::new(host.clone());
+        let importer = match fence_synchronizer {
+            Some(sync) => {
+                WgpuTextureImporter::with_synchronizer(host.clone(), Box::new(sync))
+            }
+            None => WgpuTextureImporter::new(host.clone()),
+        };
         let surface = instance.create_surface(window.clone())?;
         let size = window.inner_size();
 

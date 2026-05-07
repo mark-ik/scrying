@@ -5,6 +5,9 @@
 //! adapter must bridge them into a D3D12 shared texture before handing them to
 //! `wgpu-native-texture-interop`.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use dpi::PhysicalSize;
 use wgpu_native_texture_interop::{Dx12SharedTexture, NativeFrame, SyncMechanism};
 use windows::Win32::{
@@ -16,10 +19,11 @@ use windows::Win32::{
         },
         Direct3D11::{
             D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            D3D11_QUERY_DESC, D3D11_QUERY_EVENT, D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,
-            D3D11_RESOURCE_MISC_SHARED_NTHANDLE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-            D3D11_USAGE_DEFAULT, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
-            ID3D11Texture2D,
+            D3D11_QUERY_DESC, D3D11_QUERY_EVENT, D3D11_RESOURCE_MISC_SHARED,
+            D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX, D3D11_RESOURCE_MISC_SHARED_NTHANDLE,
+            D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+            D3D11_USAGE_DEFAULT, D3D11CreateDevice, ID3D11Device, ID3D11Device5,
+            ID3D11DeviceContext, ID3D11DeviceContext4, ID3D11Fence, ID3D11Texture2D,
         },
         Dxgi::{
             Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC},
@@ -60,47 +64,139 @@ pub struct WebView2D3D11CaptureFrame {
 /// the producer needs once it receives `Direct3D11CaptureFrame.Surface` from
 /// `Windows.Graphics.Capture`: either export a compatible capture texture
 /// directly or copy the capture texture into a texture allocated here.
+///
+/// Two cross-API sync paths are supported:
+///
+/// - **Keyed-mutex (default)** — the destination textures are allocated with
+///   `D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX`; per-frame copies bracket
+///   `CopyResource` with `AcquireSync`/`ReleaseSync` and a CPU-side
+///   `D3D11_QUERY_EVENT` spin to drain the GPU before handoff. This is the
+///   path you get from [`new_hardware`](Self::new_hardware).
+/// - **Explicit fence** — a `D3D12_FENCE_FLAG_SHARED` fence created on the
+///   consumer's wgpu D3D12 device is opened on the producer's D3D11 device
+///   via `ID3D11Device5::OpenSharedFence`; per-frame copies signal the
+///   fence after `CopyResource` and the consumer's
+///   `Dx12FenceSynchronizer::producer_complete` queues
+///   `ID3D12CommandQueue::Wait` before its next submit. This is the path
+///   you get from [`new_hardware_with_fence`](Self::new_hardware_with_fence).
+///
+/// Fence mode drops the keyed-mutex flag from the destination texture
+/// allocation and removes the producer-side CPU spin.
 #[derive(Clone, Debug)]
 pub struct D3D11SharedTextureFactory {
     device: ID3D11Device,
-    #[allow(dead_code)]
     context: ID3D11DeviceContext,
+    fence: Option<Arc<FenceMode>>,
+}
+
+#[derive(Debug)]
+struct FenceMode {
+    #[allow(dead_code)]
+    device5: ID3D11Device5,
+    context4: ID3D11DeviceContext4,
+    signaler: D3D11FenceSignaler,
+}
+
+#[derive(Debug)]
+struct D3D11FenceSignaler {
+    fence: ID3D11Fence,
+    next_value: AtomicU64,
+}
+
+impl D3D11FenceSignaler {
+    fn open_from_shared_handle(
+        device5: &ID3D11Device5,
+        shared_handle: *mut std::ffi::c_void,
+    ) -> Result<Self, WryWebSurfaceError> {
+        if shared_handle.is_null() {
+            return Err(WryWebSurfaceError::Platform(
+                "fence shared handle was null".to_string(),
+            ));
+        }
+        let mut fence: Option<ID3D11Fence> = None;
+        unsafe {
+            device5
+                .OpenSharedFence(HANDLE(shared_handle), &mut fence)
+                .map_err(|error| {
+                    WryWebSurfaceError::Platform(format!(
+                        "ID3D11Device5::OpenSharedFence failed: {error}"
+                    ))
+                })?;
+        }
+        let fence = fence.ok_or_else(|| {
+            WryWebSurfaceError::Platform(
+                "ID3D11Device5::OpenSharedFence returned null fence".to_string(),
+            )
+        })?;
+        Ok(Self {
+            fence,
+            next_value: AtomicU64::new(0),
+        })
+    }
+
+    fn signal(&self, ctx4: &ID3D11DeviceContext4) -> Result<u64, WryWebSurfaceError> {
+        let value = self.next_value.fetch_add(1, Ordering::SeqCst) + 1;
+        unsafe {
+            ctx4.Signal(&self.fence, value).map_err(|error| {
+                WryWebSurfaceError::Platform(format!(
+                    "ID3D11DeviceContext4::Signal({value}) failed: {error}"
+                ))
+            })?;
+        }
+        Ok(value)
+    }
 }
 
 impl D3D11SharedTextureFactory {
     pub fn new_hardware() -> Result<Self, WryWebSurfaceError> {
-        let mut device = None;
-        let mut context = None;
-        let mut feature_level = D3D_FEATURE_LEVEL::default();
-        let feature_levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
-
-        unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&feature_levels),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                Some(&mut feature_level),
-                Some(&mut context),
-            )
-        }
-        .map_err(|error| {
-            WryWebSurfaceError::Platform(format!("D3D11CreateDevice failed: {error}"))
-        })?;
-
+        let (device, context) = create_d3d11_hardware_device()?;
         Ok(Self {
-            device: device.ok_or_else(|| {
-                WryWebSurfaceError::Platform("D3D11CreateDevice returned no device".to_string())
-            })?,
-            context: context.ok_or_else(|| {
-                WryWebSurfaceError::Platform(
-                    "D3D11CreateDevice returned no immediate context".to_string(),
-                )
-            })?,
+            device,
+            context,
+            fence: None,
         })
+    }
+
+    /// Same as [`new_hardware`](Self::new_hardware) but enables explicit-fence
+    /// mode using the consumer-supplied shared fence handle (typically from
+    /// `Dx12FenceSynchronizer::shared_handle`). Per-frame copies will signal
+    /// the fence after `CopyResource` instead of acquiring/releasing a keyed
+    /// mutex and CPU-spinning.
+    pub fn new_hardware_with_fence(
+        fence_shared_handle: *mut std::ffi::c_void,
+    ) -> Result<Self, WryWebSurfaceError> {
+        let (device, context) = create_d3d11_hardware_device()?;
+        let device5 = device.cast::<ID3D11Device5>().map_err(|error| {
+            WryWebSurfaceError::Platform(format!(
+                "ID3D11Device cast to ID3D11Device5 failed (Windows 10 1809+ required): {error}"
+            ))
+        })?;
+        let context4 = context.cast::<ID3D11DeviceContext4>().map_err(|error| {
+            WryWebSurfaceError::Platform(format!(
+                "ID3D11DeviceContext cast to ID3D11DeviceContext4 failed: {error}"
+            ))
+        })?;
+        let signaler = D3D11FenceSignaler::open_from_shared_handle(&device5, fence_shared_handle)?;
+        Ok(Self {
+            device,
+            context,
+            fence: Some(Arc::new(FenceMode {
+                device5,
+                context4,
+                signaler,
+            })),
+        })
+    }
+
+    /// Returns the [`SyncMechanism`] this factory is configured for. Producers
+    /// stamp this onto frames so the consumer's synchronizer knows whether to
+    /// expect a fence wait.
+    pub fn sync_mechanism(&self) -> SyncMechanism {
+        if self.fence.is_some() {
+            SyncMechanism::ExplicitFence
+        } else {
+            SyncMechanism::None
+        }
     }
 
     pub fn create_shared_texture_frame(
@@ -121,6 +217,18 @@ impl D3D11SharedTextureFactory {
         generation: u64,
     ) -> Result<D3D11SharedTexture, WryWebSurfaceError> {
         let dxgi_format = dxgi_format_for_wgpu(format)?;
+        // D3D11_RESOURCE_MISC_SHARED_NTHANDLE requires either SHARED or
+        // SHARED_KEYEDMUTEX alongside it — NT-handle sharing isn't valid
+        // on its own. Fence mode pairs NTHANDLE with the bare SHARED
+        // bit (ordering comes from the explicit fence wait); keyed-mutex
+        // mode pairs it with SHARED_KEYEDMUTEX so producer/consumer
+        // serialize through AcquireSync/ReleaseSync.
+        let mut misc_flags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0 as u32;
+        if self.fence.is_none() {
+            misc_flags |= D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX.0 as u32;
+        } else {
+            misc_flags |= D3D11_RESOURCE_MISC_SHARED.0 as u32;
+        }
         let desc = D3D11_TEXTURE2D_DESC {
             Width: size.width,
             Height: size.height,
@@ -134,8 +242,7 @@ impl D3D11SharedTextureFactory {
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
             CPUAccessFlags: 0,
-            MiscFlags: (D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0
-                | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX.0) as u32,
+            MiscFlags: misc_flags,
         };
 
         let mut texture = None;
@@ -177,16 +284,35 @@ impl D3D11SharedTextureFactory {
     ) -> Result<WebView2DxgiSharedHandleFrame, WryWebSurfaceError> {
         let target =
             self.create_shared_texture(capture.size, capture.format, capture.generation)?;
-        self.copy_capture_into_existing_target(&target.texture, capture)?;
-        Ok(target.shared_frame)
+        let fence_value = self.copy_capture_into_existing_target(&target.texture, capture)?;
+        Ok(WebView2DxgiSharedHandleFrame {
+            producer_sync: self.sync_mechanism(),
+            fence_value,
+            ..target.shared_frame
+        })
     }
 
-    /// Acquire the destination's keyed mutex, copy the capture source into it,
-    /// wait for the D3D11 GPU work to retire, and release the mutex. The
-    /// destination must have been allocated with
-    /// `D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX` (which is what
-    /// `create_shared_texture` produces).
+    /// Copy the captured D3D11 texture into the destination shared texture and
+    /// synchronize per this factory's mode.
+    ///
+    /// - **Keyed-mutex mode**: `AcquireSync(0)` → `CopyResource` →
+    ///   `flush_and_wait_for_gpu` (CPU spin on `D3D11_QUERY_EVENT`) →
+    ///   `ReleaseSync(0)`. Returns `0` (no fence).
+    /// - **Fence mode**: `CopyResource` → `Signal(fence, value)` on the
+    ///   immediate context (no CPU spin; the wgpu D3D12 consumer waits via
+    ///   `Dx12FenceSynchronizer`). Returns the signalled fence value.
     pub(crate) fn copy_capture_into_existing_target(
+        &self,
+        target: &ID3D11Texture2D,
+        capture: WebView2D3D11CaptureFrame,
+    ) -> Result<u64, WryWebSurfaceError> {
+        match self.fence.as_ref() {
+            Some(fence_mode) => self.copy_with_fence(target, capture, fence_mode),
+            None => self.copy_with_keyed_mutex(target, capture).map(|()| 0),
+        }
+    }
+
+    fn copy_with_keyed_mutex(
         &self,
         target: &ID3D11Texture2D,
         capture: WebView2D3D11CaptureFrame,
@@ -228,6 +354,27 @@ impl D3D11SharedTextureFactory {
         sync_result?;
         release_result?;
         Ok(())
+    }
+
+    fn copy_with_fence(
+        &self,
+        target: &ID3D11Texture2D,
+        capture: WebView2D3D11CaptureFrame,
+        fence_mode: &FenceMode,
+    ) -> Result<u64, WryWebSurfaceError> {
+        with_borrowed_d3d11_texture(capture.raw_d3d11_texture, |source| {
+            unsafe {
+                self.context.CopyResource(target, source);
+            }
+            Ok(())
+        })?;
+        // Order matters: CopyResource queues the copy, Signal queues a fence
+        // signal after it, Flush commits the batch to the GPU. The signal
+        // becomes visible to the consumer's `ID3D12CommandQueue::Wait` only
+        // after the GPU drains the copy.
+        let value = fence_mode.signaler.signal(&fence_mode.context4)?;
+        unsafe { self.context.Flush() };
+        Ok(value)
     }
 
     fn flush_and_wait_for_gpu(&self) -> Result<(), WryWebSurfaceError> {
@@ -279,6 +426,39 @@ impl D3D11SharedTextureFactory {
             std::thread::yield_now();
         }
     }
+}
+
+fn create_d3d11_hardware_device() -> Result<(ID3D11Device, ID3D11DeviceContext), WryWebSurfaceError>
+{
+    let mut device = None;
+    let mut context = None;
+    let mut feature_level = D3D_FEATURE_LEVEL::default();
+    let feature_levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
+
+    unsafe {
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&feature_levels),
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            Some(&mut feature_level),
+            Some(&mut context),
+        )
+    }
+    .map_err(|error| WryWebSurfaceError::Platform(format!("D3D11CreateDevice failed: {error}")))?;
+
+    let device = device.ok_or_else(|| {
+        WryWebSurfaceError::Platform("D3D11CreateDevice returned no device".to_string())
+    })?;
+    let context = context.ok_or_else(|| {
+        WryWebSurfaceError::Platform(
+            "D3D11CreateDevice returned no immediate context".to_string(),
+        )
+    })?;
+    Ok((device, context))
 }
 
 #[derive(Debug)]
@@ -582,6 +762,14 @@ pub struct WebView2Dx12SharedFrame {
     pub generation: u64,
     /// NT shared handle suitable for `ID3D12Device::OpenSharedHandle`.
     pub shared_handle: *mut std::ffi::c_void,
+    /// Producer-side sync mechanism used for this frame.
+    /// `SyncMechanism::None` for the keyed-mutex+CPU-spin path,
+    /// `SyncMechanism::ExplicitFence` when the producer signalled a shared
+    /// `ID3D11Fence` after `CopyResource`.
+    pub producer_sync: SyncMechanism,
+    /// Fence value the producer signalled at. Only meaningful when
+    /// `producer_sync == SyncMechanism::ExplicitFence`; otherwise `0`.
+    pub fence_value: u64,
 }
 
 impl WebView2Dx12SharedFrame {
@@ -590,7 +778,8 @@ impl WebView2Dx12SharedFrame {
             size: self.size,
             format: self.format,
             generation: self.generation,
-            producer_sync: SyncMechanism::None,
+            producer_sync: self.producer_sync,
+            fence_value: self.fence_value,
             handle: self.shared_handle,
         }))
     }
@@ -609,6 +798,11 @@ pub struct WebView2DxgiSharedHandleFrame {
     pub generation: u64,
     /// NT shared handle. The caller remains responsible for closing its copy.
     pub shared_handle: *mut std::ffi::c_void,
+    /// Sync mechanism the consumer should use; carried through to the
+    /// `Dx12SharedTexture` frame.
+    pub producer_sync: SyncMechanism,
+    /// Fence value the producer signalled at. `0` outside fence mode.
+    pub fence_value: u64,
 }
 
 impl WebView2DxgiSharedHandleFrame {
@@ -618,6 +812,8 @@ impl WebView2DxgiSharedHandleFrame {
             format: self.format,
             generation: self.generation,
             shared_handle: self.shared_handle,
+            producer_sync: self.producer_sync,
+            fence_value: self.fence_value,
         }
     }
 
@@ -802,5 +998,7 @@ fn shared_handle_from_texture(
         format,
         generation,
         shared_handle: handle.0 as *mut std::ffi::c_void,
+        producer_sync: SyncMechanism::None,
+        fence_value: 0,
     })
 }

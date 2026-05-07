@@ -85,6 +85,16 @@ pub struct WebView2CompositionConfig {
     pub navigation_timeout: Duration,
     /// Timeout for `acquire_frame` to wait on `TryGetNextFrame`.
     pub frame_timeout: Duration,
+    /// Optional NT shared handle to a `D3D12_FENCE_FLAG_SHARED` fence
+    /// (typically from
+    /// `wgpu_native_texture_interop::Dx12FenceSynchronizer::shared_handle`).
+    /// When `Some`, the producer opens the fence on its D3D11 device and
+    /// signals it after each `CopyResource` instead of using a keyed mutex
+    /// + CPU spin. Frames are then emitted with
+    /// `producer_sync = SyncMechanism::ExplicitFence` and a per-frame
+    /// `fence_value`. The consumer-side `Dx12FenceSynchronizer` owns the
+    /// canonical handle; the producer never closes it.
+    pub fence_shared_handle: Option<*mut std::ffi::c_void>,
 }
 
 impl WebView2CompositionConfig {
@@ -96,6 +106,7 @@ impl WebView2CompositionConfig {
             diagnostic_backdrop: None,
             navigation_timeout: Duration::from_secs(5),
             frame_timeout: Duration::from_secs(2),
+            fence_shared_handle: None,
         }
     }
 
@@ -106,6 +117,14 @@ impl WebView2CompositionConfig {
 
     pub fn with_diagnostic_backdrop(mut self, rgb: (u8, u8, u8)) -> Self {
         self.diagnostic_backdrop = Some(rgb);
+        self
+    }
+
+    /// Enable explicit-fence sync using the shared NT handle from the
+    /// consumer's `Dx12FenceSynchronizer`. See
+    /// [`fence_shared_handle`](Self::fence_shared_handle) for semantics.
+    pub fn with_fence_shared_handle(mut self, handle: *mut std::ffi::c_void) -> Self {
+        self.fence_shared_handle = Some(handle);
         self
     }
 }
@@ -304,7 +323,10 @@ impl WebView2CompositionProducer {
         let webview = unsafe { controller.CoreWebView2() }
             .map_err(platform("controller.CoreWebView2"))?;
 
-        let capture_factory = D3D11SharedTextureFactory::new_hardware()?;
+        let capture_factory = match config.fence_shared_handle {
+            Some(handle) => D3D11SharedTextureFactory::new_hardware_with_fence(handle)?,
+            None => D3D11SharedTextureFactory::new_hardware()?,
+        };
         let capture_device = capture_factory.create_winrt_direct3d_device()?;
 
         let nav_event_queue: Arc<Mutex<VecDeque<NavigationEvent>>> =
@@ -950,16 +972,15 @@ impl WebView2CompositionProducer {
             .as_mut()
             .expect("persistent_dest populated above");
 
-        self.capture_factory
-            .copy_capture_into_existing_target(
-                &dest.texture.texture,
-                WebView2D3D11CaptureFrame {
-                    size: captured_size,
-                    format: wgpu::TextureFormat::Bgra8Unorm,
-                    generation: self.generation,
-                    raw_d3d11_texture: raw_texture,
-                },
-            )?;
+        let fence_value = self.capture_factory.copy_capture_into_existing_target(
+            &dest.texture.texture,
+            WebView2D3D11CaptureFrame {
+                size: captured_size,
+                format: wgpu::TextureFormat::Bgra8Unorm,
+                generation: self.generation,
+                raw_d3d11_texture: raw_texture,
+            },
+        )?;
 
         let _ = frame.Close();
 
@@ -984,6 +1005,8 @@ impl WebView2CompositionProducer {
             format: wgpu::TextureFormat::Bgra8Unorm,
             generation: self.generation,
             shared_handle,
+            producer_sync: self.capture_factory.sync_mechanism(),
+            fence_value,
         }
         .into_surface_frame();
 
