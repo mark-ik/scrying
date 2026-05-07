@@ -357,6 +357,79 @@ independently when the work is ready:
 
 ---
 
+## Dependency: changes required in `wgpu-native-texture-interop`
+
+The parity roadmap can't be delivered entirely from inside scrying.
+Three concrete pieces of work fall in the sibling crate
+[`wgpu-native-texture-interop`](https://crates.io/crates/wgpu-native-texture-interop)
+(currently 0.1.1).
+
+### 1. Built-in synchronizers for explicit GPU sync
+
+`SyncMechanism` already has `ExplicitFence` and
+`ExplicitExternalSemaphore` variants. The `InteropSynchronizer` trait
+is in place. But only `NoopSynchronizer` and `ImplicitOnlySynchronizer`
+ship as built-ins, and both reject the explicit variants.
+
+The roadmap needs:
+
+- `Dx12FenceSynchronizer` — opens a `D3D12_FENCE_FLAG_SHARED` shared
+  handle on the wgpu D3D12 device, queues
+  `ID3D12CommandQueue::Wait(fence, value)` before the consumer's
+  submit. This is the **fence work** for Windows.
+- `VulkanSemaphoreSynchronizer` — accepts a per-frame `VkSemaphore`
+  fd from the producer (matches the WPE DMABUF protocol's per-frame
+  semaphore), waits on the wgpu Vulkan queue.
+- `MetalSharedEventSynchronizer` — precautionary; not required for
+  correctness today (IOSurface coherence is implicit).
+
+### 2. Complete the `VulkanExternalImage` import path
+
+`NativeFrame::VulkanExternalImage` exists for API symmetry but the
+import dispatch in `WgpuTextureImporter::import_frame` currently
+returns `InteropError::Unsupported`. For the Linux WPE producer this
+needs to be a real path: DMABUF fd → `VkImage` via
+`VK_KHR_external_memory_fd` (with DRM modifier handling) →
+`wgpu::Texture` via the Vulkan hal. The structural code in
+`raw_gl/linux.rs` for the GL→Vulkan import is ~80% of what's needed;
+the new path skips the GL framebuffer source and imports the DMABUF
+directly.
+
+### 3. Possibly: pre-submit hook on `InteropSynchronizer`
+
+The current trait hooks fire at *import time* (`producer_complete`
+post-acquire, `consumer_ready` post-import). A fence wait wants to
+enqueue `Wait(fence, value)` *immediately before the consumer's
+render submit*. Putting that in `producer_complete` works for the
+common one-frame-per-submit pattern (the Wait persists in the queue
+until drained), but is fragile for multi-import-per-submit. A
+`pre_submit(&queue)` hook would be the cleaner shape. Worth deciding
+before implementing the synchronizers.
+
+### What does *not* need interop-crate changes
+
+- `MetalTextureRef` import is already wired — macOS producer can
+  hand it MTLTextures from `CVMetalTextureCache` directly.
+- `Dx12SharedTexture` import is already wired — the Windows
+  producer's frame handoff doesn't change for the fence upgrade,
+  only the synchronizer plumbing does.
+- Every scrying-side embedding-API expansion (input forwarding,
+  settings, profile, custom URL schemes, navigation control,
+  drag-and-drop, IME) lives entirely in scrying.
+
+### Versioning impact
+
+Synchronizer additions are additive (new public types). Completing
+`VulkanExternalImage` is additive (replaces an `Unsupported` arm
+with real behaviour). Adding a `pre_submit` trait method is technically
+breaking — the surface together is sized as a `0.2.0` bump of
+`wgpu-native-texture-interop`. scrying then updates its dep to
+`version = "0.2"` and gains the new synchronizers; the producer-side
+code in scrying can ship the fence wiring at the same release where
+it picks up `wgpu-native-texture-interop 0.2`.
+
+---
+
 ## Open questions
 
 - **Linux producer naming**: rename `webkitgtk_producer` →
