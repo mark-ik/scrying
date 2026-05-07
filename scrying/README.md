@@ -21,9 +21,13 @@ The shared contract:
 - **Frame acquisition** — `acquire_frame`, plus producer-specific fast paths.
 - **Layout** — `resize`, `set_offset`.
 - **Navigation** — `navigate_to_string`, `navigate_to_url`. Both block until `NavigationCompleted`.
-- **Input** — `send_mouse_input` (mouse + scroll + leave), `move_focus` (Programmatic / Next / Previous tab order).
+- **History** — `reload`, `stop`, `go_back`, `go_forward`, `can_go_back`, `can_go_forward`.
+- **Input** — `send_mouse_input` (mouse + scroll + leave), `move_focus` (Programmatic / Next / Previous tab order). Pointer (touch / pen) and drag-and-drop are declared on the trait but not yet implemented on Windows; tracked for 0.4.
 - **Lifecycle events** — `poll_navigation_event` drains a FIFO queue of `Starting` / `SourceChanged` / `Completed` / `TitleChanged` events.
+- **Cursor reporting** — `poll_cursor_shape` returns the next [`CursorShape`] the engine wants the host to display (Pointer over a link, Text in an input, etc.).
 - **JS messaging** — `post_web_message` (Rust → JS via `window.chrome.webview` listeners), `poll_web_message` (JS → Rust via `window.chrome.webview.postMessage`).
+- **DevTools** — `open_devtools_window` opens the engine's developer-tools UI.
+- **Settings** — `apply_settings(&WebSurfaceSettings)` accepts a partial update of zoom factor, user-agent string, JS-enabled, devtools-enabled, default-context-menus, and built-in accelerator keys. `None` fields are left at the producer's current value.
 - **Snapshots** — `capture_snapshot_png` returns encoded PNG bytes via the underlying engine's preview API.
 
 Methods that aren't yet implemented on a given platform return [`WryWebSurfaceError::Unsupported`] rather than panicking, so consumers can probe the surface incrementally.

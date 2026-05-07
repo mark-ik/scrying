@@ -49,12 +49,14 @@ use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
 use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
+    DispatchMessageW, HCURSOR, IDC_APPSTARTING, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_HELP,
+    IDC_IBEAM, IDC_NO, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_WAIT,
+    LoadCursorW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
 };
 use windows::core::{Interface, PCWSTR, PWSTR};
 use windows_numerics::{Vector2, Vector3};
 
-use crate::{FocusReason, MouseEventKind, MouseInput, NavigationEvent};
+use crate::{CursorShape, FocusReason, MouseEventKind, MouseInput, NavigationEvent};
 
 use crate::windows_capture::{
     D3D11SharedTexture, D3D11SharedTextureFactory, WebView2D3D11CaptureFrame,
@@ -162,11 +164,13 @@ pub struct WebView2CompositionProducer {
     // push from the COM thread; consumer code drains from any thread.
     nav_event_queue: Arc<Mutex<VecDeque<NavigationEvent>>>,
     web_message_queue: Arc<Mutex<VecDeque<String>>>,
+    cursor_queue: Arc<Mutex<VecDeque<CursorShape>>>,
     nav_starting_token: i64,
     nav_completed_token: i64,
     source_changed_token: i64,
     title_changed_token: i64,
     web_message_token: i64,
+    cursor_changed_token: i64,
 }
 
 /// A reusable shared D3D11 destination texture and its NT handle. The handle
@@ -307,6 +311,8 @@ impl WebView2CompositionProducer {
             Arc::new(Mutex::new(VecDeque::new()));
         let web_message_queue: Arc<Mutex<VecDeque<String>>> =
             Arc::new(Mutex::new(VecDeque::new()));
+        let cursor_queue: Arc<Mutex<VecDeque<CursorShape>>> =
+            Arc::new(Mutex::new(VecDeque::new()));
 
         let (
             nav_starting_token,
@@ -319,6 +325,8 @@ impl WebView2CompositionProducer {
             nav_event_queue.clone(),
             web_message_queue.clone(),
         )?;
+        let cursor_changed_token =
+            register_cursor_changed_handler(&composition_controller, cursor_queue.clone())?;
 
         Ok(Self {
             parent_hwnd,
@@ -338,11 +346,13 @@ impl WebView2CompositionProducer {
             persistent_dest: None,
             nav_event_queue,
             web_message_queue,
+            cursor_queue,
             nav_starting_token,
             nav_completed_token,
             source_changed_token,
             title_changed_token,
             web_message_token,
+            cursor_changed_token,
         })
     }
 
@@ -503,6 +513,110 @@ impl WebView2CompositionProducer {
     /// message is queued.
     pub fn poll_web_message(&self) -> Option<String> {
         self.web_message_queue.lock().ok()?.pop_front()
+    }
+
+    /// Drain the next cursor-change request from the webview. Producers
+    /// push a fresh [`CursorShape`] each time the engine's hovered
+    /// element changes (e.g. anchor → pointer, text input → text).
+    pub fn poll_cursor_shape(&self) -> Option<CursorShape> {
+        self.cursor_queue.lock().ok()?.pop_front()
+    }
+
+    /// Reload the current page.
+    pub fn reload(&self) -> Result<(), WryWebSurfaceError> {
+        unsafe { self.webview.Reload() }.map_err(platform("Reload"))
+    }
+
+    /// Stop the current navigation, if any.
+    pub fn stop(&self) -> Result<(), WryWebSurfaceError> {
+        unsafe { self.webview.Stop() }.map_err(platform("Stop"))
+    }
+
+    /// Navigate one entry back in session history. Returns `Ok(false)`
+    /// if the back stack is empty.
+    pub fn go_back(&self) -> Result<bool, WryWebSurfaceError> {
+        if !self.can_go_back() {
+            return Ok(false);
+        }
+        unsafe { self.webview.GoBack() }.map_err(platform("GoBack"))?;
+        Ok(true)
+    }
+
+    /// Navigate one entry forward in session history. Returns
+    /// `Ok(false)` if the forward stack is empty.
+    pub fn go_forward(&self) -> Result<bool, WryWebSurfaceError> {
+        if !self.can_go_forward() {
+            return Ok(false);
+        }
+        unsafe { self.webview.GoForward() }.map_err(platform("GoForward"))?;
+        Ok(true)
+    }
+
+    /// Whether the back stack currently has at least one entry.
+    pub fn can_go_back(&self) -> bool {
+        let mut value = windows::core::BOOL::default();
+        unsafe { self.webview.CanGoBack(&mut value) }
+            .ok()
+            .map(|()| value.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Whether the forward stack currently has at least one entry.
+    pub fn can_go_forward(&self) -> bool {
+        let mut value = windows::core::BOOL::default();
+        unsafe { self.webview.CanGoForward(&mut value) }
+            .ok()
+            .map(|()| value.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Open the WebView2 DevTools window.
+    pub fn open_devtools_window(&self) -> Result<(), WryWebSurfaceError> {
+        unsafe { self.webview.OpenDevToolsWindow() }.map_err(platform("OpenDevToolsWindow"))
+    }
+
+    /// Apply a partial settings update. `None` fields are left at their
+    /// current value.
+    pub fn apply_settings(
+        &self,
+        settings: &crate::WebSurfaceSettings,
+    ) -> Result<(), WryWebSurfaceError> {
+        if let Some(zoom) = settings.zoom_factor {
+            unsafe { self.controller.SetZoomFactor(zoom) }
+                .map_err(platform("controller.SetZoomFactor"))?;
+        }
+        let webview_settings: webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings =
+            unsafe { self.webview.Settings() }.map_err(platform("webview.Settings"))?;
+        if let Some(enabled) = settings.javascript_enabled {
+            unsafe { webview_settings.SetIsScriptEnabled(enabled) }
+                .map_err(platform("Settings.SetIsScriptEnabled"))?;
+        }
+        if let Some(enabled) = settings.devtools_enabled {
+            unsafe { webview_settings.SetAreDevToolsEnabled(enabled) }
+                .map_err(platform("Settings.SetAreDevToolsEnabled"))?;
+        }
+        if let Some(enabled) = settings.default_context_menus_enabled {
+            unsafe { webview_settings.SetAreDefaultContextMenusEnabled(enabled) }
+                .map_err(platform("Settings.SetAreDefaultContextMenusEnabled"))?;
+        }
+        if let Some(enabled) = settings.builtin_accelerator_keys_enabled {
+            let settings3: webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3 =
+                webview_settings
+                    .cast()
+                    .map_err(platform("Settings cast to ICoreWebView2Settings3"))?;
+            unsafe { settings3.SetAreBrowserAcceleratorKeysEnabled(enabled) }
+                .map_err(platform("Settings3.SetAreBrowserAcceleratorKeysEnabled"))?;
+        }
+        if let Some(ref ua) = settings.user_agent {
+            let settings2: webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings2 =
+                webview_settings
+                    .cast()
+                    .map_err(platform("Settings cast to ICoreWebView2Settings2"))?;
+            let ua = CoTaskMemPWSTR::from(ua.as_str());
+            unsafe { settings2.SetUserAgent(*ua.as_ref().as_pcwstr()) }
+                .map_err(platform("Settings2.SetUserAgent"))?;
+        }
+        Ok(())
     }
 
     /// Take a one-shot PNG snapshot of the current document via
@@ -1025,6 +1139,9 @@ impl Drop for WebView2CompositionProducer {
                 .webview
                 .remove_DocumentTitleChanged(self.title_changed_token);
             let _ = self.webview.remove_WebMessageReceived(self.web_message_token);
+            let _ = self
+                .composition_controller
+                .remove_CursorChanged(self.cursor_changed_token);
             let _ = self.controller.Close();
         }
     }
@@ -1105,6 +1222,45 @@ impl crate::WryWebSurfaceProducer for WebView2CompositionProducer {
 
     fn capture_snapshot_png(&mut self) -> Result<Vec<u8>, WryWebSurfaceError> {
         WebView2CompositionProducer::capture_snapshot_png(self)
+    }
+
+    fn reload(&mut self) -> Result<(), WryWebSurfaceError> {
+        WebView2CompositionProducer::reload(self)
+    }
+
+    fn stop(&mut self) -> Result<(), WryWebSurfaceError> {
+        WebView2CompositionProducer::stop(self)
+    }
+
+    fn go_back(&mut self) -> Result<bool, WryWebSurfaceError> {
+        WebView2CompositionProducer::go_back(self)
+    }
+
+    fn go_forward(&mut self) -> Result<bool, WryWebSurfaceError> {
+        WebView2CompositionProducer::go_forward(self)
+    }
+
+    fn can_go_back(&self) -> bool {
+        WebView2CompositionProducer::can_go_back(self)
+    }
+
+    fn can_go_forward(&self) -> bool {
+        WebView2CompositionProducer::can_go_forward(self)
+    }
+
+    fn open_devtools_window(&mut self) -> Result<(), WryWebSurfaceError> {
+        WebView2CompositionProducer::open_devtools_window(self)
+    }
+
+    fn apply_settings(
+        &mut self,
+        settings: &crate::WebSurfaceSettings,
+    ) -> Result<(), WryWebSurfaceError> {
+        WebView2CompositionProducer::apply_settings(self, settings)
+    }
+
+    fn poll_cursor_shape(&mut self) -> Option<CursorShape> {
+        WebView2CompositionProducer::poll_cursor_shape(self)
     }
 }
 
@@ -1471,4 +1627,60 @@ fn register_persistent_handlers(
         title_changed_token,
         web_message_token,
     ))
+}
+
+fn register_cursor_changed_handler(
+    composition_controller: &ICoreWebView2CompositionController,
+    cursor_queue: Arc<Mutex<VecDeque<CursorShape>>>,
+) -> Result<i64, WryWebSurfaceError> {
+    use webview2_com::CursorChangedEventHandler;
+    let cc = composition_controller.clone();
+    let handler = CursorChangedEventHandler::create(Box::new(move |_, _| {
+        let mut hcursor: HCURSOR = HCURSOR::default();
+        if unsafe { cc.Cursor(&mut hcursor) }.is_ok() {
+            let shape = hcursor_to_shape(hcursor);
+            if let Ok(mut q) = cursor_queue.lock() {
+                q.push_back(shape);
+            }
+        }
+        Ok(())
+    }));
+    let mut token = 0i64;
+    unsafe {
+        composition_controller
+            .add_CursorChanged(&handler, &mut token)
+            .map_err(platform("add_CursorChanged"))?;
+    }
+    Ok(token)
+}
+
+fn hcursor_to_shape(cursor: HCURSOR) -> CursorShape {
+    // Compare the incoming HCURSOR against the standard system cursors.
+    // Win32 returns the same HCURSOR pointer for repeated `LoadCursorW`
+    // calls, so equality is a reliable identity check for the named
+    // standard cursors.
+    let pairs: [(windows::core::PCWSTR, CursorShape); 13] = [
+        (IDC_ARROW, CursorShape::Default),
+        (IDC_HAND, CursorShape::Pointer),
+        (IDC_IBEAM, CursorShape::Text),
+        (IDC_WAIT, CursorShape::Wait),
+        (IDC_CROSS, CursorShape::Crosshair),
+        (IDC_SIZEALL, CursorShape::ResizeAll),
+        (IDC_SIZENS, CursorShape::ResizeNs),
+        (IDC_SIZEWE, CursorShape::ResizeEw),
+        (IDC_SIZENESW, CursorShape::ResizeNeSw),
+        (IDC_SIZENWSE, CursorShape::ResizeNwSe),
+        (IDC_NO, CursorShape::NotAllowed),
+        (IDC_HELP, CursorShape::Help),
+        (IDC_APPSTARTING, CursorShape::Progress),
+    ];
+    for (id, shape) in pairs {
+        let h = unsafe { LoadCursorW(None, id) };
+        if let Ok(h) = h
+            && h.0 == cursor.0
+        {
+            return shape;
+        }
+    }
+    CursorShape::Custom(format!("hcursor:{:?}", cursor.0))
 }

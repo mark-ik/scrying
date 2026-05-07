@@ -342,6 +342,9 @@ fn drain_composition_events(renderer: &mut WebViewRenderer) {
     while let Some(message) = renderer.captured.producer.poll_web_message() {
         println!("[web message] {message}");
     }
+    while let Some(shape) = renderer.captured.producer.poll_cursor_shape() {
+        println!("[cursor] {shape:?}");
+    }
 }
 
 const PROBE_Y: i32 = 48;

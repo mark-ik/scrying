@@ -272,6 +272,117 @@ pub struct MouseVirtualKeys {
     pub x_button2: bool,
 }
 
+/// One pointer (touch / pen / mouse-as-pointer) event forwarded to the
+/// underlying webview. Coordinates are physical pixels relative to the
+/// webview's top-left corner.
+#[derive(Clone, Copy, Debug)]
+pub struct PointerInput {
+    pub kind: PointerEventKind,
+    pub device: PointerDevice,
+    /// Pointer ID. Two simultaneous touches use distinct IDs; a single pen
+    /// stays at ID 1. Zero is reserved for "no ID".
+    pub pointer_id: u32,
+    /// Position of the pointer in physical pixels relative to the webview.
+    pub point: (i32, i32),
+    /// Pressure in `0.0..=1.0`. `0.0` for non-pressure-aware devices.
+    pub pressure: f32,
+    /// Tilt in radians for pen input; zero for touch / mouse.
+    pub tilt: (f32, f32),
+}
+
+/// Discrete kinds of pointer event. Mirrors `COREWEBVIEW2_POINTER_EVENT_KIND`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum PointerEventKind {
+    Activate,
+    Down,
+    Enter,
+    Leave,
+    Up,
+    Update,
+    CaptureChanged,
+}
+
+/// The kind of input device that produced a [`PointerInput`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum PointerDevice {
+    Touch,
+    Pen,
+    Mouse,
+}
+
+/// Cursor shape the webview wants the host to display, reported via the
+/// `cursor_changed` callback registered with
+/// [`WryWebSurfaceProducer::set_cursor_handler`].
+///
+/// The full Win32 / cocoa / X11 cursor namespace is large and platform-
+/// specific. This enum is the subset CSS / WebKit consensus settles
+/// on; producers may report `Custom(name)` for shapes not enumerated.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum CursorShape {
+    Default,
+    Pointer,
+    Text,
+    Wait,
+    Crosshair,
+    Move,
+    NotAllowed,
+    Help,
+    Progress,
+    ResizeNs,
+    ResizeEw,
+    ResizeNeSw,
+    ResizeNwSe,
+    ResizeAll,
+    Grab,
+    Grabbing,
+    ZoomIn,
+    ZoomOut,
+    Custom(String),
+}
+
+/// Drag-and-drop event forwarded to the webview.
+#[derive(Clone, Copy, Debug)]
+pub struct DragInput {
+    pub kind: DragEventKind,
+    pub virtual_keys: MouseVirtualKeys,
+    pub point: (i32, i32),
+    /// Set of allowed effects bitmask; `0` for default.
+    pub allowed_effects: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DragEventKind {
+    Enter,
+    Over,
+    Leave,
+    Drop,
+}
+
+/// Snapshot of webview-level settings exposed by the producer.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WebSurfaceSettings {
+    /// Zoom factor (`1.0` is normal). `None` leaves the producer's
+    /// default in place.
+    pub zoom_factor: Option<f64>,
+    /// Custom user-agent string. `None` leaves the producer's default
+    /// in place.
+    pub user_agent: Option<String>,
+    /// Whether developer-tools are accessible (Ctrl+Shift+I, F12, the
+    /// host's [`WryWebSurfaceProducer::open_devtools_window`] call).
+    pub devtools_enabled: Option<bool>,
+    /// Whether JavaScript execution is enabled in the webview.
+    pub javascript_enabled: Option<bool>,
+    /// Whether the engine's default right-click context menu is shown.
+    pub default_context_menus_enabled: Option<bool>,
+    /// Whether the engine's default browser-acceleration shortcuts (zoom,
+    /// reload, F5, etc.) are intercepted.
+    pub builtin_accelerator_keys_enabled: Option<bool>,
+}
+
 /// Producer contract implemented by platform-specific Wry/WebView frame sources.
 ///
 /// The trait covers the cross-platform lifecycle (capabilities + navigate +
@@ -399,6 +510,89 @@ pub trait WryWebSurfaceProducer {
     fn capture_snapshot_png(&mut self) -> Result<Vec<u8>, WryWebSurfaceError> {
         Err(WryWebSurfaceError::Unsupported(
             "WryWebSurfaceProducer::capture_snapshot_png is not implemented for this platform",
+        ))
+    }
+
+    /// Forward a touch / pen / pointer event to the webview.
+    fn send_pointer_input(&mut self, event: PointerInput) -> Result<(), WryWebSurfaceError> {
+        let _ = event;
+        Err(WryWebSurfaceError::Unsupported(
+            "WryWebSurfaceProducer::send_pointer_input is not implemented for this platform",
+        ))
+    }
+
+    /// Forward a drag / drop event to the webview. Hosts call this when
+    /// the user drags content over the webview region.
+    fn send_drag_input(&mut self, event: DragInput) -> Result<(), WryWebSurfaceError> {
+        let _ = event;
+        Err(WryWebSurfaceError::Unsupported(
+            "WryWebSurfaceProducer::send_drag_input is not implemented for this platform",
+        ))
+    }
+
+    /// Drain the next pending cursor shape requested by the webview.
+    /// Producers that support cursor reporting push a fresh
+    /// [`CursorShape`] each time the engine's hovered element changes.
+    fn poll_cursor_shape(&mut self) -> Option<CursorShape> {
+        None
+    }
+
+    /// Reload the current page (equivalent to the user pressing F5).
+    fn reload(&mut self) -> Result<(), WryWebSurfaceError> {
+        Err(WryWebSurfaceError::Unsupported(
+            "WryWebSurfaceProducer::reload is not implemented for this platform",
+        ))
+    }
+
+    /// Stop loading the current navigation.
+    fn stop(&mut self) -> Result<(), WryWebSurfaceError> {
+        Err(WryWebSurfaceError::Unsupported(
+            "WryWebSurfaceProducer::stop is not implemented for this platform",
+        ))
+    }
+
+    /// Navigate one entry back in the session history if possible. Returns
+    /// `Ok(false)` if the back stack is empty, `Ok(true)` if a navigation
+    /// was started.
+    fn go_back(&mut self) -> Result<bool, WryWebSurfaceError> {
+        Err(WryWebSurfaceError::Unsupported(
+            "WryWebSurfaceProducer::go_back is not implemented for this platform",
+        ))
+    }
+
+    /// Navigate one entry forward in the session history if possible.
+    fn go_forward(&mut self) -> Result<bool, WryWebSurfaceError> {
+        Err(WryWebSurfaceError::Unsupported(
+            "WryWebSurfaceProducer::go_forward is not implemented for this platform",
+        ))
+    }
+
+    /// Whether the back stack currently has at least one entry.
+    fn can_go_back(&self) -> bool {
+        false
+    }
+
+    /// Whether the forward stack currently has at least one entry.
+    fn can_go_forward(&self) -> bool {
+        false
+    }
+
+    /// Open the developer-tools UI for this webview. On Windows this is
+    /// the WebView2 DevTools window; on macOS Safari Web Inspector; on
+    /// Linux WebKit Web Inspector.
+    fn open_devtools_window(&mut self) -> Result<(), WryWebSurfaceError> {
+        Err(WryWebSurfaceError::Unsupported(
+            "WryWebSurfaceProducer::open_devtools_window is not implemented for this platform",
+        ))
+    }
+
+    /// Apply a partial settings update to the webview. Each `Some` field
+    /// is applied; `None` fields are left at their current value.
+    /// Producers report unsupported fields by ignoring them silently.
+    fn apply_settings(&mut self, settings: &WebSurfaceSettings) -> Result<(), WryWebSurfaceError> {
+        let _ = settings;
+        Err(WryWebSurfaceError::Unsupported(
+            "WryWebSurfaceProducer::apply_settings is not implemented for this platform",
         ))
     }
 }

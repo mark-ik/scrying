@@ -395,16 +395,35 @@ needs to be a real path: DMABUF fd → `VkImage` via
 the new path skips the GL framebuffer source and imports the DMABUF
 directly.
 
-### 3. Possibly: pre-submit hook on `InteropSynchronizer`
+### 3. Deferred: pre-submit hook on `InteropSynchronizer`
 
 The current trait hooks fire at *import time* (`producer_complete`
 post-acquire, `consumer_ready` post-import). A fence wait wants to
 enqueue `Wait(fence, value)` *immediately before the consumer's
-render submit*. Putting that in `producer_complete` works for the
-common one-frame-per-submit pattern (the Wait persists in the queue
-until drained), but is fragile for multi-import-per-submit. A
-`pre_submit(&queue)` hook would be the cleaner shape. Worth deciding
-before implementing the synchronizers.
+render submit*.
+
+The synchronizers in §1 do not require a trait change to do this:
+
+- **D3D12 fence**: `ID3D12CommandQueue::Wait` is queue-level and
+  persistent. Multiple Waits enqueued in successive
+  `producer_complete` calls all gate the next submit correctly,
+  even with multi-import-per-submit. Putting the Wait in
+  `producer_complete` is correct, not a workaround.
+- **Vulkan semaphore**: `vkQueueSubmit` carries `pWaitSemaphores`
+  per-submit, so a queue-level wait isn't directly available. The
+  synchronizer uses the standard pattern of issuing a standalone
+  "pure wait" `vkQueueSubmit` (wait semaphore, no command buffers)
+  inside `producer_complete`. One extra submit per frame is
+  acceptable at 60–144 Hz and is the canonical cross-API
+  semaphore-handoff pattern.
+- **Metal shared event**: same shape — `encodeWait(forEvent:value:)`
+  on a throwaway empty command buffer in `producer_complete`.
+
+A `pre_submit(&queue)` trait method would let the Vulkan and Metal
+paths skip the standalone wait submit (one fewer submit per frame).
+That's a future optimization, not load-bearing for the
+fence/semaphore work, and is deferrable to a later release once
+profiling shows whether the standalone-submit cost matters.
 
 ### What does *not* need interop-crate changes
 
@@ -419,14 +438,22 @@ before implementing the synchronizers.
 
 ### Versioning impact
 
-Synchronizer additions are additive (new public types). Completing
-`VulkanExternalImage` is additive (replaces an `Unsupported` arm
-with real behaviour). Adding a `pre_submit` trait method is technically
-breaking — the surface together is sized as a `0.2.0` bump of
-`wgpu-native-texture-interop`. scrying then updates its dep to
-`version = "0.2"` and gains the new synchronizers; the producer-side
-code in scrying can ship the fence wiring at the same release where
-it picks up `wgpu-native-texture-interop 0.2`.
+The whole work surface is **additive**:
+
+- Synchronizer additions: new public types (`Dx12FenceSynchronizer`,
+  `VulkanSemaphoreSynchronizer`, `MetalSharedEventSynchronizer`),
+  no trait changes.
+- Completing `VulkanExternalImage` import: replaces an
+  `Unsupported` arm with real behaviour.
+- No breaking changes to `InteropSynchronizer`,
+  `SyncMechanism`, `NativeFrame`, `WgpuTextureImporter`, or any
+  existing types' public surface.
+
+Sized as a `0.2.0` bump because the new explicit-sync surface is
+materially new functionality, not a patch. scrying updates its dep
+to `version = "0.2"` and gains the new synchronizers; the
+producer-side fence wiring in scrying ships at the same release
+where it picks up `wgpu-native-texture-interop 0.2`.
 
 ---
 
