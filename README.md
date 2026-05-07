@@ -36,4 +36,4 @@ If you're consuming `scrying` from outside this layout, point at a git or regist
 
 ## License
 
-MIT OR Apache-2.0
+[MPL-2.0](LICENSE)

@@ -464,15 +464,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
-name = "cgl"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ced0551234e87afee12411d535648dd89d2e7f34c78b753395567aff3d447ff"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -891,15 +882,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "euclid"
-version = "0.22.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1a05365e3b1c6d1650318537c7460c6923f1abdd272ad6842baa2b509957a06"
-dependencies = [
- "num-traits",
-]
-
-[[package]]
 name = "exr"
 version = "1.74.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -960,12 +942,6 @@ dependencies = [
  "crc32fast",
  "miniz_oxide",
 ]
-
-[[package]]
-name = "fnv"
-version = "1.0.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "foldhash"
@@ -1256,15 +1232,6 @@ dependencies = [
  "khronos_api",
  "log",
  "xml-rs",
-]
-
-[[package]]
-name = "gleam"
-version = "0.15.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8647cc2e2ffde598ce5ca2809452e722dd8dc127885ab8aba2fa8b469cd3ed94"
-dependencies = [
- "gl_generator",
 ]
 
 [[package]]
@@ -3667,35 +3634,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "surfman"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04d3973284ef0dc7362cdaee41c2356c4c39a5a5ebd8490c5163ebf21a7adc02"
-dependencies = [
- "bitflags 2.11.1",
- "cfg_aliases",
- "cgl",
- "euclid",
- "fnv",
- "gl_generator",
- "glow 0.16.0",
- "libc",
- "log",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-core-foundation",
- "objc2-core-video",
- "objc2-foundation 0.3.2",
- "objc2-io-surface",
- "objc2-metal 0.3.2",
- "objc2-quartz-core 0.3.2",
- "raw-window-handle",
- "wayland-sys",
- "winapi",
- "wio",
-]
-
-[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4531,18 +4469,14 @@ version = "0.1.0"
 dependencies = [
  "ash",
  "dpi",
- "euclid",
  "foreign-types-shared",
  "gl_generator",
- "gleam",
  "glow 0.16.0",
- "image",
  "metal",
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
  "objc2-io-surface",
  "objc2-metal 0.3.2",
- "surfman",
  "thiserror 2.0.18",
  "wgpu",
  "wgpu-hal",
@@ -5027,15 +4961,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee1708bef14716a11bae175f579062d4554d95be2c6829f518df847b7b3fdd0"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "wio"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d129932f4644ac2396cb456385cbf9e63b5b30c6e8dc4820bdca4eb082037a5"
-dependencies = [
- "winapi",
 ]
 
 [[package]]

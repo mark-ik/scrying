@@ -2,7 +2,7 @@
 name = "scrying"
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "MPL-2.0"
 repository = "https://github.com/mark-ik/wry-scry"
 description = "Capability-driven system-webview frame adapter — scry into WebView2/WKWebView/WebKitGTK and produce wgpu-importable frames"
 
@@ -11,7 +11,7 @@ dpi = "0.1.2"
 image = "0.25"
 thiserror = "2.0.17"
 wgpu = { version = "29.0.1", features = ["metal"] }
-wgpu-native-texture-interop = { path = "../../wgpu-graft/wgpu-native-texture-interop" }
+wgpu-native-texture-interop = { path = "../../wgpu-graft/wgpu-native-texture-interop", version = "0.1", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # WebKitGTK Rust bindings (Tauri-maintained line, links against
