@@ -1,13 +1,13 @@
 # demo-wry-winit
 
-Minimal host probe for `wry-scry`.
+Minimal host probe for `scrying`.
 
 This demo creates a real Wry webview and proves the host side of the decision tree first:
 
 1. create a winit window,
 2. initialize a host `wgpu` device,
 3. wrap it in `HostWgpuContext`,
-4. ask `wry-scry` which web-surface mode is viable,
+4. ask `scrying` which web-surface mode is viable,
 5. capture the host window as a stand-in `GraphicsCaptureItem`,
 6. capture Wry's WebView2 child HWND through the controller exposed by `WebViewExtWindows`,
 7. create a direct WebView2 `ICoreWebView2CompositionController` probe,

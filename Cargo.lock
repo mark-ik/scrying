@@ -682,6 +682,7 @@ version = "0.1.0"
 dependencies = [
  "pollster",
  "raw-window-handle",
+ "scrying",
  "webview2-com",
  "wgpu",
  "wgpu-native-texture-interop",
@@ -689,7 +690,6 @@ dependencies = [
  "windows-numerics 0.2.0",
  "winit",
  "wry",
- "wry-scry",
 ]
 
 [[package]]
@@ -1312,6 +1312,18 @@ checksum = "063ce2eb6a8d0ea93d2bf8ba1957e78dbab6be1c2220dd3daca57d5a9d869898"
 dependencies = [
  "libc",
  "system-deps",
+]
+
+[[package]]
+name = "glow"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5e5ea60d70410161c8bf5da3fdfeaa1c72ed2c15f8bbb9d19fe3a4fad085f08"
+dependencies = [
+ "js-sys",
+ "slotmap",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
@@ -3353,6 +3365,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "scrying"
+version = "0.1.0"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "dpi",
+ "gdk",
+ "glib",
+ "gtk",
+ "image",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-media",
+ "objc2-core-video",
+ "objc2-foundation 0.3.2",
+ "objc2-io-surface",
+ "objc2-metal 0.3.2",
+ "objc2-screen-capture-kit",
+ "objc2-web-kit",
+ "thiserror 2.0.18",
+ "webkit2gtk",
+ "webview2-com",
+ "wgpu",
+ "wgpu-native-texture-interop",
+ "windows 0.61.3",
+ "windows-numerics 0.2.0",
+]
+
+[[package]]
 name = "sctk-adwaita"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3626,9 +3668,9 @@ dependencies = [
 
 [[package]]
 name = "surfman"
-version = "0.12.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fd46f11e3e56616d97db5ab0ba5ed53b215851afeef341657f0f6087d6c946e"
+checksum = "04d3973284ef0dc7362cdaee41c2356c4c39a5a5ebd8490c5163ebf21a7adc02"
 dependencies = [
  "bitflags 2.11.1",
  "cfg_aliases",
@@ -3636,7 +3678,7 @@ dependencies = [
  "euclid",
  "fnv",
  "gl_generator",
- "glow",
+ "glow 0.16.0",
  "libc",
  "log",
  "objc2 0.6.4",
@@ -4434,7 +4476,7 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "cfg_aliases",
- "glow",
+ "glow 0.17.0",
  "glutin_wgl_sys",
  "gpu-allocator",
  "gpu-descriptor",
@@ -4493,7 +4535,7 @@ dependencies = [
  "foreign-types-shared",
  "gl_generator",
  "gleam",
- "glow",
+ "glow 0.16.0",
  "image",
  "metal",
  "objc2 0.6.4",
@@ -5050,36 +5092,6 @@ dependencies = [
  "windows-core 0.61.2",
  "windows-version",
  "x11-dl",
-]
-
-[[package]]
-name = "wry-scry"
-version = "0.1.0"
-dependencies = [
- "block2 0.6.2",
- "dispatch2",
- "dpi",
- "gdk",
- "glib",
- "gtk",
- "image",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-core-foundation",
- "objc2-core-media",
- "objc2-core-video",
- "objc2-foundation 0.3.2",
- "objc2-io-surface",
- "objc2-metal 0.3.2",
- "objc2-screen-capture-kit",
- "objc2-web-kit",
- "thiserror 2.0.18",
- "webkit2gtk",
- "webview2-com",
- "wgpu",
- "wgpu-native-texture-interop",
- "windows 0.61.3",
- "windows-numerics 0.2.0",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "wry-scry",
+    "scrying",
     "demo-wry-winit",
 ]
 resolver = "3"

@@ -3,7 +3,7 @@ name = "demo-wry-winit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Minimal winit + wgpu host probe for wry-scry"
+description = "Minimal winit + wgpu host probe for scrying"
 
 [dependencies]
 pollster = "0.4.0"
@@ -14,7 +14,7 @@ wgpu-native-texture-interop = { path = "../../wgpu-graft/wgpu-native-texture-int
 winit = "0.30.12"
 windows-numerics = "0.2.0"
 wry = "0.55.0"
-wry-scry = { path = "../wry-scry" }
+scrying = { path = "../scrying" }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.61.3"

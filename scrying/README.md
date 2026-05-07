@@ -1,10 +1,10 @@
-# wry-scry
+# scrying
 
 Capability-driven system-webview adapter — scry into WebView2/WKWebView/WebKitGTK and surface frames the host renderer can consume.
 
-The name comes from *scrying* — gazing into a reflective surface for visions. The webview is the surface; the captured frame is the vision; `wry-scry` is the lens.
+The name comes from *scrying* — gazing into a reflective surface for visions. The webview is the surface; the captured frame is the vision; this crate is the lens.
 
-This crate is the home for Wry/WebView-backed frame production. It is deliberately separate from [`wgpu-native-texture-interop`](https://github.com/mark-ik/wgpu-graft) (sibling repo): the native interop crate imports GPU resources, while this adapter owns system-webview probing, fallback selection, and platform-specific frame-source integration.
+This crate is the home for system-webview-backed frame production. It is deliberately separate from [`wgpu-native-texture-interop`](https://github.com/mark-ik/wgpu-graft) (sibling repo): the native interop crate imports GPU resources, while this adapter owns system-webview probing, fallback selection, and platform-specific frame-source integration.
 
 ## Current slice
 
@@ -71,6 +71,6 @@ A more rigorous alternative is to share a `D3D12_FENCE_FLAG_SHARED` fence across
 
 **What this buys:** standards-correct ordering between the producer's writes and the consumer's reads (today's design relies on the consumer-side transition barrier flushing caches, which is not contractual); robustness against future driver changes; reusable for D3D12↔Vulkan / cross-process interop.
 
-**Cost:** ~150–250 lines crossing the wgpu-hal escape hatch (`device.as_hal::<Dx12>()` for the queue), the `windows = "0.61.3"` (this crate, pinned by `webview2-com`) ↔ `windows = "0.62"` (wgpu-hal's transitive) version boundary (raw `*mut c_void` + transmute, the same pattern used in the readback validator), `ID3D11Device5` / `ID3D11DeviceContext4` plumbing, fence-value tracking, and a pre-submit injection point (probably a tiny no-op command buffer that runs `Wait` before the real submit).
+**Cost:** ~150–250 lines crossing the wgpu-hal escape hatch (`device.as_hal::<Dx12>()` for the queue), `ID3D11Device5` / `ID3D11DeviceContext4` plumbing, fence-value tracking, and a pre-submit injection point (probably a tiny no-op command buffer that runs `Wait` before the real submit). The previous `windows 0.61` ↔ `windows 0.62` boundary in this crate goes away once the `webview2-com` dep is bumped to `0.39.1` (already shipped upstream, depends on `windows 0.62`); the demo crate may still see a split via `wry`'s transitive `windows 0.61` until wry bumps.
 
 Worth doing when (a) the adapter ships beyond this development box and a driver gives someone stale frames, (b) GraphShell's interop story expands beyond WebView2 capture, or (c) the code wants to be canonically correct rather than empirically correct.
