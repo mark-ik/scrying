@@ -550,6 +550,18 @@ struct Cli {
     /// disk, then exercises `set_download_handler` returning
     /// `Cancel` and `cancel_download(unknown_id)`.
     download_test: bool,
+    /// Smoke-test the SCK capture pipeline: navigates to a known
+    /// page, kicks off `start_capture_async`, polls
+    /// `capture_status` until `Live`, acquires several frames via
+    /// `try_acquire_frame`, and asserts each frame's size matches
+    /// the configured capture region.
+    ///
+    /// Requires Screen Recording permission. Held out of the
+    /// default `scripts/test-mac.sh` runner because permission
+    /// can't be granted from inside the test process — CI must
+    /// pre-grant via tccutil. Run manually: `cargo run -p
+    /// demo-mac -- --capture-test`.
+    capture_test: bool,
     /// Force the demo window to remain visible even when the test
     /// mode would normally run headless. Useful for debugging a
     /// failing test by watching the WKWebView in real time.
@@ -599,6 +611,16 @@ impl Cli {
                 "--pointer-input-test" => cli.pointer_input_test = true,
                 "--incognito-test" => cli.incognito_test = true,
                 "--download-test" => cli.download_test = true,
+                "--capture-test" => {
+                    // Implies --capture so the existing capture
+                    // setup (WgpuRender + half-window webview +
+                    // capture_kickoff_at) lights up. SCK needs a
+                    // visible window so we also force --visible
+                    // even though this is a *_test mode.
+                    cli.capture_test = true;
+                    cli.capture = true;
+                    cli.visible = true;
+                }
                 "--visible" => cli.visible = true,
                 _ => eprintln!("demo-mac: unknown arg: {arg}"),
             }
@@ -659,6 +681,12 @@ struct AppState {
     /// Set by `--download-test`. Drives the three-phase
     /// download-pipeline assertion.
     download_test: Option<DownloadTestState>,
+    /// Set by `--capture-test`. Counts SCK frames + asserts size.
+    capture_test: Option<CaptureTestState>,
+    /// Webview / capture region size we actually configured
+    /// (`--capture` mode uses left half of the window). Used by
+    /// `--capture-test` to assert the SCK frame dims match.
+    config_capture_size: (u32, u32),
     started_at: Instant,
 }
 
@@ -731,6 +759,19 @@ enum InteractionStateStep {
     AwaitRestore,
     Verify,
     Done,
+}
+
+#[derive(Default)]
+struct CaptureTestState {
+    /// Frames received via `try_acquire_frame` so far. Each entry
+    /// is the frame's reported `(width, height)` so the test can
+    /// assert dims match the configured webview size.
+    frame_dims: Vec<(u32, u32)>,
+    /// Set when the SCK pipeline went `Live` and the test moved
+    /// from "spinning up" to "draining frames".
+    saw_live: bool,
+    /// Final pass/fail accumulator.
+    failures: Vec<String>,
 }
 
 #[derive(Default)]
@@ -1059,14 +1100,47 @@ impl ApplicationHandler for App {
                     CaptureStatus::Live => {
                         // Live: request a redraw to drive the wgpu loop.
                         state.window.request_redraw();
+                        // --capture-test: also drain frames here
+                        // (separate from the wgpu render path) so
+                        // we can assert sizes without depending on
+                        // the redraw cadence.
+                        if state.capture_test.is_some() {
+                            advance_capture_test(state, event_loop);
+                        }
                     }
                     CaptureStatus::Failed(msg) => {
                         eprintln!("demo-mac: capture failed: {msg}");
+                        if let Some(test) = state.capture_test.as_mut() {
+                            test.failures.push(format!(
+                                "capture_status reported Failed: {msg} (Screen Recording permission?)"
+                            ));
+                            finalize_capture_test(state, event_loop);
+                            return;
+                        }
                         event_loop.exit();
                         return;
                     }
                     CaptureStatus::Starting | CaptureStatus::Idle => {
                         // Still spinning up; keep polling.
+                        if let Some(_test) = state.capture_test.as_ref() {
+                            // Bail on a startup deadline — Screen
+                            // Recording permission failures often
+                            // surface as "stuck in Starting"
+                            // rather than an immediate `Failed`.
+                            if state.started_at.elapsed() > Duration::from_secs(15) {
+                                eprintln!(
+                                    "demo-mac: capture-test: capture_status stuck in Starting/Idle for 15s — Screen Recording permission likely missing"
+                                );
+                                if let Some(test) = state.capture_test.as_mut() {
+                                    test.failures.push(
+                                        "capture never reached Live (Screen Recording permission?)"
+                                            .into(),
+                                    );
+                                }
+                                finalize_capture_test(state, event_loop);
+                                return;
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -2558,6 +2632,104 @@ fn advance_incognito_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
     }
 }
 
+/// Drain frames in `--capture-test` mode. Called only when
+/// `capture_status` reports `Live`. Each call pulls one frame via
+/// `try_acquire_frame`, records its `(width, height)` for later
+/// assertion, and advances toward the 5-frame target. Once
+/// reached (or the 30-second wall-clock timeout fires), routes to
+/// `finalize_capture_test`.
+fn advance_capture_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
+    let Some(test) = state.capture_test.as_mut() else {
+        return;
+    };
+    test.saw_live = true;
+
+    match state.producer.try_acquire_frame() {
+        Ok(Some(scrying::WryWebSurfaceFrame::Native(
+            scrying::NativeFrame::MetalTextureRef(frame),
+        ))) => {
+            let dims = (frame.size.width, frame.size.height);
+            if let Some(test) = state.capture_test.as_mut() {
+                test.frame_dims.push(dims);
+            }
+        }
+        Ok(Some(_other)) => {
+            if let Some(test) = state.capture_test.as_mut() {
+                test.failures.push(
+                    "try_acquire_frame returned non-Metal frame variant".into(),
+                );
+            }
+            finalize_capture_test(state, event_loop);
+            return;
+        }
+        Ok(None) => {
+            // No new sample yet; SCK delivers at display refresh
+            // (~16ms). Stay in this state and wait for next tick.
+        }
+        Err(error) => {
+            if let Some(test) = state.capture_test.as_mut() {
+                test.failures.push(format!("try_acquire_frame error: {error}"));
+            }
+            finalize_capture_test(state, event_loop);
+            return;
+        }
+    }
+
+    let target = 5usize;
+    let saw_enough = state
+        .capture_test
+        .as_ref()
+        .map(|t| t.frame_dims.len() >= target)
+        .unwrap_or(true);
+    let timed_out = state.started_at.elapsed() > Duration::from_secs(30);
+    if saw_enough || timed_out {
+        if !saw_enough
+            && let Some(test) = state.capture_test.as_mut()
+        {
+            test.failures.push(format!(
+                "captured {} frame(s) within 30s (target: {target})",
+                test.frame_dims.len()
+            ));
+        }
+        finalize_capture_test(state, event_loop);
+    }
+}
+
+/// Run the PASS / FAIL summary for `--capture-test` and exit.
+/// Takes the test state out of the AppState so repeat ticks of
+/// `about_to_wait` (which fire between `event_loop.exit()` and
+/// the actual loop teardown) don't re-print the summary.
+fn finalize_capture_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
+    let Some(test) = state.capture_test.take() else {
+        return;
+    };
+    let expected = state.config_capture_size;
+    let mut failures = test.failures;
+    for (i, &(w, h)) in test.frame_dims.iter().enumerate() {
+        if (w, h) != expected {
+            failures.push(format!(
+                "frame #{} dims = {}x{}, expected {}x{}",
+                i, w, h, expected.0, expected.1
+            ));
+        }
+    }
+    if failures.is_empty() {
+        println!(
+            "demo-mac: capture-test: PASS — SCK pipeline delivered {} frames at {}x{}",
+            test.frame_dims.len(),
+            expected.0,
+            expected.1,
+        );
+        event_loop.exit();
+    } else {
+        eprintln!("demo-mac: capture-test: FAIL");
+        for f in &failures {
+            eprintln!("  - {f}");
+        }
+        std::process::exit(1);
+    }
+}
+
 /// Drive `--download-test`. Three sub-phases:
 ///
 /// - **Phase A (basic flow)**: load `scrying-test://download`,
@@ -3455,6 +3627,8 @@ impl AppState {
                 ..IncognitoTestState::default()
             }),
             download_test: download_test_state,
+            capture_test: cli.capture_test.then(CaptureTestState::default),
+            config_capture_size: (webview_size.width, webview_size.height),
             started_at: Instant::now(),
         })
     }

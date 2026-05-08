@@ -372,12 +372,15 @@ impl WkWebViewProducer {
             }
         };
 
-        let image_buffer = unsafe { sample.image_buffer() }.ok_or_else(|| {
-            WryWebSurfaceError::Platform(
-                "CMSampleBuffer carried no CVImageBuffer (was the SCStream pixel format set?)"
-                    .into(),
-            )
-        })?;
+        // SCK delivers status-only sample buffers (start, idle,
+        // suspended, stopped, blank) that have no `CVImageBuffer`
+        // attached — only `SCFrameStatus::Complete` samples carry
+        // pixel data. Treat the no-image case as "no frame ready
+        // yet" rather than an error so the consumer just polls
+        // again on the next tick.
+        let Some(image_buffer) = (unsafe { sample.image_buffer() }) else {
+            return Ok(None);
+        };
         // CVPixelBuffer is a type alias for CVImageBuffer in objc2-core-video,
         // so the SCK screen sample buffer can be used directly here without a
         // downcast.
