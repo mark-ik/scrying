@@ -5,10 +5,8 @@ use std::sync::Arc;
 #[cfg(target_os = "windows")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 #[cfg(target_os = "windows")]
-use wgpu_native_texture_interop::Dx12FenceSynchronizer;
-use wgpu_native_texture_interop::{
-    HostWgpuContext, ImportOptions, TextureImporter, WgpuTextureImporter,
-};
+use scrying::Dx12FenceSynchronizer;
+use scrying::{HostWgpuContext, ImportOptions, TextureImporter, WgpuTextureImporter};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -656,7 +654,7 @@ struct CapturedComposition {
     /// The most recently imported WebView texture; `None` until the renderer's
     /// first `try_acquire_frame` lands a frame. The probe path no longer
     /// blocks on an initial acquire (it was an intermittent pump-hang).
-    imported: Option<wgpu_native_texture_interop::ImportedTexture>,
+    imported: Option<scrying::ImportedTexture>,
     producer: scrying::webview2_composition_producer::WebView2CompositionProducer,
     #[allow(dead_code)]
     dispatcher_queue: Option<windows::System::DispatcherQueueController>,
@@ -756,7 +754,7 @@ fn run_webview2_composition_visual_probe(
 
 #[cfg(target_os = "windows")]
 fn validate_imported_pixels(
-    imported: &wgpu_native_texture_interop::ImportedTexture,
+    imported: &scrying::ImportedTexture,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     expected_rgb: (u8, u8, u8),
@@ -1428,7 +1426,7 @@ fn build_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
-    imported: &wgpu_native_texture_interop::ImportedTexture,
+    imported: &scrying::ImportedTexture,
 ) -> wgpu::BindGroup {
     build_bind_group_for_texture(device, layout, sampler, &imported.texture)
 }

@@ -4,7 +4,7 @@ Capability-driven system-webview frame adapter — scry into WebView2/WKWebView/
 
 The name comes from *scrying* — gazing into a reflective surface for visions. The webview is the surface; the captured frame is the vision; this crate is the lens.
 
-This repo was extracted from [`wgpu-graft`](https://github.com/mark-ik/wgpu-graft) on 2026-05-05 so that system-webview frame production has its own place to evolve. `wgpu-graft` continues to own the `wgpu-native-texture-interop` core (native GPU resource import/export) plus Servo-side adapters; `scrying` consumes the interop crate as a downstream consumer.
+This repo was extracted from [`wgpu-graft`](https://github.com/mark-ik/wgpu-graft) on 2026-05-05 so that system-webview frame production has its own place to evolve. `wgpu-graft` is now the Servo testbed (Servo embedding demos + GL-FBO interop). `scrying` owns its native-frame import path in-tree as the [`scrying::native_frame`](scrying/src/native_frame/) module, structurally derived from Slint's [Servo embedding example](https://github.com/slint-ui/slint/tree/master/examples/servo) (see [NOTICE](NOTICE)).
 
 ## Workspace
 
@@ -24,13 +24,9 @@ cargo run   -p demo-wry-winit
 
 ## Relationship to wgpu-graft
 
-`scrying` depends on `wgpu-native-texture-interop` from the sibling `wgpu-graft` repo. Locally the two repos sit side by side under `repos/`, and the dep is wired as a path dep:
+`scrying` and [`wgpu-graft`](https://github.com/mark-ik/wgpu-graft) are sibling projects with no code dependency. `wgpu-graft` is the Servo testbed (GL-FBO interop, Servo embedding demos in winit/iced/xilem/gpui). `scrying` owns its native-frame import in-tree because the producer side is fundamentally different: scrying takes platform-native texture handles directly (D3D12 NT-handle, eventually IOSurface and DMABUF) rather than bridging from a GL framebuffer.
 
-```toml
-wgpu-native-texture-interop = { path = "../../wgpu-graft/wgpu-native-texture-interop" }
-```
-
-If you're consuming `scrying` from outside this layout, point at a git or registry source for `wgpu-native-texture-interop` instead.
+Both projects are structurally inspired by the same upstream — Slint's [Servo embedding example](https://github.com/slint-ui/slint/tree/master/examples/servo) — but adapt it to different consumers (Servo-on-Slint vs. system-webviews-on-wgpu).
 
 ## License
 

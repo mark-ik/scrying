@@ -1,11 +1,17 @@
 #![doc = include_str!("../README.md")]
 
+pub mod native_frame;
+
 use dpi::PhysicalSize;
 use thiserror::Error;
-use wgpu_native_texture_interop::{
-    CapabilityStatus, HostWgpuContext, InteropBackend, InteropError, NativeFrame, NativeFrameKind,
-    ProducerCapabilities,
+
+pub use native_frame::{
+    CapabilityStatus, HostWgpuContext, ImportOptions, ImportedTexture, InteropBackend,
+    InteropError, NativeFrame, NativeFrameKind, ProducerCapabilities, SyncMechanism,
+    TextureImporter, UnsupportedReason, WgpuTextureImporter,
 };
+#[cfg(target_os = "windows")]
+pub use native_frame::Dx12FenceSynchronizer;
 
 #[cfg(target_os = "windows")]
 pub mod windows_capture;
@@ -77,7 +83,7 @@ impl WryWebSurfaceCapabilities {
                 backend: SystemWebviewBackend::WkWebView,
                 preferred_mode: WebSurfaceMode::NativeChildOverlay,
                 imported_texture: CapabilityStatus::Unsupported(
-                    wgpu_native_texture_interop::UnsupportedReason::NativeImportNotYetImplemented,
+                    crate::native_frame::UnsupportedReason::NativeImportNotYetImplemented,
                 ),
                 native_child_overlay: CapabilityStatus::Supported,
                 cpu_snapshot: CapabilityStatus::Supported,
@@ -88,11 +94,11 @@ impl WryWebSurfaceCapabilities {
                 backend: SystemWebviewBackend::WebKitGtk,
                 preferred_mode: WebSurfaceMode::NativeChildOverlay,
                 imported_texture: CapabilityStatus::Unsupported(
-                    wgpu_native_texture_interop::UnsupportedReason::NativeImportNotYetImplemented,
+                    crate::native_frame::UnsupportedReason::NativeImportNotYetImplemented,
                 ),
                 native_child_overlay: CapabilityStatus::Supported,
                 cpu_snapshot: CapabilityStatus::Unsupported(
-                    wgpu_native_texture_interop::UnsupportedReason::NativeImportNotYetImplemented,
+                    crate::native_frame::UnsupportedReason::NativeImportNotYetImplemented,
                 ),
                 supported_frames: Vec::new(),
                 reason: "WebKitGTK has internal DMABUF presentation paths, but Wry does not expose them as a frame producer.",
@@ -101,13 +107,13 @@ impl WryWebSurfaceCapabilities {
                 backend: SystemWebviewBackend::Unknown,
                 preferred_mode: WebSurfaceMode::Unsupported,
                 imported_texture: CapabilityStatus::Unsupported(
-                    wgpu_native_texture_interop::UnsupportedReason::HostBackendUnavailable,
+                    crate::native_frame::UnsupportedReason::HostBackendUnavailable,
                 ),
                 native_child_overlay: CapabilityStatus::Unsupported(
-                    wgpu_native_texture_interop::UnsupportedReason::HostBackendUnavailable,
+                    crate::native_frame::UnsupportedReason::HostBackendUnavailable,
                 ),
                 cpu_snapshot: CapabilityStatus::Unsupported(
-                    wgpu_native_texture_interop::UnsupportedReason::HostBackendUnavailable,
+                    crate::native_frame::UnsupportedReason::HostBackendUnavailable,
                 ),
                 supported_frames: Vec::new(),
                 reason: "No Wry/system-webview backend is defined for this platform.",
@@ -126,10 +132,10 @@ fn probe_webview2(host: Option<&HostWgpuContext>) -> WryWebSurfaceCapabilities {
     let imported_texture = match host.map(|host| host.backend) {
         Some(InteropBackend::Dx12) => CapabilityStatus::Supported,
         Some(_) => CapabilityStatus::Unsupported(
-            wgpu_native_texture_interop::UnsupportedReason::HostBackendMismatch,
+            crate::native_frame::UnsupportedReason::HostBackendMismatch,
         ),
         None => CapabilityStatus::Unsupported(
-            wgpu_native_texture_interop::UnsupportedReason::HostBackendUnavailable,
+            crate::native_frame::UnsupportedReason::HostBackendUnavailable,
         ),
     };
 
@@ -639,7 +645,7 @@ mod tests {
         assert_eq!(
             caps.imported_texture,
             CapabilityStatus::Unsupported(
-                wgpu_native_texture_interop::UnsupportedReason::HostBackendUnavailable,
+                crate::native_frame::UnsupportedReason::HostBackendUnavailable,
             )
         );
     }

@@ -199,11 +199,11 @@ impl WkWebViewProducer {
             capabilities: WryWebSurfaceCapabilities {
                 backend: SystemWebviewBackend::WkWebView,
                 preferred_mode: WebSurfaceMode::NativeChildOverlay,
-                imported_texture: wgpu_native_texture_interop::CapabilityStatus::Unsupported(
-                    wgpu_native_texture_interop::UnsupportedReason::NativeImportNotYetImplemented,
+                imported_texture: crate::native_frame::CapabilityStatus::Unsupported(
+                    crate::native_frame::UnsupportedReason::NativeImportNotYetImplemented,
                 ),
-                native_child_overlay: wgpu_native_texture_interop::CapabilityStatus::Supported,
-                cpu_snapshot: wgpu_native_texture_interop::CapabilityStatus::Supported,
+                native_child_overlay: crate::native_frame::CapabilityStatus::Supported,
+                cpu_snapshot: crate::native_frame::CapabilityStatus::Supported,
                 supported_frames: Vec::new(),
                 reason: "WkWebViewProducer is a planning skeleton; ScreenCaptureKit + IOSurface → Metal capture is not yet wired.",
             },
@@ -253,7 +253,7 @@ impl WkWebViewProducer {
     ///    0 for BGRA). The descriptor uses
     ///    `pixelFormat = .bgra8Unorm`, `usage = [.shaderRead]`,
     ///    `storageMode = .shared`.
-    /// 6. Build a `wgpu_native_texture_interop::MetalTextureRef`
+    /// 6. Build a `crate::native_frame::MetalTextureRef`
     ///    pointing at the raw `MTLTexture *`, return as
     ///    `WryWebSurfaceFrame::Native(NativeFrame::Metal(...))`.
     pub fn try_acquire_frame(

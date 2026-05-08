@@ -1,0 +1,26 @@
+scrying — Capability-driven system-webview frame adapter
+=========================================================
+
+This project is licensed under MPL-2.0 as a whole. See LICENSE for the
+license text.
+
+Upstream attribution
+--------------------
+
+The `scrying::native_frame` module is structurally derived from the
+per-platform `rendering_context/` shape used in the Slint Servo embedding
+example:
+
+    Copyright (c) SixtyFPS GmbH <info@slint.dev>
+    Licensed under MIT
+    https://github.com/slint-ui/slint/tree/master/examples/servo
+
+The upstream example takes Servo-emitted GL framebuffer surfaces and
+imports them into Slint's wgpu pipeline. scrying takes platform-native
+texture handles directly (D3D12 NT-handle today; IOSurface and DMABUF
+when the macOS / Linux producers land) and imports them into a host
+wgpu device.
+
+Files originally derived from the Slint example retain MIT licensing;
+modifications and new files in this project are MPL-2.0. The combined
+work is distributed as MPL-2.0 as permitted by MIT.

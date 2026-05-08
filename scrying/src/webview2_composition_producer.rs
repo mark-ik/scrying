@@ -87,7 +87,7 @@ pub struct WebView2CompositionConfig {
     pub frame_timeout: Duration,
     /// Optional NT shared handle to a `D3D12_FENCE_FLAG_SHARED` fence
     /// (typically from
-    /// `wgpu_native_texture_interop::Dx12FenceSynchronizer::shared_handle`).
+    /// `crate::native_frame::Dx12FenceSynchronizer::shared_handle`).
     /// When `Some`, the producer opens the fence on its D3D11 device and
     /// signals it after each `CopyResource` instead of using a keyed mutex
     /// + CPU spin. Frames are then emitted with
@@ -1180,12 +1180,12 @@ impl crate::WryWebSurfaceProducer for WebView2CompositionProducer {
         WryWebSurfaceCapabilities {
             backend: SystemWebviewBackend::WebView2,
             preferred_mode: WebSurfaceMode::ImportedTexture,
-            imported_texture: wgpu_native_texture_interop::CapabilityStatus::Supported,
+            imported_texture: crate::native_frame::CapabilityStatus::Supported,
             native_child_overlay:
-                wgpu_native_texture_interop::CapabilityStatus::Supported,
-            cpu_snapshot: wgpu_native_texture_interop::CapabilityStatus::Supported,
+                crate::native_frame::CapabilityStatus::Supported,
+            cpu_snapshot: crate::native_frame::CapabilityStatus::Supported,
             supported_frames: vec![
-                wgpu_native_texture_interop::NativeFrameKind::Dx12SharedTexture,
+                crate::native_frame::NativeFrameKind::Dx12SharedTexture,
             ],
             reason: "WebView2 CompositionController visual + Windows.Graphics.Capture + shared D3D11 NT-handle texture imported as Dx12SharedTexture.",
         }

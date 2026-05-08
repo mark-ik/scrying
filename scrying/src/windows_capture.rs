@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dpi::PhysicalSize;
-use wgpu_native_texture_interop::{Dx12SharedTexture, NativeFrame, SyncMechanism};
+use crate::native_frame::{Dx12SharedTexture, NativeFrame, SyncMechanism};
 use windows::Win32::{
     Foundation::{CloseHandle, HANDLE, HMODULE, HWND},
     Graphics::{

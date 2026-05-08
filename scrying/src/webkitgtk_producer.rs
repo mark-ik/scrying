@@ -208,12 +208,12 @@ impl WebKitGtkProducer {
             capabilities: WryWebSurfaceCapabilities {
                 backend: SystemWebviewBackend::WebKitGtk,
                 preferred_mode: WebSurfaceMode::NativeChildOverlay,
-                imported_texture: wgpu_native_texture_interop::CapabilityStatus::Unsupported(
-                    wgpu_native_texture_interop::UnsupportedReason::NativeImportNotYetImplemented,
+                imported_texture: crate::native_frame::CapabilityStatus::Unsupported(
+                    crate::native_frame::UnsupportedReason::NativeImportNotYetImplemented,
                 ),
-                native_child_overlay: wgpu_native_texture_interop::CapabilityStatus::Supported,
-                cpu_snapshot: wgpu_native_texture_interop::CapabilityStatus::Unsupported(
-                    wgpu_native_texture_interop::UnsupportedReason::NativeImportNotYetImplemented,
+                native_child_overlay: crate::native_frame::CapabilityStatus::Supported,
+                cpu_snapshot: crate::native_frame::CapabilityStatus::Unsupported(
+                    crate::native_frame::UnsupportedReason::NativeImportNotYetImplemented,
                 ),
                 supported_frames: Vec::new(),
                 reason: "WebKitGtkProducer is a planning skeleton; the WPE DMABUF / wlroots screencopy paths are not yet wired.",
@@ -261,7 +261,7 @@ impl WebKitGtkProducer {
     ///    `VkImageDrmFormatModifierExplicitCreateInfoEXT`.
     /// 4. Wrap as a wgpu texture via wgpu-hal's
     ///    `vulkan::Device::texture_from_raw`.
-    /// 5. Build a `wgpu_native_texture_interop::VulkanExternalImage`
+    /// 5. Build a `crate::native_frame::VulkanExternalImage`
     ///    pointing at the wgpu texture, return as
     ///    `WryWebSurfaceFrame::Native(NativeFrame::Vulkan(...))`.
     /// 6. The consumer's render must `vkQueueSubmit` with

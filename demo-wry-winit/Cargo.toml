@@ -10,7 +10,6 @@ pollster = "0.4.0"
 raw-window-handle = "0.6"
 webview2-com = "0.39.1"
 wgpu = { version = "29.0.1", features = ["metal"] }
-wgpu-native-texture-interop = { path = "../../wgpu-graft/wgpu-native-texture-interop", default-features = false }
 winit = "0.30.12"
 windows-numerics = "0.3"
 wry = "0.55.0"

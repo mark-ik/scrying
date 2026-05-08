@@ -357,103 +357,50 @@ independently when the work is ready:
 
 ---
 
-## Dependency: changes required in `wgpu-native-texture-interop`
+## Native-frame import: in-tree as `scrying::native_frame`
 
-The parity roadmap can't be delivered entirely from inside scrying.
-Three concrete pieces of work fall in the sibling crate
-[`wgpu-native-texture-interop`](https://crates.io/crates/wgpu-native-texture-interop)
-(currently 0.1.1).
+Scrying owns its native-frame import path in-tree as the
+[`scrying::native_frame`](../scrying/src/native_frame/) module. It is
+**not** a dependency on a sibling crate. This was a deliberate split
+from the original plan to share `wgpu-native-texture-interop` with
+[`wgpu-graft`](https://github.com/mark-ik/wgpu-graft).
 
-### 1. Built-in synchronizers for explicit GPU sync
+**Why in-tree**: the two projects' producers have different shapes.
+wgpu-graft consumes Servo via surfman GL framebuffer surfaces and
+bridges them to wgpu. scrying consumes platform-native texture
+handles directly (D3D12 NT-handle today; IOSurface and DMABUF when
+the macOS / Linux producers land). Sharing one crate would force two
+genuinely different problems through the same abstraction.
 
-`SyncMechanism` already has `ExplicitFence` and
-`ExplicitExternalSemaphore` variants. The `InteropSynchronizer` trait
-is in place. But only `NoopSynchronizer` and `ImplicitOnlySynchronizer`
-ship as built-ins, and both reject the explicit variants.
+The module is structurally derived from the per-platform shape in
+Slint's [Servo embedding example](https://github.com/slint-ui/slint/tree/master/examples/servo),
+adapted to take native handles directly (no GL bridge) and folded
+together with scrying's explicit-fence wiring. See [NOTICE](../NOTICE)
+for the upstream attribution.
 
-The roadmap needs:
+What lives in `native_frame/` today:
 
-- `Dx12FenceSynchronizer` — opens a `D3D12_FENCE_FLAG_SHARED` shared
-  handle on the wgpu D3D12 device, queues
-  `ID3D12CommandQueue::Wait(fence, value)` before the consumer's
-  submit. This is the **fence work** for Windows.
-- `VulkanSemaphoreSynchronizer` — accepts a per-frame `VkSemaphore`
-  fd from the producer (matches the WPE DMABUF protocol's per-frame
-  semaphore), waits on the wgpu Vulkan queue.
-- `MetalSharedEventSynchronizer` — precautionary; not required for
-  correctness today (IOSurface coherence is implicit).
+- `mod.rs` — `HostWgpuContext`, `NativeFrame`, `Dx12SharedTexture`,
+  `WgpuTextureImporter` + the import dispatch. Drops the GL FBO
+  source variants from wgpu-graft's interop crate; only emits
+  variants for which scrying has a working producer.
+- `error.rs` — `InteropError`, `UnsupportedReason`.
+- `sync.rs` — `SyncMechanism` (`None` / `ExplicitExternalSemaphore` /
+  `ExplicitFence`), `InteropSynchronizer` trait,
+  `NoopSynchronizer`, `ImplicitOnlySynchronizer`.
+- `sync_dx12.rs` — `Dx12FenceSynchronizer` (Windows).
 
-### 2. Complete the `VulkanExternalImage` import path
+What lands here as the macOS / Linux producers come online:
 
-`NativeFrame::VulkanExternalImage` exists for API symmetry but the
-import dispatch in `WgpuTextureImporter::import_frame` currently
-returns `InteropError::Unsupported`. For the Linux WPE producer this
-needs to be a real path: DMABUF fd → `VkImage` via
-`VK_KHR_external_memory_fd` (with DRM modifier handling) →
-`wgpu::Texture` via the Vulkan hal. The structural code in
-`raw_gl/linux.rs` for the GL→Vulkan import is ~80% of what's needed;
-the new path skips the GL framebuffer source and imports the DMABUF
-directly.
+- `IoSurfaceTexture` variant on `NativeFrame` + `import_io_surface_texture`
+  (macOS). Optional `MetalSharedEventSynchronizer` if implicit
+  IOSurface coherence ever fails.
+- `DmaBufImage` variant on `NativeFrame` + `import_dma_buf_image`
+  (Linux WPE). `VulkanSemaphoreSynchronizer` for the per-frame
+  `VkSemaphore` the WPE DMABUF protocol carries.
 
-### 3. Deferred: pre-submit hook on `InteropSynchronizer`
-
-The current trait hooks fire at *import time* (`producer_complete`
-post-acquire, `consumer_ready` post-import). A fence wait wants to
-enqueue `Wait(fence, value)` *immediately before the consumer's
-render submit*.
-
-The synchronizers in §1 do not require a trait change to do this:
-
-- **D3D12 fence**: `ID3D12CommandQueue::Wait` is queue-level and
-  persistent. Multiple Waits enqueued in successive
-  `producer_complete` calls all gate the next submit correctly,
-  even with multi-import-per-submit. Putting the Wait in
-  `producer_complete` is correct, not a workaround.
-- **Vulkan semaphore**: `vkQueueSubmit` carries `pWaitSemaphores`
-  per-submit, so a queue-level wait isn't directly available. The
-  synchronizer uses the standard pattern of issuing a standalone
-  "pure wait" `vkQueueSubmit` (wait semaphore, no command buffers)
-  inside `producer_complete`. One extra submit per frame is
-  acceptable at 60–144 Hz and is the canonical cross-API
-  semaphore-handoff pattern.
-- **Metal shared event**: same shape — `encodeWait(forEvent:value:)`
-  on a throwaway empty command buffer in `producer_complete`.
-
-A `pre_submit(&queue)` trait method would let the Vulkan and Metal
-paths skip the standalone wait submit (one fewer submit per frame).
-That's a future optimization, not load-bearing for the
-fence/semaphore work, and is deferrable to a later release once
-profiling shows whether the standalone-submit cost matters.
-
-### What does *not* need interop-crate changes
-
-- `MetalTextureRef` import is already wired — macOS producer can
-  hand it MTLTextures from `CVMetalTextureCache` directly.
-- `Dx12SharedTexture` import is already wired — the Windows
-  producer's frame handoff doesn't change for the fence upgrade,
-  only the synchronizer plumbing does.
-- Every scrying-side embedding-API expansion (input forwarding,
-  settings, profile, custom URL schemes, navigation control,
-  drag-and-drop, IME) lives entirely in scrying.
-
-### Versioning impact
-
-The whole work surface is **additive**:
-
-- Synchronizer additions: new public types (`Dx12FenceSynchronizer`,
-  `VulkanSemaphoreSynchronizer`, `MetalSharedEventSynchronizer`),
-  no trait changes.
-- Completing `VulkanExternalImage` import: replaces an
-  `Unsupported` arm with real behaviour.
-- No breaking changes to `InteropSynchronizer`,
-  `SyncMechanism`, `NativeFrame`, `WgpuTextureImporter`, or any
-  existing types' public surface.
-
-Sized as a `0.2.0` bump because the new explicit-sync surface is
-materially new functionality, not a patch. scrying updates its dep
-to `version = "0.2"` and gains the new synchronizers; the
-producer-side fence wiring in scrying ships at the same release
-where it picks up `wgpu-native-texture-interop 0.2`.
+These are scrying-internal additions. No cross-crate coordination
+required.
 
 ---
 
