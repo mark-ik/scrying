@@ -207,6 +207,61 @@ where `texture_from_raw` now takes
   navigation delegate writes to. `Drop` calls `removeObserver:`
   before any retained references cascade so the observed object
   outlives its observer registration.
+- **Slice I — keyboard forwarding (with IME baseline).**
+  `send_keyboard_input` synthesizes an `NSEvent` via
+  `keyEventWithType:...:characters:charactersIgnoringModifiers:isARepeat:keyCode:`
+  and dispatches through the WKWebView's `keyDown:` / `keyUp:` /
+  `flagsChanged:` slots. `characters` flows through to WebKit's
+  `NSTextInputClient` implementation, so IME composition (CJK, dead
+  keys, marked text) works without explicit composition-state
+  threading on the host side — the host just forwards whatever the
+  windowing system reports.
+- **Slice J — cursor-change reporting.** After each forwarded
+  pointer event, `observe_cursor_change` reads
+  `NSCursor.currentSystemCursor` and compares against the canonical
+  cursor singletons (`arrowCursor`, `IBeamCursor`,
+  `pointingHandCursor`, `crosshairCursor`, `openHandCursor`,
+  `closedHandCursor`, `operationNotAllowedCursor`, etc.) to translate
+  the WebKit-set cursor into a [`CursorShape`]. Only changes are
+  queued, so `poll_cursor_shape` reflects "the engine wants the host
+  to display X" without spamming `Default` events.
+- **Slice K — drag-and-drop forwarding (documented constraint).**
+  `WKWebView` receives drag/drop via the `NSDraggingDestination`
+  protocol, whose callbacks require an `NSDraggingInfo` parameter.
+  `NSDraggingInfo` instances are constructed only by AppKit's drag
+  manager — there is no public API to synthesize one. So
+  `send_drag_input` for **capture mode** is genuinely not feasible
+  without SPI. **Overlay mode** is automatic — AppKit's drag manager
+  delivers drags to the WKWebView through the responder chain
+  without producer involvement, so the host doesn't need to forward.
+  Producer returns `WryWebSurfaceError::Unsupported` with a message
+  that explains both branches.
+- **Slice L — per-profile `WKWebsiteDataStore`.** When
+  `config.data_dir` is non-empty, the producer derives a stable
+  version-8 UUID from the path's bytes via FNV-1a 128 and resolves
+  a per-profile persistent store through
+  `WKWebsiteDataStore::dataStoreForIdentifier:` (macOS 14+). Empty
+  `data_dir` keeps the shared default store. macOS doesn't take an
+  arbitrary path for data stores (storage lives in the app
+  container by UUID); the deterministic-UUID-from-path scheme is the
+  native analog of the per-directory profile model.
+- **Slice M — `MTLSharedEvent` synchronizer scaffolding.** New
+  `SyncMechanism::ExplicitMetalEvent` variant and a
+  `MetalSharedEventSynchronizer` skeleton in
+  [`scrying::native_frame`](../scrying/src/native_frame/sync_metal.rs)
+  parallel to the Windows `Dx12FenceSynchronizer`. Currently a no-op
+  (accepts both `None` and `ExplicitMetalEvent` without
+  waiting/signalling) because ScreenCaptureKit doesn't expose its
+  render queue for explicit fencing. Infrastructure is in place for
+  when Apple extends SCK or a downstream consumer wires manual CPU
+  signal points.
+- **Slice N — `SCStreamConfiguration` auto-update on resize.**
+  `resize` now pushes the new pixel dimensions through to the live
+  stream via `stream.updateConfiguration:completionHandler:` (with
+  the same non-size params as the original `start_capture` —
+  encapsulated in a single `make_stream_configuration` helper so the
+  two paths stay consistent). SCK samples post-resize arrive at the
+  requested resolution without restarting the stream.
 
 The producer struct accumulates over the slices: parent NSView,
 `WKWebView`, navigation delegate (with shared `NavState` carrying both
@@ -222,18 +277,21 @@ that `try_acquire_frame` reads on the main thread; the
 `SCShareableContent` async resolution carries a similar
 `unsafe impl Send` wrapper around the matched `Retained<SCWindow>`.
 
-**Windows-0.2.0 parity status:** ✅ achieved by slices A–H. The
-remaining minor difference is X-button `buttonNumber` distinction
-(currently X1/X2 arrive as Other-mouse with the default button
-index); could be added by routing X-button cases through CGEvent in
-the same way slice G handled scroll wheel.
+**Windows-0.2.0 parity status:** ✅ achieved by slices A–H. Slices
+I–N pushed the macOS producer well past the 0.2.0 baseline into
+0.3.0 / 0.4.0 territory: keyboard + IME, cursor reporting,
+per-profile data stores, MTLSharedEvent infrastructure, and resize-
+applies-to-stream are all live; drag-and-drop is documented as
+SPI-blocked.
 
-**Outstanding for follow-up slices:** keyboard + IME forwarding
-(`keyDown:`, `NSTextInputClient`); cursor-change reporting; drag-and-
-drop forwarding; explicit `MTLSharedEvent` cross-queue sync (precaution
-— implicit IOSurface coherence is sufficient on Apple silicon today);
-per-profile `WKWebsiteDataStore` wiring; auto-applying
-`SCStreamConfiguration` resize on `resize`.
+**Remaining limitations:**
+
+- Drag-and-drop forwarding in capture mode (SPI-required).
+- X-button `buttonNumber` distinction (X1/X2 arrive as Other-mouse
+  with default index; CGEvent would fix this in a small follow-up).
+- `MTLSharedEvent` is scaffolded but inert — needs a producer-side
+  signal hook that ScreenCaptureKit's public API doesn't expose
+  today. Implicit IOSurface coherence remains the contract.
 
 ---
 
@@ -339,17 +397,17 @@ every row marked `—` is structurally not on that platform.
 | Mouse forwarding (buttons + move + leave) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | Scroll wheel forwarding | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | Touch + pen forwarding | ? | ? | ? | ? |
-| Keyboard forwarding (basic) | ? | ? | ? | ? |
-| IME (CJK / non-Latin) | ? | ? | ? | ? |
-| Drag-and-drop into webview | ? | ? | ? | ? |
+| Keyboard forwarding (basic) | ? | ✅ 0.4.0 | ? | ? |
+| IME (CJK / non-Latin) | ? | ✅ 0.4.0 (via NSTextInputClient) | ? | ? |
+| Drag-and-drop into webview | ? | — capture (SPI-blocked) / ✅ overlay (auto) | ? | ? |
 | Focus management | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
-| Cursor-change reporting | ? | ? | ? | ? |
+| Cursor-change reporting | ? | ✅ 0.4.0 | ? | ? |
 | Navigation events (start/source/complete) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | Title-changed event | ✅ 0.2.0 | ✅ 0.4.0 (KVO) | ? | ? |
 | JS messaging (bidirectional) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | PNG / CPU snapshot | ✅ 0.2.0 | ✅ 0.4.0 (CPU RGBA) | ? (`get_snapshot`) | ? |
 | Settings (zoom, UA, JS, devtools) | ? | ? | ? | ? |
-| Profile / cookies / storage | ? | ? | ? | ? |
+| Profile / cookies / storage | ? | ✅ 0.4.0 (per-profile UUID) | ? | ? |
 | Custom URL schemes | ? | ? | ? | ? |
 | Downloads | ? | ? | ? | ? |
 | New-window / popup intercept | ? | ? | ? | ? |

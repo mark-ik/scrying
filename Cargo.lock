@@ -641,6 +641,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
+name = "demo-mac"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "pollster",
+ "raw-window-handle",
+ "scrying",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "demo-wry-winit"
 version = "0.1.0"
 dependencies = [

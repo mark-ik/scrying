@@ -22,6 +22,9 @@ pub mod webview2_composition_producer;
 #[cfg(target_os = "macos")]
 pub mod wkwebview_producer;
 
+#[cfg(target_os = "macos")]
+pub use wkwebview_producer::{CaptureStatus, WkWebViewProducer, WkWebViewProducerConfig};
+
 #[cfg(target_os = "linux")]
 pub mod webkitgtk_producer;
 
@@ -456,6 +459,18 @@ pub trait WryWebSurfaceProducer {
     /// `NavigationCompleted` (or analog) fires, or the timeout elapses.
     /// Producers that don't yet support navigation return
     /// [`WryWebSurfaceError::Unsupported`].
+    ///
+    /// # ⚠️ Blocking — host-event-loop hazard
+    ///
+    /// On macOS this method pumps the main `NSRunLoop` to wait for
+    /// the navigation delegate. Calling it from inside a host
+    /// event-loop callback (e.g. winit's `resumed` / `window_event`
+    /// under macOS, where winit guards against re-entrant handler
+    /// invocation) will trigger a re-entrancy panic. From event-loop
+    /// callbacks, prefer the non-blocking inherent
+    /// [`crate::wkwebview_producer::WkWebViewProducer::load_html`]
+    /// and observe completion via
+    /// [`Self::poll_navigation_event`].
     fn navigate_to_string(
         &mut self,
         html: &str,
@@ -495,6 +510,14 @@ pub trait WryWebSurfaceProducer {
     /// `NavigationCompleted` fires (or the timeout elapses). Producers
     /// that don't yet support URL navigation return
     /// [`WryWebSurfaceError::Unsupported`].
+    ///
+    /// # ⚠️ Blocking — host-event-loop hazard
+    ///
+    /// Same caveat as [`Self::navigate_to_string`]: pumps the main
+    /// `NSRunLoop` on macOS, panics if invoked from a winit event
+    /// handler. Use [`crate::wkwebview_producer::WkWebViewProducer::load_url`]
+    /// paired with [`Self::poll_navigation_event`] for non-blocking
+    /// navigation from event-loop contexts.
     fn navigate_to_url(
         &mut self,
         url: &str,

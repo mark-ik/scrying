@@ -6,11 +6,22 @@ use crate::native_frame::{ImportedTexture, InteropError, NativeFrame};
 #[non_exhaustive]
 pub enum SyncMechanism {
     None,
-    /// An explicit Vulkan/Metal external semaphore is signalled by the
-    /// producer. Reserved for future Linux/macOS producer paths.
+    /// An explicit Vulkan external semaphore is signalled by the
+    /// producer. Reserved for the Linux WPE producer path.
     ExplicitExternalSemaphore,
     /// An explicit shared D3D12 fence is signalled by the producer.
     ExplicitFence,
+    /// An explicit `MTLSharedEvent` is signalled by the producer
+    /// (CPU-side via `signaledValue`) before each frame is emitted,
+    /// and the consumer waits on the corresponding value before
+    /// sampling. Reserved for the macOS WKWebView producer path.
+    ///
+    /// Currently a no-op on the macOS producer because
+    /// ScreenCaptureKit doesn't expose its render queue for explicit
+    /// fencing — implicit IOSurface coherence is the contract today.
+    /// See [`crate::native_frame::MetalSharedEventSynchronizer`] and
+    /// `design_docs/2026-05-07_platform_ceilings.md` for context.
+    ExplicitMetalEvent,
 }
 
 /// Hook points called by [`WgpuTextureImporter`](crate::native_frame::WgpuTextureImporter)

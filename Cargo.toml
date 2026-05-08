@@ -2,6 +2,7 @@
 members = [
     "scrying",
     "demo-wry-winit",
+    "demo-mac",
 ]
 resolver = "3"
 

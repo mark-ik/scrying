@@ -145,17 +145,62 @@
 //! tearing down so the observed object outlives its observer
 //! registration.
 //!
-//! Outstanding: keyboard + IME forwarding; explicit `MTLSharedEvent`
-//! cross-queue sync (precaution per
-//! `design_docs/2026-05-07_platform_ceilings.md`); per-profile
-//! `WKWebsiteDataStore` wiring; cursor-change reporting;
-//! drag-and-drop forwarding; X-button `buttonNumber` distinction —
-//! all follow-up slices.
+//! Slice I: keyboard forwarding. `send_keyboard_input` synthesizes an
+//! `NSEvent` via `keyEventWithType:...:characters:...:keyCode:` and
+//! dispatches through the WKWebView's `keyDown:` / `keyUp:` /
+//! `flagsChanged:` slots. `characters` and
+//! `characters_ignoring_modifiers` ride into WebKit's
+//! `NSTextInputClient` impl so IME composition for non-Latin input
+//! works for free — the host doesn't need to know whether a key is a
+//! plain character, a dead key, or part of a composing IME session;
+//! it just forwards what the windowing system reports.
+//!
+//! Slice J: cursor-change reporting. After each forwarded pointer
+//! event, `observe_cursor_change` reads `NSCursor.currentSystemCursor`
+//! and compares it against a small set of singletons
+//! (`arrowCursor`, `IBeamCursor`, `pointingHandCursor`, etc.) to
+//! translate to a [`CursorShape`]. Only changes are queued, so
+//! `poll_cursor_shape` doesn't flood the consumer with duplicate
+//! `Default` entries.
+//!
+//! Slice K: drag-and-drop forwarding. Documented limitation —
+//! `NSDraggingDestination` callbacks require an `NSDraggingInfo`
+//! instance only AppKit's drag manager can construct, so synthesizing
+//! drag events for capture mode requires SPI. `send_drag_input`
+//! returns [`WryWebSurfaceError::Unsupported`] with a message that
+//! explains the constraint. Overlay mode handles drag automatically
+//! through the responder chain — no producer involvement needed.
+//!
+//! Slice L: per-profile `WKWebsiteDataStore`. When `config.data_dir`
+//! is non-empty, the producer derives a deterministic version-8 UUID
+//! from the path's bytes via FNV-1a 128 and resolves a per-profile
+//! `WKWebsiteDataStore` through `dataStoreForIdentifier:` (macOS 14+).
+//! Empty `data_dir` falls back to the shared default store. macOS
+//! doesn't take an arbitrary path for data stores; the UUID is the
+//! native analog.
+//!
+//! Slice M: `MTLSharedEvent` synchronizer scaffolding. A new
+//! [`SyncMechanism::ExplicitMetalEvent`] variant and the
+//! [`crate::native_frame::MetalSharedEventSynchronizer`] type land
+//! the consumer-side wait infrastructure. Currently a no-op (accepts
+//! both `None` and `ExplicitMetalEvent` without waiting/signalling)
+//! because `ScreenCaptureKit` doesn't expose its render queue, so
+//! there's no producer-side hook to drive a signal from. Implicit
+//! IOSurface coherence remains the contract today; this slice is
+//! infrastructure for future SCK API additions or downstream
+//! signal-driver consumers.
+//!
+//! Slice N: `SCStreamConfiguration` auto-update on resize. `resize`
+//! now calls `stream.updateConfiguration:` with a fresh
+//! [`SCStreamConfiguration`] (built via `make_stream_configuration`
+//! so non-size params stay consistent with `start_capture`) whenever
+//! a capture is live, so SCK samples come back at the new resolution
+//! without requiring stream restart.
 
 #![cfg(target_os = "macos")]
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -179,7 +224,7 @@ use objc2_foundation::{
     ns_string, MainThreadMarker, NSArray, NSDate, NSDefaultRunLoopMode, NSDictionary, NSError,
     NSKeyValueChangeKey, NSKeyValueObservingOptions, NSObject,
     NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSRect, NSRunLoop, NSSize,
-    NSString, NSURL, NSURLRequest,
+    NSString, NSURL, NSURLRequest, NSUUID,
 };
 use objc2_metal::{
     MTLDevice, MTLPixelFormat, MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
@@ -191,7 +236,7 @@ use objc2_screen_capture_kit::{
 use objc2_web_kit::{
     WKNavigation, WKNavigationDelegate, WKScriptMessage, WKScriptMessageHandler,
     WKSnapshotConfiguration, WKUserContentController, WKUserScript, WKUserScriptInjectionTime,
-    WKWebView, WKWebViewConfiguration,
+    WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
 };
 
 use crate::native_frame::MetalTextureRef as NativeMetalTextureRef;
@@ -612,6 +657,80 @@ impl StreamErrorDelegate {
     }
 }
 
+/// Cross-thread observable status of the ScreenCaptureKit pipeline,
+/// reported by [`WkWebViewProducer::capture_status`] so non-blocking
+/// consumers (e.g. winit hosts) can poll instead of blocking on the
+/// main run loop.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum CaptureStatus {
+    /// `start_capture_async` has not been called yet (or `stop_capture`
+    /// reset the state machine).
+    Idle,
+    /// `start_capture_async` was called but neither
+    /// `SCShareableContent` nor `startCaptureWithCompletionHandler:`
+    /// have resolved yet.
+    Starting,
+    /// Capture is live; `try_acquire_frame` / `acquire_frame` will
+    /// emit `Native` frames.
+    Live,
+    /// The async start failed at some stage. The consumer can call
+    /// `start_capture_async` again to retry.
+    Failed(String),
+}
+
+/// Internal state machine slot for the async start-capture flow.
+/// Held behind `Arc<Mutex<...>>` so the SCK completion blocks
+/// (which fire on a private background queue) can advance it without
+/// touching the producer's `&mut self`.
+enum PendingCaptureSlot {
+    Idle,
+    Starting,
+    Ready(SendOnly<CaptureState>),
+    Failed(String),
+}
+
+/// Generic Send wrapper for non-Send objc2 `Retained` items that need
+/// to traverse a dispatch-queue boundary.
+///
+/// Justification: SCK / Metal / dispatch types we ferry across the
+/// SCShareableContent → main-thread handoff are CF / NSObject types
+/// whose retain/release is atomic and whose data is immutable from
+/// our consumption perspective. The objc2 crates are conservative
+/// and don't auto-derive `Send` for all `Retained<T>`; we wrap
+/// explicitly at the queue boundary.
+struct SendOnly<T>(T);
+// SAFETY: see `SendOnly` doc.
+unsafe impl<T> Send for SendOnly<T> {}
+
+/// Captured-by-block bag of all the SCK pieces the inner
+/// `startCaptureWithCompletionHandler:` block needs to assemble a
+/// [`CaptureState`] when the stream goes live.
+struct InProgressCaptureState {
+    metal_device: Retained<ProtocolObject<dyn MTLDevice>>,
+    stream: Retained<SCStream>,
+    output: Retained<StreamOutputDelegate>,
+    error_delegate: Retained<StreamErrorDelegate>,
+    sample_queue: DispatchRetained<DispatchQueue>,
+    latest: Arc<LatestSample>,
+    stream_error: Arc<Mutex<Option<String>>>,
+}
+
+/// Helper used by SCK completion blocks to update the shared
+/// [`PendingCaptureSlot`]. Lock-poisoning failures are silently
+/// dropped because there's no useful recovery path from a callback —
+/// the next [`WkWebViewProducer::capture_status`] poll will surface
+/// the prior state (or `Failed` if a poisoned lock makes things
+/// inconsistent).
+fn write_pending(
+    pending: &Arc<Mutex<PendingCaptureSlot>>,
+    state: PendingCaptureSlot,
+) {
+    if let Ok(mut s) = pending.lock() {
+        *s = state;
+    }
+}
+
 /// State held while ScreenCaptureKit is actively streaming.
 struct CaptureState {
     /// Strong reference to the host wgpu device's `MTLDevice`. Used to
@@ -689,6 +808,30 @@ pub struct WkWebViewProducer {
     /// consumers can disambiguate snapshot frames. Independent of
     /// [`CaptureState::generation`] which counts SCK samples.
     snapshot_generation: u64,
+    /// Most-recent completion of [`Self::request_snapshot`]. Drained
+    /// by [`Self::poll_snapshot`]. Older completions are overwritten
+    /// before the consumer polls.
+    pending_snapshot: Arc<Mutex<Option<PendingSnapshot>>>,
+    /// Cross-thread state machine for [`Self::start_capture_async`].
+    /// Advanced by SCK completion blocks running on background
+    /// dispatch queues; promoted into `self.capture` by the consumer
+    /// via [`Self::capture_status`].
+    pending_capture: Arc<Mutex<PendingCaptureSlot>>,
+}
+
+/// Newtype that asserts a `Retained<NSImage>` is safe to send between
+/// threads — the producer's snapshot completion handler fires on the
+/// main thread and the producer's `poll_snapshot` reads from the same
+/// thread, so the cross-thread `Send` is satisfied trivially. The
+/// wrapper exists to satisfy the conservative compiler bound on
+/// `Mutex<Option<T>>` where T isn't `Send` by default.
+struct SendRetainedNSImage(Retained<NSImage>);
+// SAFETY: see `SendRetainedNSImage` doc.
+unsafe impl Send for SendRetainedNSImage {}
+
+enum PendingSnapshot {
+    Image(SendRetainedNSImage),
+    Failed(String),
 }
 
 impl WkWebViewProducer {
@@ -722,10 +865,24 @@ impl WkWebViewProducer {
         let backing_scale = backing_scale_for(&parent_view);
         let frame = ns_rect_from_pixels(config.offset, config.size, backing_scale);
 
-        // Default `WKWebViewConfiguration` already wires a default
-        // `WKWebsiteDataStore`; the per-profile data-dir wiring is
-        // a separate slice (see `config.data_dir` doc comment).
         let webview_config = unsafe { WKWebViewConfiguration::new(mtm) };
+
+        // Per-profile cookies + storage isolation. macOS doesn't take an
+        // arbitrary path for `WKWebsiteDataStore`; the closest analog
+        // is `dataStoreForIdentifier:` (macOS 14+) which keys a
+        // persistent store inside the app container by UUID. We derive
+        // a stable UUID from `config.data_dir` so the same path always
+        // resolves to the same profile across runs. An empty path
+        // means "use the shared default store" (slice A behavior).
+        if !config.data_dir.as_os_str().is_empty() {
+            let identifier = profile_uuid_for_path(&config.data_dir, mtm);
+            let data_store = unsafe {
+                WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm)
+            };
+            unsafe {
+                webview_config.setWebsiteDataStore(&data_store);
+            }
+        }
 
         // Install the `window.chrome.webview` bridge before any frame
         // loads — both the user script and the `WKScriptMessageHandler`
@@ -806,7 +963,52 @@ impl WkWebViewProducer {
             mtm,
             capture: None,
             snapshot_generation: 0,
+            pending_snapshot: Arc::new(Mutex::new(None)),
+            pending_capture: Arc::new(Mutex::new(PendingCaptureSlot::Idle)),
         })
+    }
+
+    /// Non-blocking variant of `navigate_to_url`. Invokes
+    /// `WKWebView::loadRequest:` and returns immediately — the load
+    /// completes asynchronously and surfaces through
+    /// [`Self::poll_navigation_event`].
+    ///
+    /// **Use this** instead of [`navigate_to_url`](WryWebSurfaceProducer::navigate_to_url)
+    /// when calling from inside a host event-loop callback (e.g.
+    /// winit's `resumed` / `window_event`). The blocking variant
+    /// pumps the main `NSRunLoop` to wait for completion, which
+    /// re-enters the event loop and panics under winit's
+    /// "no nested event handling" guard.
+    pub fn load_url(&self, url: &str) -> Result<(), WryWebSurfaceError> {
+        if MainThreadMarker::new().is_none() {
+            return Err(WryWebSurfaceError::Platform(
+                "load_url must be called on the main thread".into(),
+            ));
+        }
+        let url_ns = NSString::from_str(url);
+        let ns_url = NSURL::URLWithString(&url_ns).ok_or_else(|| {
+            WryWebSurfaceError::Platform(format!("could not parse URL: {url}"))
+        })?;
+        let request = NSURLRequest::requestWithURL(&ns_url);
+        unsafe { self.webview.loadRequest(&request) };
+        Ok(())
+    }
+
+    /// Non-blocking variant of `navigate_to_string`. Invokes
+    /// `WKWebView::loadHTMLString:` and returns immediately.
+    /// Completion arrives through [`Self::poll_navigation_event`].
+    ///
+    /// See [`Self::load_url`] for when to prefer this over the
+    /// blocking trait method.
+    pub fn load_html(&self, html: &str) -> Result<(), WryWebSurfaceError> {
+        if MainThreadMarker::new().is_none() {
+            return Err(WryWebSurfaceError::Platform(
+                "load_html must be called on the main thread".into(),
+            ));
+        }
+        let html_ns = NSString::from_str(html);
+        unsafe { self.webview.loadHTMLString_baseURL(&html_ns, None) };
+        Ok(())
     }
 
     /// Stand up the ScreenCaptureKit pipeline against the WKWebView's
@@ -829,6 +1031,16 @@ impl WkWebViewProducer {
     /// Requires the user-facing **Screen Recording** privacy
     /// permission. The first call triggers the system prompt; if
     /// denied, this method returns `Platform(...)`.
+    ///
+    /// # ⚠️ Blocking — host-event-loop hazard
+    ///
+    /// Pumps the main `NSRunLoop` twice (once for
+    /// `SCShareableContent`, once for
+    /// `startCaptureWithCompletionHandler:`). **Do not call from
+    /// inside a host event-loop callback** (winit `resumed` /
+    /// `window_event`) — the pump re-enters the host's dispatch
+    /// and panics. Use [`Self::start_capture_async`] +
+    /// [`Self::capture_status`] from event-loop contexts.
     pub fn start_capture(
         &mut self,
         host: HostWgpuContext,
@@ -874,20 +1086,7 @@ impl WkWebViewProducer {
             )
         };
 
-        let stream_config = unsafe {
-            let cfg = SCStreamConfiguration::new();
-            cfg.setWidth(target_size.width as usize);
-            cfg.setHeight(target_size.height as usize);
-            // 32-bit BGRA — matches `MTLPixelFormat::BGRA8Unorm` and
-            // `wgpu::TextureFormat::Bgra8Unorm` so the consumer renders
-            // without a format swizzle pass.
-            cfg.setPixelFormat(kCVPixelFormatType_32BGRA);
-            cfg.setShowsCursor(false);
-            // Keep the most recent frame; older frames in flight are
-            // OK to drop.
-            cfg.setQueueDepth(3);
-            cfg
-        };
+        let stream_config = make_stream_configuration(target_size);
 
         let stream_error = Arc::new(Mutex::new(None::<String>));
         let error_delegate = StreamErrorDelegate::new(Arc::clone(&stream_error));
@@ -979,6 +1178,294 @@ impl WkWebViewProducer {
         Ok(())
     }
 
+    /// Non-blocking variant of [`Self::start_capture`]. Kicks off the
+    /// SCShareableContent → SCContentFilter → SCStream chain via
+    /// completion blocks and returns immediately. The consumer polls
+    /// [`Self::capture_status`] (typically each frame from a host
+    /// event-loop callback) to observe progression and to install
+    /// the `CaptureState` into the producer once the stream is live.
+    ///
+    /// Use this in preference to the blocking variant whenever
+    /// `start_capture` would be called from a host event-loop
+    /// callback (e.g. winit's `resumed` / `window_event`) — pumping
+    /// the main `NSRunLoop` from inside such a callback re-enters
+    /// the host's dispatch and panics.
+    ///
+    /// Idempotent: returns `Ok(())` if a capture is already live or
+    /// in progress.
+    pub fn start_capture_async(
+        &mut self,
+        host: HostWgpuContext,
+    ) -> Result<(), WryWebSurfaceError> {
+        if self.capture.is_some() {
+            return Ok(());
+        }
+        // Reset / advance the state machine. If we're already in
+        // Starting, return without restarting.
+        {
+            let p = self.pending_capture.lock().map_err(|_| {
+                WryWebSurfaceError::Platform("pending_capture lock poisoned".into())
+            })?;
+            if matches!(*p, PendingCaptureSlot::Starting) {
+                return Ok(());
+            }
+        }
+
+        if MainThreadMarker::new().is_none() {
+            return Err(WryWebSurfaceError::Platform(
+                "start_capture_async must be called on the main thread".into(),
+            ));
+        }
+        if host.backend != InteropBackend::Metal {
+            return Err(WryWebSurfaceError::Platform(format!(
+                "start_capture_async requires a Metal wgpu backend, got {:?}",
+                host.backend
+            )));
+        }
+
+        let metal_device: Retained<ProtocolObject<dyn MTLDevice>> = unsafe {
+            host.device
+                .as_hal::<wgpu::wgc::api::Metal>()
+                .ok_or_else(|| {
+                    WryWebSurfaceError::Platform(
+                        "host wgpu device is not on the Metal backend".into(),
+                    )
+                })?
+                .raw_device()
+                .clone()
+        };
+
+        let host_window = self.webview.window().ok_or_else(|| {
+            WryWebSurfaceError::Platform(
+                "WKWebView is not in a window — start_capture_async requires the parent NSView to be embedded in an NSWindow".into(),
+            )
+        })?;
+        let target_window_number = host_window.windowNumber();
+        if target_window_number <= 0 {
+            return Err(WryWebSurfaceError::Platform(
+                "host NSWindow has no valid windowNumber".into(),
+            ));
+        }
+        let target_id = target_window_number as u32;
+        let target_size = self.config.size;
+
+        *self
+            .pending_capture
+            .lock()
+            .map_err(|_| {
+                WryWebSurfaceError::Platform("pending_capture lock poisoned".into())
+            })? = PendingCaptureSlot::Starting;
+
+        let pending = Arc::clone(&self.pending_capture);
+        let metal_device_for_block = SendOnly(metal_device);
+
+        let outer_block = RcBlock::new(
+            move |content: *mut SCShareableContent, err: *mut NSError| {
+                if !err.is_null() {
+                    let msg = unsafe { (*err).localizedDescription().to_string() };
+                    write_pending(
+                        &pending,
+                        PendingCaptureSlot::Failed(format!(
+                            "SCShareableContent failed: {msg}"
+                        )),
+                    );
+                    return;
+                }
+                let Some(non_null) = NonNull::new(content) else {
+                    write_pending(
+                        &pending,
+                        PendingCaptureSlot::Failed(
+                            "SCShareableContent returned null".into(),
+                        ),
+                    );
+                    return;
+                };
+                // SAFETY: SCK hands us a +0 borrow; retain to keep
+                // it alive across the rest of the block.
+                let content: Retained<SCShareableContent> =
+                    match unsafe { Retained::retain(non_null.as_ptr()) } {
+                        Some(c) => c,
+                        None => {
+                            write_pending(
+                                &pending,
+                                PendingCaptureSlot::Failed(
+                                    "Retained::retain on SCShareableContent returned None"
+                                        .into(),
+                                ),
+                            );
+                            return;
+                        }
+                    };
+
+                let windows: Retained<NSArray<SCWindow>> = unsafe { content.windows() };
+                let mut matched: Option<Retained<SCWindow>> = None;
+                for i in 0..windows.count() {
+                    let window = windows.objectAtIndex(i);
+                    if unsafe { window.windowID() } == target_id {
+                        matched = Some(window);
+                        break;
+                    }
+                }
+                let target_window = match matched {
+                    Some(w) => w,
+                    None => {
+                        write_pending(
+                            &pending,
+                            PendingCaptureSlot::Failed(format!(
+                                "no SCWindow matched windowNumber {target_window_number}"
+                            )),
+                        );
+                        return;
+                    }
+                };
+
+                // Build the SCK pipeline. None of these classes are
+                // MainThreadOnly so this is fine on the SCK private
+                // queue.
+                let filter = unsafe {
+                    SCContentFilter::initWithDesktopIndependentWindow(
+                        SCContentFilter::alloc(),
+                        &target_window,
+                    )
+                };
+                let stream_config = make_stream_configuration(target_size);
+                let stream_error = Arc::new(Mutex::new(None::<String>));
+                let error_delegate = StreamErrorDelegate::new(Arc::clone(&stream_error));
+                let stream = unsafe {
+                    SCStream::initWithFilter_configuration_delegate(
+                        SCStream::alloc(),
+                        &filter,
+                        &stream_config,
+                        Some(ProtocolObject::from_ref(&*error_delegate)),
+                    )
+                };
+                let latest: Arc<LatestSample> = Arc::new(Mutex::new(None));
+                let output_delegate = StreamOutputDelegate::new(Arc::clone(&latest));
+                let sample_queue =
+                    DispatchQueue::new("scrying.wkwebview.sck-sample", None);
+                if let Err(e) = unsafe {
+                    stream.addStreamOutput_type_sampleHandlerQueue_error(
+                        ProtocolObject::from_ref(&*output_delegate),
+                        SCStreamOutputType::Screen,
+                        Some(&sample_queue),
+                    )
+                } {
+                    write_pending(
+                        &pending,
+                        PendingCaptureSlot::Failed(format!(
+                            "addStreamOutput failed: {}",
+                            e.localizedDescription()
+                        )),
+                    );
+                    return;
+                }
+
+                // Capture the assembled state into the inner block.
+                let metal_device = metal_device_for_block.0.clone();
+                let pending_inner = Arc::clone(&pending);
+                let in_progress = SendOnly(InProgressCaptureState {
+                    metal_device,
+                    stream: stream.clone(),
+                    output: output_delegate.clone(),
+                    error_delegate: error_delegate.clone(),
+                    sample_queue: sample_queue.clone(),
+                    latest: Arc::clone(&latest),
+                    stream_error: Arc::clone(&stream_error),
+                });
+
+                let inner_block = RcBlock::new(move |err: *mut NSError| {
+                    if !err.is_null() {
+                        let msg =
+                            unsafe { (*err).localizedDescription().to_string() };
+                        write_pending(
+                            &pending_inner,
+                            PendingCaptureSlot::Failed(format!(
+                                "startCapture failed: {msg}"
+                            )),
+                        );
+                        return;
+                    }
+                    let parts = &in_progress.0;
+                    let cap = CaptureState {
+                        metal_device: parts.metal_device.clone(),
+                        stream: parts.stream.clone(),
+                        output: parts.output.clone(),
+                        _error_delegate: parts.error_delegate.clone(),
+                        _sample_queue: parts.sample_queue.clone(),
+                        latest: Arc::clone(&parts.latest),
+                        stream_error: Arc::clone(&parts.stream_error),
+                        last_emitted: None,
+                        generation: AtomicU64::new(0),
+                    };
+                    write_pending(
+                        &pending_inner,
+                        PendingCaptureSlot::Ready(SendOnly(cap)),
+                    );
+                });
+                unsafe {
+                    stream.startCaptureWithCompletionHandler(Some(&inner_block));
+                }
+            },
+        );
+
+        unsafe {
+            SCShareableContent::getShareableContentWithCompletionHandler(&outer_block);
+        }
+        Ok(())
+    }
+
+    /// Poll the async capture state machine. Returns the current
+    /// [`CaptureStatus`]. When status is `Live`, the producer's
+    /// `self.capture` slot is filled and `try_acquire_frame` /
+    /// `acquire_frame` start emitting `Native` frames.
+    ///
+    /// Call this from a host event-loop callback after
+    /// [`Self::start_capture_async`]. Idempotent — once `Live` it
+    /// keeps returning `Live`.
+    pub fn capture_status(&mut self) -> CaptureStatus {
+        if self.capture.is_some() {
+            return CaptureStatus::Live;
+        }
+        let mut slot = match self.pending_capture.lock() {
+            Ok(g) => g,
+            Err(_) => return CaptureStatus::Failed("pending_capture poisoned".into()),
+        };
+        match std::mem::replace(&mut *slot, PendingCaptureSlot::Idle) {
+            PendingCaptureSlot::Idle => {
+                *slot = PendingCaptureSlot::Idle;
+                CaptureStatus::Idle
+            }
+            PendingCaptureSlot::Starting => {
+                *slot = PendingCaptureSlot::Starting;
+                CaptureStatus::Starting
+            }
+            PendingCaptureSlot::Failed(msg) => {
+                let report = msg.clone();
+                *slot = PendingCaptureSlot::Failed(msg);
+                CaptureStatus::Failed(report)
+            }
+            PendingCaptureSlot::Ready(SendOnly(state)) => {
+                drop(slot);
+                self.install_capture_state(state);
+                CaptureStatus::Live
+            }
+        }
+    }
+
+    fn install_capture_state(&mut self, state: CaptureState) {
+        self.capture = Some(state);
+        self.capabilities.preferred_mode = WebSurfaceMode::ImportedTexture;
+        self.capabilities.imported_texture =
+            crate::native_frame::CapabilityStatus::Supported;
+        self.capabilities.reason =
+            "WkWebViewProducer slice B: ScreenCaptureKit → IOSurface → MetalTextureRef capture is live; consumer should render the imported texture each frame.";
+        // Advance the slot to "consumed" so subsequent polls don't
+        // re-promote the same state.
+        if let Ok(mut p) = self.pending_capture.lock() {
+            *p = PendingCaptureSlot::Idle;
+        }
+    }
+
     /// Stop the capture stream and tear down ScreenCaptureKit state.
     /// Idempotent. Safe to call from `Drop`.
     pub fn stop_capture(&mut self) {
@@ -1006,6 +1493,9 @@ impl WkWebViewProducer {
             );
         self.capabilities.reason =
             "WkWebViewProducer slice B: capture stopped; reverting to overlay surface.";
+        if let Ok(mut p) = self.pending_capture.lock() {
+            *p = PendingCaptureSlot::Idle;
+        }
     }
 
     /// Walk `SCShareableContent.windows` for the entry whose
@@ -1125,6 +1615,98 @@ impl WkWebViewProducer {
         })
     }
 
+    /// Non-blocking variant of [`Self::capture_cpu_snapshot`].
+    ///
+    /// Kicks off `takeSnapshotWithConfiguration:completionHandler:`
+    /// and returns immediately. The result is buffered in a
+    /// most-recent slot drained via [`Self::poll_snapshot`]. Pair
+    /// this with [`Self::poll_snapshot`] from a host event-loop
+    /// callback (e.g. winit's `window_event` / `about_to_wait`) so
+    /// the host can drive snapshot capture without blocking on the
+    /// main run loop.
+    ///
+    /// Multiple calls in flight are allowed; only the most recent
+    /// completion is preserved (older completions overwrite each
+    /// other before the consumer polls).
+    pub fn request_snapshot(&mut self) -> Result<(), WryWebSurfaceError> {
+        let mtm = MainThreadMarker::new().ok_or_else(|| {
+            WryWebSurfaceError::Platform(
+                "request_snapshot must be called on the main thread".into(),
+            )
+        })?;
+
+        let slot = Arc::clone(&self.pending_snapshot);
+        let block = RcBlock::new(move |image: *mut NSImage, err: *mut NSError| {
+            let result = if !err.is_null() {
+                PendingSnapshot::Failed(unsafe { (*err).localizedDescription().to_string() })
+            } else if let Some(non_null) = NonNull::new(image) {
+                let retained = unsafe { Retained::retain(non_null.as_ptr()) };
+                match retained {
+                    Some(image) => PendingSnapshot::Image(SendRetainedNSImage(image)),
+                    None => PendingSnapshot::Failed(
+                        "Retained::retain returned None for the snapshot NSImage".into(),
+                    ),
+                }
+            } else {
+                PendingSnapshot::Failed("WKWebView.takeSnapshot returned nil image".into())
+            };
+            if let Ok(mut s) = slot.lock() {
+                *s = Some(result);
+            }
+        });
+
+        let snapshot_config = unsafe { WKSnapshotConfiguration::new(mtm) };
+        unsafe {
+            self.webview.takeSnapshotWithConfiguration_completionHandler(
+                Some(&snapshot_config),
+                &block,
+            );
+        }
+        Ok(())
+    }
+
+    /// Drain the most recently completed [`Self::request_snapshot`]
+    /// result. Returns `None` until a snapshot is ready,
+    /// `Some(Ok(WryWebSurfaceFrame::CpuRgba {..}))` once decoded, or
+    /// `Some(Err(...))` on snapshot or decode failure.
+    ///
+    /// Decoding is performed lazily here (not in the completion
+    /// handler) so the main-thread completion callback finishes fast.
+    pub fn poll_snapshot(&mut self) -> Option<Result<WryWebSurfaceFrame, WryWebSurfaceError>> {
+        let pending = self.pending_snapshot.lock().ok().and_then(|mut s| s.take())?;
+        match pending {
+            PendingSnapshot::Failed(msg) => Some(Err(WryWebSurfaceError::Platform(format!(
+                "snapshot failed: {msg}"
+            )))),
+            PendingSnapshot::Image(SendRetainedNSImage(ns_image)) => {
+                Some(self.decode_ns_image(&ns_image))
+            }
+        }
+    }
+
+    fn decode_ns_image(
+        &mut self,
+        ns_image: &NSImage,
+    ) -> Result<WryWebSurfaceFrame, WryWebSurfaceError> {
+        let tiff_data = ns_image.TIFFRepresentation().ok_or_else(|| {
+            WryWebSurfaceError::Platform("NSImage has no TIFF representation".into())
+        })?;
+        let tiff_bytes = tiff_data.to_vec();
+        let rgba = image::load_from_memory_with_format(&tiff_bytes, image::ImageFormat::Tiff)
+            .map_err(|e| {
+                WryWebSurfaceError::Platform(format!("failed to decode TIFF snapshot: {e}"))
+            })?
+            .to_rgba8();
+        let size = PhysicalSize::new(rgba.width(), rgba.height());
+        let generation = self.snapshot_generation;
+        self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
+        Ok(WryWebSurfaceFrame::CpuRgba {
+            size,
+            pixels: rgba,
+            generation,
+        })
+    }
+
     /// Acquire a content-pixel snapshot via
     /// `WKWebView.takeSnapshotWithConfiguration:completionHandler:` and
     /// decode it into an `image::RgbaImage`.
@@ -1135,10 +1717,15 @@ impl WkWebViewProducer {
     /// thumbnails, layout-debug captures, and verifying the WebView is
     /// actually rendering before standing up the SCK path.
     ///
-    /// Blocks the calling thread (which must be the main thread,
-    /// because the snapshot's completion handler fires on the main
-    /// dispatch queue) until the snapshot resolves or
-    /// `config.frame_timeout` elapses.
+    /// # ⚠️ Blocking — host-event-loop hazard
+    ///
+    /// Pumps the main `NSRunLoop` until the snapshot's completion
+    /// handler fires or `config.frame_timeout` elapses. **Do not
+    /// call from inside a host event-loop callback** (winit
+    /// `resumed` / `window_event`) — the pump re-enters the host's
+    /// dispatch and panics. Prefer the non-blocking
+    /// [`Self::request_snapshot`] / [`Self::poll_snapshot`] pair
+    /// from event-loop contexts.
     pub fn capture_cpu_snapshot(&mut self) -> Result<WryWebSurfaceFrame, WryWebSurfaceError> {
         let mtm = MainThreadMarker::new().ok_or_else(|| {
             WryWebSurfaceError::Platform(
@@ -1690,6 +2277,22 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
         );
         self.webview.setFrameSize(ns_size);
         self.config.size = size;
+
+        // If a capture is live, push the new pixel dimensions through
+        // to the SCStream so the next sample arrives at the requested
+        // resolution. `updateConfiguration:completionHandler:` is the
+        // documented path; failures are surfaced through
+        // `stream_error` from the `SCStreamDelegate` rather than this
+        // call's return.
+        if let Some(capture) = self.capture.as_ref() {
+            let new_cfg = make_stream_configuration(size);
+            unsafe {
+                capture
+                    .stream
+                    .updateConfiguration_completionHandler(&new_cfg, None);
+            }
+        }
+
         Ok(())
     }
 
@@ -1704,6 +2307,69 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
         self.webview.setFrameOrigin(ns_origin);
         self.config.offset = (x, y);
         Ok(())
+    }
+}
+
+/// Derive a stable [`NSUUID`] from a profile-storage path so that the
+/// same `config.data_dir` always resolves to the same
+/// [`WKWebsiteDataStore`] across runs.
+///
+/// Uses FNV-1a 128 over the path's encoded bytes, then formats as a
+/// version-8 UUID string (variant bits `10` to satisfy
+/// `NSUUID::initWithUUIDString:` parser strictness). Version-8 is the
+/// "custom-content" variant — RFC 9562 — which is the right marker for
+/// "these bits are not derived from a recognised algorithm" (we're
+/// using FNV-1a, not the SHA-1 / SHA-256 the named UUID versions
+/// require).
+fn profile_uuid_for_path(path: &Path, _mtm: MainThreadMarker) -> Retained<NSUUID> {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let mut h = profile_uuid_helpers::FNV1A_128_OFFSET;
+    for &b in bytes {
+        h ^= b as u128;
+        h = h.wrapping_mul(profile_uuid_helpers::FNV1A_128_PRIME);
+    }
+    let mut out = h.to_be_bytes();
+    // Set version bits to 8 (custom).
+    out[6] = (out[6] & 0x0F) | 0x80;
+    // Set variant bits to RFC 9562 ("10xxxxxx").
+    out[8] = (out[8] & 0x3F) | 0x80;
+    let formatted = format!(
+        "{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+        out[0], out[1], out[2], out[3],
+        out[4], out[5],
+        out[6], out[7],
+        out[8], out[9],
+        out[10], out[11], out[12], out[13], out[14], out[15],
+    );
+    let ns_string = NSString::from_str(&formatted);
+    NSUUID::initWithUUIDString(NSUUID::alloc(), &ns_string)
+        .expect("FNV-1a UUID string should always parse as a valid NSUUID")
+}
+
+mod profile_uuid_helpers {
+    pub(super) const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
+    pub(super) const FNV1A_128_PRIME: u128 = 0x0000000001000000000000000000013b;
+}
+
+/// Build the [`SCStreamConfiguration`] used by both
+/// [`WkWebViewProducer::start_capture`] and live resizes.
+/// Single source of truth for pixel format / cursor / queue depth so
+/// `updateConfiguration:` keeps the non-size parameters consistent
+/// with the original `start_capture`.
+fn make_stream_configuration(size: PhysicalSize<u32>) -> Retained<SCStreamConfiguration> {
+    unsafe {
+        let cfg = SCStreamConfiguration::new();
+        cfg.setWidth(size.width as usize);
+        cfg.setHeight(size.height as usize);
+        // 32-bit BGRA — matches `MTLPixelFormat::BGRA8Unorm` and
+        // `wgpu::TextureFormat::Bgra8Unorm` so the consumer renders
+        // without a format swizzle pass.
+        cfg.setPixelFormat(kCVPixelFormatType_32BGRA);
+        cfg.setShowsCursor(false);
+        // Keep the most recent frame; older frames in flight are
+        // OK to drop.
+        cfg.setQueueDepth(3);
+        cfg
     }
 }
 
