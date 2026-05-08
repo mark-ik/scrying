@@ -31,6 +31,7 @@ use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::Key;
+use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 use winit::window::{Window, WindowAttributes};
 
 const INITIAL_URL: &str = "https://example.com";
@@ -191,7 +192,17 @@ const SCRIPTED_HTML: &str = r#"<!doctype html>
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::from_args(std::env::args());
-    let event_loop = EventLoop::new()?;
+    // Headless test runs use `Prohibited` so the test process
+    // doesn't claim the active-app slot or register a Dock icon —
+    // important so the developer's frontmost app keeps focus during
+    // a `bash scripts/test-mac.sh` and so CI macOS runners don't
+    // open a visible window mid-test. Visible runs use the
+    // `Regular` default so the demo behaves like a normal app.
+    let mut event_loop_builder = EventLoop::builder();
+    if cli.is_headless() {
+        event_loop_builder.with_activation_policy(ActivationPolicy::Prohibited);
+    }
+    let event_loop = event_loop_builder.build()?;
     // Probe-snapshot, capture, and scripted modes need `Poll` so
     // `about_to_wait` fires regularly enough to advance their state
     // machines / request redraws. Plain overlay mode can sleep on
@@ -272,6 +283,27 @@ struct Cli {
     /// Verifies `send_pointer_input` reaches the WKWebView and
     /// drives Pointer Events on the JS side.
     pointer_input_test: bool,
+    /// Force the demo window to remain visible even when the test
+    /// mode would normally run headless. Useful for debugging a
+    /// failing test by watching the WKWebView in real time.
+    visible: bool,
+}
+
+impl Cli {
+    /// True when this CLI configuration runs without a visible
+    /// window or a focus-stealing Dock-app activation. All
+    /// assertion-style \`--*-test\` modes default to headless so
+    /// they don't disrupt the developer's session and can run on
+    /// CI without a Dock-icon-flash; \`--visible\` overrides.
+    fn is_headless(self) -> bool {
+        if self.visible {
+            return false;
+        }
+        self.scripted
+            || self.browser_test
+            || self.interaction_state_test
+            || self.pointer_input_test
+    }
 }
 
 impl Cli {
@@ -296,6 +328,7 @@ impl Cli {
                 "--browser-test" => cli.browser_test = true,
                 "--interaction-state-test" => cli.interaction_state_test = true,
                 "--pointer-input-test" => cli.pointer_input_test = true,
+                "--visible" => cli.visible = true,
                 _ => eprintln!("demo-mac: unknown arg: {arg}"),
             }
         }
@@ -1909,10 +1942,17 @@ impl AppState {
         event_loop: &ActiveEventLoop,
         cli: Cli,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        // Headless test runs hide the window. WKWebView still
+        // composes / runs JS / processes synthesized input events
+        // when its host window is hidden, so the four `--*-test`
+        // assertion modes don't lose any coverage. SCK-capture mode
+        // (`--capture`) needs a visible window for the SCWindow
+        // lookup to find a real CGWindowID, so it stays visible.
         let window = event_loop.create_window(
             WindowAttributes::default()
                 .with_title("scrying demo-mac")
-                .with_inner_size(winit::dpi::LogicalSize::new(1024.0, 768.0)),
+                .with_inner_size(winit::dpi::LogicalSize::new(1024.0, 768.0))
+                .with_visible(!cli.is_headless()),
         )?;
         let window = Arc::new(window);
 

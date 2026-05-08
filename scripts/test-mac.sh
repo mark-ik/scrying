@@ -10,10 +10,18 @@
 # under the alarm even on a slow runner, but the alarm guarantees
 # no test mode can hang the whole suite.
 #
+# Each \`--*-test\` mode runs headless by default (no visible window,
+# `NSApplicationActivationPolicyProhibited` so the developer's
+# frontmost app keeps focus and no Dock icon flashes), so this
+# script is safe to run while you're working on something else.
+# To watch a failing test in real time, run the failing mode
+# manually with \`--visible\`:
+#     cargo run -p demo-mac -- --interaction-state-test --visible
+#
 # Requires:
 #   - cargo on PATH
-#   - a real display (these tests open a winit window) — works on
-#     interactive macOS sessions and on macOS GHA runners
+#   - a logged-in macOS user session (the AppKit run loop still
+#     needs a WindowServer connection even for hidden windows)
 
 set -uo pipefail
 
