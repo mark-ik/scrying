@@ -103,6 +103,19 @@ pub(super) struct DownloadRegistry {
     pub(super) by_pointer: HashMap<usize, DownloadId>,
 }
 
+// SAFETY: `DownloadRegistry` is created and accessed exclusively
+// from the main thread (the `DownloadHandler` delegate is
+// `MainThreadOnly`; the producer's `cancel_download` /
+// `resume_download` methods are gated on `MainThreadMarker::new()`
+// before touching the registry). The `Retained<WKDownload>` it
+// holds is therefore never sent across threads in practice. We
+// claim `Send + Sync` so the registry can sit behind a
+// `Arc<Mutex<...>>` (which `clippy::arc_with_non_send_sync`
+// otherwise rejects); the `Mutex` doubles as a poison-detection
+// barrier without ever resolving cross-thread contention.
+unsafe impl Send for DownloadRegistry {}
+unsafe impl Sync for DownloadRegistry {}
+
 /// Atomic ID allocator handed to the delegate so each new download
 /// gets a unique ID without needing `&mut` access to the producer.
 pub(super) struct DownloadIdAllocator(AtomicU64);
@@ -270,7 +283,7 @@ define_class!(
                 completion_handler.call((std::ptr::null_mut(),));
             } else {
                 let path_ns =
-                    NSString::from_str(&destination_path_for_handoff(&ivars, id));
+                    NSString::from_str(&destination_path_for_handoff(ivars, id));
                 let file_url = NSURL::fileURLWithPath(&path_ns);
                 completion_handler.call((Retained::as_ptr(&file_url) as *mut _,));
             }

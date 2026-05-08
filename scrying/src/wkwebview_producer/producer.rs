@@ -399,7 +399,7 @@ impl WkWebViewProducer {
             });
             let center = NSNotificationCenter::defaultCenter();
             let token = unsafe {
-                let host_window_obj: &AnyObject = (&*host_window).as_ref();
+                let host_window_obj: &AnyObject = (*host_window).as_ref();
                 center.addObserverForName_object_queue_usingBlock(
                     Some(objc2_app_kit::NSWindowDidChangeBackingPropertiesNotification),
                     Some(host_window_obj),
@@ -454,7 +454,7 @@ impl WkWebViewProducer {
             dpi_pending,
             dpi_observer,
             download_registry,
-            download_id_allocator: download_id_allocator,
+            download_id_allocator,
             download_host_handler,
             cursor_handler,
         })
@@ -616,7 +616,7 @@ impl Drop for WkWebViewProducer {
         // breaks the strong cycle holding our `Arc<AtomicBool>` flag.
         if let Some(token) = self.dpi_observer.take() {
             let center = NSNotificationCenter::defaultCenter();
-            let observer_obj: &AnyObject = (&*token).as_ref();
+            let observer_obj: &AnyObject = (*token).as_ref();
             unsafe {
                 center.removeObserver(observer_obj);
             }

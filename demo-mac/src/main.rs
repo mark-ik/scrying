@@ -196,11 +196,10 @@ fn start_download_test_server(body: Vec<u8>) -> std::io::Result<DownloadTestUrls
                             let lower = l.to_ascii_lowercase();
                             lower
                                 .strip_prefix("range: bytes=")
-                                .map(|rest| {
+                                .and_then(|rest| {
                                     let end = rest.find('-').unwrap_or(rest.len());
                                     rest[..end].trim().parse::<u64>().ok()
                                 })
-                                .flatten()
                         })
                         .unwrap_or(0) as usize
                 } else {
@@ -1410,10 +1409,10 @@ fn drain_events(state: &mut AppState) {
                 _ => {}
             }
         }
-        if let Some(test) = state.interaction_state_test.as_mut() {
-            if let NavigationEvent::Completed { url, .. } = &event {
-                test.last_completed_url = url.clone();
-            }
+        if let Some(test) = state.interaction_state_test.as_mut()
+            && let NavigationEvent::Completed { url, .. } = &event
+        {
+            test.last_completed_url = url.clone();
         }
         if let Some(test) = state.download_test.as_mut() {
             match &event {

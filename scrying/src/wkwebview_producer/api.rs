@@ -697,16 +697,14 @@ impl WkWebViewProducer {
     /// (e.g. before any navigation). The blob format is private
     /// to WebKit; treat it as opaque bytes.
     pub fn serialize_interaction_state(&self) -> Option<Vec<u8>> {
-        if MainThreadMarker::new().is_none() {
-            return None;
-        }
+        MainThreadMarker::new()?;
         let state = unsafe { self.webview().interactionState() }?;
         // The deprecated archiver pair (no `requiringSecureCoding`)
         // round-trips correctly for the WebKit-internal types in
         // the interaction state. The modern path requires
         // class-allowlist work that's brittle for opaque blobs.
         #[allow(deprecated)]
-        let data = unsafe { NSKeyedArchiver::archivedDataWithRootObject(&*state) };
+        let data = unsafe { NSKeyedArchiver::archivedDataWithRootObject(&state) };
         Some(data.to_vec())
     }
 
