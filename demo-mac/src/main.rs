@@ -1230,13 +1230,23 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 state.cursor = Some(position);
-                let event = MouseInput {
-                    kind: MouseEventKind::Move,
-                    virtual_keys: state.mouse_buttons,
-                    mouse_data: 0,
-                    point: (position.x as i32, position.y as i32),
-                };
-                let _ = state.producer.send_mouse_input(event);
+                // Only synthesize a host→producer mouse event when
+                // the WKWebView is being captured (and therefore
+                // not natively visible to AppKit's responder
+                // chain). In overlay mode the WKWebView is a
+                // subview of the winit window — AppKit delivers
+                // mouse / scroll / key events to it directly, so
+                // forwarding from here too would double-dispatch
+                // every event and produce visible input lag.
+                if state.capture_kickoff_at.is_some() {
+                    let event = MouseInput {
+                        kind: MouseEventKind::Move,
+                        virtual_keys: state.mouse_buttons,
+                        mouse_data: 0,
+                        point: (position.x as i32, position.y as i32),
+                    };
+                    let _ = state.producer.send_mouse_input(event);
+                }
             }
             WindowEvent::MouseInput {
                 state: btn_state,
@@ -1279,18 +1289,26 @@ impl ApplicationHandler for App {
                     }
                     _ => {}
                 }
-                let point = state
-                    .cursor
-                    .map(|p| (p.x as i32, p.y as i32))
-                    .unwrap_or((0, 0));
-                let _ = state.producer.send_mouse_input(MouseInput {
-                    kind,
-                    virtual_keys: state.mouse_buttons,
-                    mouse_data: 0,
-                    point,
-                });
+                if state.capture_kickoff_at.is_some() {
+                    let point = state
+                        .cursor
+                        .map(|p| (p.x as i32, p.y as i32))
+                        .unwrap_or((0, 0));
+                    let _ = state.producer.send_mouse_input(MouseInput {
+                        kind,
+                        virtual_keys: state.mouse_buttons,
+                        mouse_data: 0,
+                        point,
+                    });
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if state.capture_kickoff_at.is_none() {
+                    // Overlay mode: AppKit delivers the wheel
+                    // event to WKWebView directly. Skip our
+                    // synthetic forwarding to avoid double-scroll.
+                    return;
+                }
                 let (dx, dy) = match delta {
                     winit::event::MouseScrollDelta::LineDelta(x, y) => {
                         // Convert lines to pixels with a fudge factor —
@@ -1373,6 +1391,14 @@ fn handle_key(state: &mut AppState, event: KeyEvent) {
                 _ => {}
             }
         }
+
+    // Same overlay/capture gate as mouse forwarding: in overlay
+    // mode AppKit delivers keys to WKWebView via the responder
+    // chain, so a synthetic forwarder here just doubles every
+    // keystroke.
+    if state.capture_kickoff_at.is_none() {
+        return;
+    }
 
     let characters = match &event.text {
         Some(s) => s.to_string(),
