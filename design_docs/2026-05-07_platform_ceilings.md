@@ -119,10 +119,29 @@ Metal import.
   textures, capture-while-hidden (SCK requires the view to be in a
   window), sub-iframe capture.
 
-**Current scrying state (0.2.0):** [`wkwebview_producer`](../scrying/src/wkwebview_producer.rs)
-is a planning skeleton. Capabilities advertise `OverlayOnly` +
-`CpuSnapshot`. No WKWebView hosting, no SCK binding, no Metal handoff.
-All Tier-1 trait methods return `Unsupported`.
+**Current scrying state (0.4.0+):**
+[`native_frame::metal`](../scrying/src/native_frame/metal.rs) lands the
+`MTLTexture` → `wgpu::Texture` import path (lifted from wgpu-graft's
+proven `import_metal_texture_ref` pattern). The
+[`MetalTextureRef`](../scrying/src/native_frame/mod.rs) variant on
+`NativeFrame` is wired into the import dispatch.
+[`wkwebview_producer`](../scrying/src/wkwebview_producer.rs) advertises
+`NativeFrameKind::MetalTextureRef` in `supported_frames` but is still
+a structural skeleton — it does not yet host a `WKWebView`, set up
+ScreenCaptureKit, or emit real frames. All trait methods (`navigate`,
+`acquire_frame`, `send_mouse_input`, etc.) currently return
+`Unsupported` until the capture pipeline lands.
+
+**Next slice (M3 / M4):** Stand up the WKWebView lifecycle (NSView
+host, `WKWebViewConfiguration`, `WKNavigationDelegate`), bind a
+`SCStream` content filter to the WKWebView's NSView, and route
+`SCStreamOutput`'s `CMSampleBuffer` → `IOSurfaceRef` →
+`[MTLDevice newTextureWithDescriptor:iosurface:plane:]` →
+`MetalTextureRef` → `WryWebSurfaceFrame::Native(...)`. Threading
+note: `SCStreamOutput` callbacks fire on a background `dispatch_queue`;
+the producer needs a `Mutex<Option<Retained<CMSampleBuffer>>>` for
+the most-recent-sample handoff, and `try_acquire_frame` reads it on
+the main thread.
 
 ---
 

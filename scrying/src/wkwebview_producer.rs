@@ -198,14 +198,25 @@ impl WkWebViewProducer {
         Ok(Self {
             capabilities: WryWebSurfaceCapabilities {
                 backend: SystemWebviewBackend::WkWebView,
+                // The capture pipeline isn't wired yet, so we still
+                // advertise NativeChildOverlay as the preferred mode.
+                // Once `start_capture` lands and `try_acquire_frame`
+                // returns real frames, flip this to ImportedTexture
+                // when the host is on Metal (analogous to the
+                // Windows producer's Dx12 check).
                 preferred_mode: WebSurfaceMode::NativeChildOverlay,
                 imported_texture: crate::native_frame::CapabilityStatus::Unsupported(
-                    crate::native_frame::UnsupportedReason::NativeImportNotYetImplemented,
+                    crate::native_frame::UnsupportedReason::PlatformNotImplemented,
                 ),
                 native_child_overlay: crate::native_frame::CapabilityStatus::Supported,
                 cpu_snapshot: crate::native_frame::CapabilityStatus::Supported,
-                supported_frames: Vec::new(),
-                reason: "WkWebViewProducer is a planning skeleton; ScreenCaptureKit + IOSurface → Metal capture is not yet wired.",
+                // The frame *kind* the eventual capture path will emit
+                // is MetalTextureRef — wired into the import dispatch
+                // even though no producer constructs one yet.
+                supported_frames: vec![
+                    crate::native_frame::NativeFrameKind::MetalTextureRef,
+                ],
+                reason: "WkWebViewProducer scaffold: NativeFrame::MetalTextureRef import path is wired; ScreenCaptureKit + IOSurface capture pipeline is the next slice.",
             },
         })
     }

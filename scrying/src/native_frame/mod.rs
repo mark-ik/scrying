@@ -14,6 +14,9 @@ mod sync;
 #[cfg(target_os = "windows")]
 mod sync_dx12;
 
+#[cfg(target_os = "macos")]
+mod metal;
+
 use dpi::PhysicalSize;
 
 pub use error::{InteropError, UnsupportedReason};
@@ -37,8 +40,13 @@ pub enum InteropBackend {
 #[non_exhaustive]
 pub enum NativeFrameKind {
     Dx12SharedTexture,
+    /// MTLTexture reference (Apple platforms). The producer creates the
+    /// MTLTexture itself — typically by bridging a `CVPixelBuffer` /
+    /// `IOSurfaceRef` from ScreenCaptureKit through
+    /// `[MTLDevice newTextureWithDescriptor:iosurface:plane:]` — and
+    /// hands the resulting `*mut MTLTexture` to the importer.
+    MetalTextureRef,
     // Reserved for future producers:
-    //   IoSurfaceTexture (macOS WKWebView)
     //   DmaBufImage (Linux WPE)
 }
 
@@ -119,24 +127,52 @@ pub struct Dx12SharedTexture {
     pub handle: *mut std::ffi::c_void,
 }
 
+/// A frame backed by an `MTLTexture` from a Metal producer.
+///
+/// The producer is responsible for creating the `MTLTexture` (typically
+/// by bridging an `IOSurfaceRef` from ScreenCaptureKit's
+/// `CMSampleBuffer` through
+/// `[MTLDevice newTextureWithDescriptor:iosurface:plane:]`) and ensuring
+/// the texture remains valid for the duration of the import call.
+/// Ownership is **not** transferred; the importer wraps the texture by
+/// retaining it via the Metal API and does not release the producer's
+/// reference.
+///
+/// The producer should use the **host's** `MTLDevice` (acquired via
+/// `wgpu::Device::as_hal::<Metal>().raw_device()`) so the resulting
+/// texture is usable on the host's wgpu queue without cross-device
+/// migration.
+#[derive(Clone, Copy, Debug)]
+pub struct MetalTextureRef {
+    pub size: PhysicalSize<u32>,
+    pub format: wgpu::TextureFormat,
+    pub generation: u64,
+    pub producer_sync: SyncMechanism,
+    /// Raw `MTLTexture *` pointer. Must be non-null. Apple platforms only.
+    #[cfg(target_os = "macos")]
+    pub raw_metal_texture: *mut std::ffi::c_void,
+}
+
 /// A native frame from a producer, ready to be imported by a
-/// [`TextureImporter`]. Today only the Windows `Dx12SharedTexture` variant
-/// is wired; macOS / Linux variants land alongside their producers.
+/// [`TextureImporter`].
 #[non_exhaustive]
 pub enum NativeFrame {
     Dx12SharedTexture(Dx12SharedTexture),
+    MetalTextureRef(MetalTextureRef),
 }
 
 impl NativeFrame {
     pub fn kind(&self) -> NativeFrameKind {
         match self {
             NativeFrame::Dx12SharedTexture(_) => NativeFrameKind::Dx12SharedTexture,
+            NativeFrame::MetalTextureRef(_) => NativeFrameKind::MetalTextureRef,
         }
     }
 
     pub fn producer_sync(&self) -> SyncMechanism {
         match self {
             NativeFrame::Dx12SharedTexture(frame) => frame.producer_sync,
+            NativeFrame::MetalTextureRef(frame) => frame.producer_sync,
         }
     }
 }
@@ -189,6 +225,7 @@ impl TextureImporter for WgpuTextureImporter {
 
         let imported = match frame {
             NativeFrame::Dx12SharedTexture(frame) => import_dx12_shared_texture(frame, &self.host),
+            NativeFrame::MetalTextureRef(frame) => import_metal_texture_ref(frame, &self.host),
         }?;
 
         self.synchronizer
@@ -271,6 +308,21 @@ fn import_dx12_shared_texture(
     }
 
     #[cfg(not(target_os = "windows"))]
+    Err(InteropError::Unsupported(
+        UnsupportedReason::HostBackendMismatch,
+    ))
+}
+
+fn import_metal_texture_ref(
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] frame: &MetalTextureRef,
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] host: &HostWgpuContext,
+) -> Result<ImportedTexture, InteropError> {
+    #[cfg(target_os = "macos")]
+    {
+        return metal::import(frame, host);
+    }
+
+    #[cfg(not(target_os = "macos"))]
     Err(InteropError::Unsupported(
         UnsupportedReason::HostBackendMismatch,
     ))

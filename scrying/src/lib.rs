@@ -6,9 +6,9 @@ use dpi::PhysicalSize;
 use thiserror::Error;
 
 pub use native_frame::{
-    CapabilityStatus, HostWgpuContext, ImportOptions, ImportedTexture, InteropBackend,
-    InteropError, NativeFrame, NativeFrameKind, ProducerCapabilities, SyncMechanism,
-    TextureImporter, UnsupportedReason, WgpuTextureImporter,
+    CapabilityStatus, Dx12SharedTexture, HostWgpuContext, ImportOptions, ImportedTexture,
+    InteropBackend, InteropError, MetalTextureRef, NativeFrame, NativeFrameKind,
+    ProducerCapabilities, SyncMechanism, TextureImporter, UnsupportedReason, WgpuTextureImporter,
 };
 #[cfg(target_os = "windows")]
 pub use native_frame::Dx12FenceSynchronizer;

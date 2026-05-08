@@ -30,12 +30,13 @@ gdk = "0.18"
 glib = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Versions tracked alongside `wgpu-native-texture-interop`'s objc2 deps
-# so the workspace resolves a single objc2 0.6.x line. Default features
-# are kept on all of these — feature lists can be slimmed once the
-# implementation is in and we know which symbols we're actually
-# pulling. ScreenCaptureKit + WebKit + AppKit + IOSurface + Metal-from-
-# IOSurface are all available with default features at these versions.
+# Single objc2 0.6.x line. Default features kept on all of these — slim
+# them once we know exactly what symbols the WKWebView producer + SCK
+# capture pipeline pulls. `metal` + `foreign-types-shared` cover the
+# wgpu-hal `texture_from_raw` interop path; the objc2-* crates cover
+# producer-side WKWebView, ScreenCaptureKit, and IOSurface plumbing.
+metal = "0.33"
+foreign-types-shared = "0.3.1"
 objc2 = "0.6.3"
 objc2-foundation = "0.3.2"
 objc2-app-kit = "0.3.2"
