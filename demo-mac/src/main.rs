@@ -25,8 +25,8 @@ use scrying::wkwebview_producer::{
     FindOptions, UrlSchemeHandlerFn, UrlSchemeResponse, WkWebViewProducer, WkWebViewProducerConfig,
 };
 use scrying::{
-    Cookie, DownloadDecision, DownloadId, KeyEventKind, KeyModifierFlags, KeyboardInput,
-    MouseEventKind, MouseInput, MouseVirtualKeys, NavigationEvent, PointerDevice,
+    AuthDisposition, Cookie, DownloadDecision, DownloadId, KeyEventKind, KeyModifierFlags,
+    KeyboardInput, MouseEventKind, MouseInput, MouseVirtualKeys, NavigationEvent, PointerDevice,
     PointerEventKind, PointerInput, WryWebSurfaceProducer,
 };
 use winit::application::ApplicationHandler;
@@ -83,36 +83,96 @@ fn download_test_body() -> Vec<u8> {
     (0..SIZE).map(|i| (i % 251) as u8).collect()
 }
 
+/// URLs the loopback HTTP server exposes for `--download-test`.
+struct DownloadTestUrls {
+    /// Plain download — `Content-Disposition: attachment`, no auth.
+    plain: String,
+    /// Auth-required download — first request gets a 401 + a
+    /// `WWW-Authenticate: Basic` challenge; second request with
+    /// `Authorization: Basic <user:pass>` (the test's expected
+    /// credentials) gets the body.
+    auth_required: String,
+}
+
+const DOWNLOAD_AUTH_USER: &str = "scrying-test";
+const DOWNLOAD_AUTH_PASS: &str = "open-sesame";
+
 /// Spin up a single-purpose loopback HTTP server that serves the
-/// `--download-test` payload as a `Content-Disposition: attachment`
-/// response. WebKit promotes any HTTP navigation that carries a
-/// `Content-Disposition: attachment` response into a download
-/// regardless of whether `decidePolicyForNavigationResponse:`
-/// overrides — which is what unblocks our hermetic download test
-/// (custom URL-scheme responses are NOT downloadable by WebKit
-/// even when their MIME type can't be displayed; HTTP responses
-/// are).
+/// `--download-test` payload at two paths:
 ///
-/// Returns the URL the host should navigate to. The server keeps
-/// running for the rest of the process's lifetime; the OS reaps
-/// the listener thread on exit.
-fn start_download_test_server(body: Vec<u8>) -> std::io::Result<String> {
+/// - `/download` — `Content-Disposition: attachment` plain
+///   response. WebKit promotes the navigation to a download
+///   directly; no auth.
+/// - `/download-auth` — same body, but the first request gets a
+///   401 + `WWW-Authenticate: Basic realm="scrying-test-realm"`
+///   so WebKit fires
+///   `WKDownloadDelegate::download:didReceiveAuthenticationChallenge:`.
+///   Requests carrying the expected basic-auth header get the body.
+///
+/// Returns both URLs. The server keeps running for the rest of
+/// the process's lifetime; the OS reaps the listener thread on
+/// exit.
+fn start_download_test_server(body: Vec<u8>) -> std::io::Result<DownloadTestUrls> {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
-    let url = format!("http://{}/download", addr);
+    let urls = DownloadTestUrls {
+        plain: format!("http://{}/download", addr),
+        auth_required: format!("http://{}/download-auth", addr),
+    };
     let body = Arc::new(body);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
             let body = Arc::clone(&body);
             std::thread::spawn(move || {
-                // Drain the request line + headers; we don't
-                // dispatch on path so the contents don't matter.
+                // Pull the HTTP request: read until we see a blank
+                // line (end of headers). 4 KiB cap is plenty for
+                // a no-body GET with one Authorization header.
                 let mut buf = [0u8; 4096];
-                let _ = stream.read(&mut buf);
+                let n = match stream.read(&mut buf) {
+                    Ok(n) => n,
+                    Err(_) => return,
+                };
+                let request = String::from_utf8_lossy(&buf[..n]);
+
+                // Path = first whitespace-delimited token after the method.
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/");
+
+                let needs_auth = path.starts_with("/download-auth");
+                let has_valid_auth = needs_auth && request.lines().any(|h| {
+                    let lower = h.to_ascii_lowercase();
+                    lower.starts_with("authorization: basic ")
+                        && {
+                            // RFC 7617: "Basic <base64(user:pass)>"
+                            let token = &h[h.rfind(' ').map(|i| i + 1).unwrap_or(h.len())..];
+                            base64_decode(token.trim()).map(|decoded| {
+                                decoded
+                                    == format!(
+                                        "{DOWNLOAD_AUTH_USER}:{DOWNLOAD_AUTH_PASS}"
+                                    )
+                                    .as_bytes()
+                            }).unwrap_or(false)
+                        }
+                });
+
+                if needs_auth && !has_valid_auth {
+                    let header = "HTTP/1.1 401 Unauthorized\r\n\
+                                  WWW-Authenticate: Basic realm=\"scrying-test-realm\"\r\n\
+                                  Content-Length: 0\r\n\
+                                  Connection: close\r\n\
+                                  \r\n";
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.flush();
+                    return;
+                }
+
                 let header = format!(
                     "HTTP/1.1 200 OK\r\n\
                      Content-Type: application/octet-stream\r\n\
@@ -128,7 +188,36 @@ fn start_download_test_server(body: Vec<u8>) -> std::io::Result<String> {
             });
         }
     });
-    Ok(url)
+    Ok(urls)
+}
+
+/// Minimal RFC 4648 base64 decoder. Avoids pulling in the `base64`
+/// crate just for the auth header check. Returns `None` on
+/// invalid input (illegal characters, bad padding).
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits = 0u32;
+    for &b in bytes {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => break,
+            b' ' | b'\t' | b'\r' | b'\n' => continue,
+            _ => return None,
+        } as u32;
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xff) as u8);
+        }
+    }
+    Some(out)
 }
 
 /// `--browser-test` URL scheme handler. Routes by path within the
@@ -564,9 +653,13 @@ enum InteractionStateStep {
 struct DownloadTestState {
     step: DownloadStep,
     step_started_at: Option<Instant>,
-    /// HTTP URL the loopback server is serving. Set in
-    /// `AppState::new` after `start_download_test_server` returns.
+    /// HTTP URL the loopback server serves the plain (no-auth)
+    /// download from. Set in `AppState::new` after
+    /// `start_download_test_server` returns.
     download_url: String,
+    /// HTTP URL that requires basic auth. Phase D loads this and
+    /// expects the registered auth handler to supply credentials.
+    download_auth_url: String,
     /// `DownloadStarted` events seen so far, keyed by ID.
     started: HashMap<DownloadId, StartedRecord>,
     /// Set of download IDs that have received a `DownloadProgress` event.
@@ -603,6 +696,9 @@ enum DownloadStep {
     PhaseBLoad,
     PhaseBAwaitCancel,
     PhaseCCancelUnknown,
+    PhaseDInstallAuthHandler,
+    PhaseDLoad,
+    PhaseDAwaitFinish,
     Done,
 }
 
@@ -705,6 +801,11 @@ struct ScriptedState {
     /// What we typed via send_keyboard_input, expected to round-trip
     /// back as `typed:<accumulated>` from the JS input listener.
     typed_expected: String,
+    /// Number of times the registered `set_cursor_handler` callback
+    /// has fired. Asserted >= 1 at the end so the push-model API
+    /// gets the same runtime coverage as the pull-model
+    /// `poll_cursor_shape` queue.
+    cursor_handler_calls: Arc<std::sync::atomic::AtomicUsize>,
     /// Pass / fail summary printed at exit.
     failures: Vec<String>,
 }
@@ -718,6 +819,7 @@ impl ScriptedState {
             saw_echo: false,
             saw_scroll: false,
             saw_typed: String::new(),
+            cursor_handler_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             typed_expected: String::new(),
             failures: Vec::new(),
         }
@@ -1421,8 +1523,27 @@ fn advance_scripted(state: &mut AppState, event_loop: &ActiveEventLoop) {
             }
         }
         ScriptedStep::Done => {
+            // Assert the push-model `set_cursor_handler` callback
+            // fired at least once over the test run. The
+            // forwarded mouse / scroll / keyboard events drive
+            // WebKit's cursor reporting, which `observe_cursor_change`
+            // sees and dispatches to the registered handler.
+            let cursor_calls = scripted
+                .cursor_handler_calls
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if cursor_calls == 0 {
+                scripted.failures.push(
+                    "set_cursor_handler callback never fired (cursor handler API regression?)"
+                        .into(),
+                );
+            }
             if scripted.failures.is_empty() {
-                println!("demo-mac: scripted: PASS — slices E + G + I verified at runtime");
+                println!(
+                    "demo-mac: scripted: PASS — slices E + G + I + cursor handler verified at runtime"
+                );
+                println!(
+                    "  - cursor handler fired {cursor_calls} time(s) over the run"
+                );
                 event_loop.exit();
             } else {
                 eprintln!("demo-mac: scripted: FAIL");
@@ -2531,6 +2652,105 @@ fn advance_download_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
                     .failures
                     .push(format!("phase C: cancel_download(unknown): {e}")),
             }
+            step_to!(DownloadStep::PhaseDInstallAuthHandler);
+        }
+        DownloadStep::PhaseDInstallAuthHandler => {
+            // The shared auth handler covers both page-level and
+            // download-level auth challenges; for this test we
+            // only care about the download path firing the
+            // callback and supplying credentials that satisfy the
+            // server's basic-auth challenge.
+            state.producer.set_auth_handler(|challenge| {
+                eprintln!(
+                    "demo-mac: download-test: auth challenge for host '{}' method '{}'",
+                    challenge.host, challenge.auth_method
+                );
+                AuthDisposition::UseCredential {
+                    username: DOWNLOAD_AUTH_USER.to_string(),
+                    password: DOWNLOAD_AUTH_PASS.to_string(),
+                }
+            });
+            step_to!(DownloadStep::PhaseDLoad);
+        }
+        DownloadStep::PhaseDLoad => {
+            // Brief settle so phase C's residual events don't bleed
+            // into phase D's ID accounting.
+            if await_ms!(150) {
+                return;
+            }
+            if let Err(e) = state.producer.load_url(&test.download_auth_url) {
+                test.failures.push(format!("phase D load: {e}"));
+                step_to!(DownloadStep::Done);
+                return;
+            }
+            step_to!(DownloadStep::PhaseDAwaitFinish);
+        }
+        DownloadStep::PhaseDAwaitFinish => {
+            // Phase D's download is the largest ID greater than the
+            // ones we've already attributed to A and B.
+            let phase_a = test.phase_a_id.map(|i| i.0).unwrap_or(0);
+            let phase_b = test.phase_b_id.map(|i| i.0).unwrap_or(0);
+            let baseline = phase_a.max(phase_b);
+            let candidate = test
+                .finished
+                .keys()
+                .copied()
+                .filter(|id| id.0 > baseline)
+                .max();
+            let Some(id) = candidate else {
+                if elapsed > Duration::from_secs(8) {
+                    test.failures.push(
+                        "phase D: no DownloadFinished after auth challenge within 8s"
+                            .into(),
+                    );
+                    step_to!(DownloadStep::Done);
+                }
+                return;
+            };
+            // The finished entry must succeed (no error). If it
+            // failed, the auth handler probably didn't supply a
+            // credential WebKit could use.
+            if let Some(Some(error)) = test.finished.get(&id) {
+                test.failures.push(format!(
+                    "phase D: DownloadFinished error: {error} (auth handler didn't satisfy the challenge)"
+                ));
+                step_to!(DownloadStep::Done);
+                return;
+            }
+            let started = test.started.get(&id);
+            let path = match started {
+                Some(s) => s.destination_path.clone(),
+                None => {
+                    test.failures
+                        .push("phase D: DownloadFinished without matching DownloadStarted".into());
+                    step_to!(DownloadStep::Done);
+                    return;
+                }
+            };
+            match std::fs::read(&path) {
+                Ok(actual) => {
+                    let expected = download_test_body();
+                    if actual != expected {
+                        test.failures.push(format!(
+                            "phase D: bytes on disk ({} bytes) don't match served payload ({} bytes)",
+                            actual.len(),
+                            expected.len()
+                        ));
+                    } else {
+                        println!(
+                            "demo-mac: download-test: phase D: auth-protected download succeeded with {} bytes after credentials supplied",
+                            actual.len()
+                        );
+                    }
+                }
+                Err(e) => {
+                    test.failures.push(format!(
+                        "phase D: couldn't read auth-protected destination file {}: {e}",
+                        path.display()
+                    ));
+                }
+            }
+            state.producer.clear_auth_handler();
             step_to!(DownloadStep::Done);
         }
         DownloadStep::Done => {
@@ -2548,6 +2768,9 @@ fn advance_download_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
                 );
                 println!(
                     "  - cancel_download(unknown_id): returned Ok(false) as expected"
+                );
+                println!(
+                    "  - basic-auth download: shared auth handler supplied credentials, download succeeded"
                 );
                 event_loop.exit();
             } else {
@@ -2775,15 +2998,36 @@ impl AppState {
         // responses to downloads even when they're octet-stream, so
         // we serve the test payload via a loopback HTTP listener
         // and navigate to that URL instead.
+        // Scripted mode also exercises the push-model cursor
+        // handler (parity with the existing pull-model
+        // `poll_cursor_shape` queue). Build the state first so we
+        // can register the handler against its Arc counter, then
+        // move the state into AppState below.
+        let scripted_state = if cli.scripted {
+            let state = ScriptedState::new();
+            let counter = Arc::clone(&state.cursor_handler_calls);
+            producer.set_cursor_handler(move |_shape| {
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            });
+            Some(state)
+        } else {
+            None
+        };
+
         let download_test_state = if cli.download_test {
-            let url = start_download_test_server(download_test_body())
+            let urls = start_download_test_server(download_test_body())
                 .map_err(|e| -> Box<dyn std::error::Error> {
                     format!("download-test: failed to start loopback server: {e}")
                         .into()
                 })?;
-            println!("demo-mac: download-test: serving payload at {url}");
+            println!("demo-mac: download-test: serving payload at {}", urls.plain);
+            println!(
+                "demo-mac: download-test: auth-required payload at {}",
+                urls.auth_required
+            );
             Some(DownloadTestState {
-                download_url: url,
+                download_url: urls.plain,
+                download_auth_url: urls.auth_required,
                 ..DownloadTestState::default()
             })
         } else {
@@ -2805,7 +3049,7 @@ impl AppState {
                 requested: false,
                 request_at: Duration::from_secs(3),
             }),
-            scripted: cli.scripted.then(ScriptedState::new),
+            scripted: scripted_state,
             profile_test: cli.profile_test.then(ProfileTestState::default),
             second_producer,
             two_tabs_deadline: cli.two_tabs.then_some(Duration::from_secs(8)),
