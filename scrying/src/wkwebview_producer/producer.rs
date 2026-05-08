@@ -33,7 +33,9 @@ use crate::{
 
 use super::capture::{CaptureState, PendingCaptureSlot};
 use super::config::WkWebViewProducerConfig;
-use super::download_handler::DownloadHandler;
+use super::download_handler::{
+    DownloadHandler, DownloadHandlerFn, DownloadIdAllocator, DownloadRegistry,
+};
 use super::helpers::{backing_scale_for, ns_rect_from_pixels, profile_uuid_for_path};
 use super::nav_delegate::{AuthHandlerFn, NavDelegate, NavState};
 use super::scheme_handler::{SchemeHandler, UrlSchemeHandlerFn};
@@ -147,6 +149,22 @@ pub struct WkWebViewProducer {
     /// Holding it keeps the observer registered; dropped on producer
     /// `Drop` (after explicit `removeObserver:`).
     pub(super) dpi_observer: Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
+    /// Per-producer registry of in-flight downloads. The
+    /// `DownloadHandler` delegate populates this on
+    /// `decideDestination` and prunes it on
+    /// `downloadDidFinish:` / `download:didFailWithError:`. The
+    /// producer reads it in `cancel_download`.
+    pub(super) download_registry: Arc<Mutex<DownloadRegistry>>,
+    /// Atomic [`crate::DownloadId`] allocator shared with the
+    /// download delegate so each new download gets a fresh ID
+    /// without needing `&mut self`. The producer holds a strong
+    /// ref purely as a lifetime anchor; allocation happens
+    /// delegate-side.
+    pub(super) _download_id_allocator: Arc<DownloadIdAllocator>,
+    /// Optional host-driven destination handler. Shared with the
+    /// `DownloadHandler` ivars; behind a `Mutex` so
+    /// `set_download_handler` can mutate live.
+    pub(super) download_host_handler: Arc<Mutex<Option<DownloadHandlerFn>>>,
 }
 
 pub(super) type PendingPdfSlot = Arc<Mutex<Option<Result<Vec<u8>, String>>>>;
@@ -295,10 +313,18 @@ impl WkWebViewProducer {
         };
 
         let nav_state = Arc::new(Mutex::new(NavState::default()));
+        let download_registry: Arc<Mutex<DownloadRegistry>> =
+            Arc::new(Mutex::new(DownloadRegistry::default()));
+        let download_id_allocator = Arc::new(DownloadIdAllocator::new());
+        let download_host_handler: Arc<Mutex<Option<DownloadHandlerFn>>> =
+            Arc::new(Mutex::new(None));
         let download_handler = DownloadHandler::new(
             mtm,
             Arc::clone(&nav_state),
             config.download_dir.clone(),
+            Arc::clone(&download_registry),
+            Arc::clone(&download_id_allocator),
+            Arc::clone(&download_host_handler),
         );
         let auth_handler: Arc<Mutex<Option<AuthHandlerFn>>> = Arc::new(Mutex::new(None));
         let nav_delegate = NavDelegate::new(
@@ -400,6 +426,9 @@ impl WkWebViewProducer {
             permission_handler,
             dpi_pending,
             dpi_observer,
+            download_registry,
+            _download_id_allocator: download_id_allocator,
+            download_host_handler,
         })
     }
 

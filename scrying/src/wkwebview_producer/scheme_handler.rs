@@ -10,16 +10,32 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_foundation::{
-    MainThreadMarker, NSData, NSObject, NSObjectProtocol, NSString, NSURLResponse,
+    MainThreadMarker, NSData, NSDictionary, NSHTTPURLResponse, NSObject, NSObjectProtocol,
+    NSString, NSURLResponse, NSURL,
 };
 use objc2_web_kit::{WKURLSchemeHandler, WKURLSchemeTask, WKWebView};
 
 /// Response served by a [`UrlSchemeHandlerFn`] — MIME type plus the
 /// raw bytes that should appear as the resource body to the WebView.
+///
+/// `headers` contributes extra HTTP response headers (
+/// `Content-Disposition`, `Cache-Control`, etc.); the scheme
+/// handler always sets `Content-Type` from `mime_type` and
+/// `Content-Length` from `body.len()`. Use the
+/// [`Self::with_header`] builder for the common case.
 #[derive(Clone, Debug)]
 pub struct UrlSchemeResponse {
     pub mime_type: String,
     pub body: Vec<u8>,
+    pub headers: Vec<(String, String)>,
+}
+
+impl UrlSchemeResponse {
+    /// Append an extra HTTP header to this response.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
 }
 
 /// Closure type registered on a config / producer to serve resources
@@ -63,12 +79,6 @@ define_class!(
                 .map(|s| s.to_string())
                 .unwrap_or_default();
             let response = (self.ivars())(&url_str);
-            let mime_ns = NSString::from_str(&response.mime_type);
-            // Build an NSURLResponse for the consumer. Use UTF-8 as
-            // the implicit text encoding — works for HTML / JS / CSS
-            // / JSON; binary payloads are unaffected.
-            let utf8 = NSString::from_str("utf-8");
-            let length = response.body.len() as isize;
             let url_for_response = match url {
                 Some(u) => u,
                 // Pathological — WebKit always supplies a URL. Drop
@@ -78,14 +88,7 @@ define_class!(
                 // surface).
                 None => return,
             };
-            let ns_response =
-                NSURLResponse::initWithURL_MIMEType_expectedContentLength_textEncodingName(
-                    NSURLResponse::alloc(),
-                    &url_for_response,
-                    Some(&mime_ns),
-                    length,
-                    Some(&utf8),
-                );
+            let ns_response = build_http_response(&url_for_response, &response);
             // SAFETY: `bytes` outlives the `dataWithBytes_length`
             // call; NSData copies the bytes into its own buffer.
             let data = unsafe {
@@ -122,4 +125,65 @@ impl SchemeHandler {
         let this = Self::alloc(mtm).set_ivars(handler);
         unsafe { msg_send![super(this), init] }
     }
+}
+
+/// Build an `NSHTTPURLResponse` (or fall back to a plain
+/// `NSURLResponse` if Apple's parser rejects the synthesized
+/// header set). Status `200`, `Content-Type` from
+/// `response.mime_type`, `Content-Length` from `response.body.len()`,
+/// plus any caller-supplied headers (e.g. `Content-Disposition`).
+///
+/// The `NSHTTPURLResponse` path is what unlocks
+/// `Content-Disposition: attachment` → WebKit's automatic
+/// promote-to-download flow; before this slice the scheme handler
+/// used a plain `NSURLResponse` which doesn't carry headers, so
+/// served octet-stream payloads failed the navigation instead of
+/// becoming downloads.
+fn build_http_response(
+    url: &NSURL,
+    response: &UrlSchemeResponse,
+) -> Retained<NSURLResponse> {
+    let mut keys: Vec<Retained<NSString>> = Vec::with_capacity(2 + response.headers.len());
+    let mut values: Vec<Retained<NSString>> = Vec::with_capacity(2 + response.headers.len());
+    keys.push(NSString::from_str("Content-Type"));
+    values.push(NSString::from_str(&response.mime_type));
+    keys.push(NSString::from_str("Content-Length"));
+    values.push(NSString::from_str(&response.body.len().to_string()));
+    for (k, v) in &response.headers {
+        keys.push(NSString::from_str(k));
+        values.push(NSString::from_str(v));
+    }
+    let key_refs: Vec<&NSString> = keys.iter().map(|k| &**k).collect();
+    let value_refs: Vec<&NSString> = values.iter().map(|v| &**v).collect();
+    let header_dict = NSDictionary::from_slices(&key_refs, &value_refs);
+    let http_version = NSString::from_str("HTTP/1.1");
+
+    if let Some(http_response) =
+        NSHTTPURLResponse::initWithURL_statusCode_HTTPVersion_headerFields(
+            NSHTTPURLResponse::alloc(),
+            url,
+            200,
+            Some(&http_version),
+            Some(&header_dict),
+        )
+    {
+        // SAFETY: `NSHTTPURLResponse` is an `NSURLResponse`
+        // subclass per Apple's class hierarchy; objc2's
+        // `cast_unchecked` upcasts via the runtime class chain.
+        return unsafe { Retained::cast_unchecked(http_response) };
+    }
+
+    // Fallback: build a plain `NSURLResponse` if the HTTP
+    // construction failed (shouldn't happen with the inputs above,
+    // but the API returns Optional so we honor it).
+    let mime_ns = NSString::from_str(&response.mime_type);
+    let utf8 = NSString::from_str("utf-8");
+    let length = response.body.len() as isize;
+    NSURLResponse::initWithURL_MIMEType_expectedContentLength_textEncodingName(
+        NSURLResponse::alloc(),
+        url,
+        Some(&mime_ns),
+        length,
+        Some(&utf8),
+    )
 }

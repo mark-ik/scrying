@@ -16,7 +16,7 @@ use objc2_foundation::{
 };
 use objc2_web_kit::{
     WKDownload, WKNavigation, WKNavigationAction, WKNavigationDelegate, WKNavigationResponse,
-    WKWebView,
+    WKNavigationResponsePolicy, WKWebView,
 };
 
 use crate::{AuthChallenge, AuthDisposition, NavigationEvent};
@@ -151,6 +151,34 @@ define_class!(
                     .events
                     .push_back(NavigationEvent::ContentProcessTerminated);
             }
+        }
+
+        /// Convert non-displayable responses into downloads. Apple
+        /// only fires `webView:navigationResponse:didBecomeDownload:`
+        /// when *something* has decided the navigation should
+        /// download — and with no host override, that "something"
+        /// never fires for plain `application/octet-stream` /
+        /// non-displayable MIME types. We bridge the gap by
+        /// returning `WKNavigationResponsePolicyDownload` when
+        /// `canShowMIMEType` is `false`, matching the behavior a
+        /// browser-shape consumer would default to anyway.
+        ///
+        /// Pages WebKit *can* render (HTML, images, PDFs, etc.)
+        /// flow through with the standard `Allow` policy.
+        #[unsafe(method(webView:decidePolicyForNavigationResponse:decisionHandler:))]
+        fn decide_policy_for_response(
+            &self,
+            _web_view: &WKWebView,
+            navigation_response: &WKNavigationResponse,
+            decision_handler: &block2::DynBlock<dyn Fn(WKNavigationResponsePolicy)>,
+        ) {
+            let can_show = unsafe { navigation_response.canShowMIMEType() };
+            let policy = if can_show {
+                WKNavigationResponsePolicy::Allow
+            } else {
+                WKNavigationResponsePolicy::Download
+            };
+            decision_handler.call((policy,));
         }
 
         /// A navigation became a download (Content-Disposition,

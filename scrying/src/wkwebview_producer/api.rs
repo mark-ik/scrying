@@ -18,8 +18,8 @@ use objc2_web_kit::{
 };
 
 use crate::{
-    AuthChallenge, AuthDisposition, Cookie, PermissionDecision, PermissionRequest,
-    WryWebSurfaceError,
+    AuthChallenge, AuthDisposition, Cookie, DownloadDecision, DownloadDestinationRequest,
+    PermissionDecision, PermissionRequest, WryWebSurfaceError,
 };
 
 use super::cookies::{cookie_from_ns, ns_cookie_from};
@@ -254,6 +254,86 @@ impl WkWebViewProducer {
         if let Ok(mut h) = self.permission_handler.lock() {
             *h = None;
         }
+    }
+
+    /// Register a host-driven destination handler for downloads.
+    /// The closure runs synchronously on the main thread inside
+    /// the WKDownload `decideDestination` callback; its returned
+    /// [`DownloadDecision`] either accepts the download to a
+    /// specific path or cancels it.
+    ///
+    /// With no handler registered, downloads land at
+    /// `<config.download_dir>/<suggested_filename>` (with `-N`
+    /// suffixing on collision).
+    ///
+    /// The handler must do its work quickly — it blocks WebKit's
+    /// download pipeline until the closure returns. UI prompts
+    /// (a Save As dialog) belong on a different surface: you'd
+    /// register a handler that always returns `Cancel`, observe
+    /// the resulting `DownloadCancelled` event, drive the host UI
+    /// asynchronously, and re-trigger the download with the
+    /// chosen path through whatever your re-fetch mechanism is.
+    pub fn set_download_handler<F>(&mut self, handler: F)
+    where
+        F: Fn(DownloadDestinationRequest) -> DownloadDecision
+            + Send
+            + Sync
+            + 'static,
+    {
+        if let Ok(mut h) = self.download_host_handler.lock() {
+            *h = Some(Box::new(handler));
+        }
+    }
+
+    /// Drop the registered download destination handler. Future
+    /// downloads use the default `<config.download_dir>/<name>`
+    /// policy.
+    pub fn clear_download_handler(&mut self) {
+        if let Ok(mut h) = self.download_host_handler.lock() {
+            *h = None;
+        }
+    }
+
+    /// Cancel an in-flight download by [`DownloadId`]. Returns
+    /// `Ok(true)` if the ID matched an active download (a
+    /// [`crate::NavigationEvent::DownloadCancelled`] event will
+    /// follow shortly), `Ok(false)` if the ID is unknown — either
+    /// because the download already completed / failed and was
+    /// pruned from the registry, or because it was never issued.
+    ///
+    /// Cancellation drops any partial bytes; resume support is a
+    /// future slice (would surface the `resumeData` from
+    /// `WKDownload::cancel(_:)` and add a corresponding restart
+    /// API).
+    pub fn cancel_download(
+        &mut self,
+        id: crate::DownloadId,
+    ) -> Result<bool, WryWebSurfaceError> {
+        if MainThreadMarker::new().is_none() {
+            return Err(WryWebSurfaceError::Platform(
+                "cancel_download must be called on the main thread".into(),
+            ));
+        }
+        let download = {
+            let mut registry = self.download_registry.lock().map_err(|_| {
+                WryWebSurfaceError::Platform(
+                    "download registry lock poisoned".into(),
+                )
+            })?;
+            let Some(entry) = registry.by_id.get_mut(&id) else {
+                return Ok(false);
+            };
+            // Mark host-driven so the ensuing
+            // `download:didFailWithError:` callback routes to
+            // `DownloadCancelled` rather than `DownloadFinished`.
+            entry.cancelled_by_host = true;
+            entry.wk_download.clone()
+        };
+        // `cancel:` takes a completion block that receives
+        // optional resumeData. We pass `None` (no completion
+        // handler) — resume support is deferred.
+        unsafe { download.cancel(None) };
+        Ok(true)
     }
 
     /// Kick off an async fetch of every cookie in the

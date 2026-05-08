@@ -250,22 +250,85 @@ pub enum NavigationEvent {
     /// A WebKit-managed download started. The producer chose
     /// `destination_path` automatically (under the configured
     /// download directory); the host is responsible for any UI
-    /// (progress bars, "show in Finder", etc.). Watching the
-    /// filesystem at `destination_path` is the simplest way to
-    /// observe progress until a future slice exposes streaming
-    /// progress events.
+    /// (progress bars, "show in Finder", etc.). The `id` correlates
+    /// with subsequent `DownloadProgress` / `DownloadFinished` /
+    /// `DownloadCancelled` events for this download.
     DownloadStarted {
+        id: DownloadId,
         url: String,
         suggested_filename: String,
         destination_path: std::path::PathBuf,
+        /// Total bytes the server announced via `Content-Length`.
+        /// `None` when the server didn't announce one (chunked
+        /// transfer, etc.).
+        total_bytes_expected: Option<u64>,
+    },
+    /// Throttled progress notification. Emitted at most ~10 Hz per
+    /// download, plus a final emit at completion. `bytes_written` is
+    /// the cumulative count of bytes written to disk.
+    DownloadProgress {
+        id: DownloadId,
+        bytes_written: u64,
+        total_bytes_expected: Option<u64>,
     },
     /// A download completed. `error` is `Some` on failure (the file
     /// at `destination_path` may be partial or absent), `None` on
-    /// successful completion.
+    /// successful completion. Hosts that want to distinguish
+    /// host-driven cancellation from a server / network error
+    /// should listen for `DownloadCancelled` instead — that variant
+    /// only fires when the disposition came from
+    /// `set_download_handler` returning `DownloadDecision::Cancel`
+    /// or the host calling `cancel_download(id)`.
     DownloadFinished {
+        id: DownloadId,
         destination_path: std::path::PathBuf,
         error: Option<String>,
     },
+    /// A download was cancelled — either because a
+    /// host-registered destination handler returned
+    /// `DownloadDecision::Cancel`, or because the host called
+    /// `cancel_download(id)` mid-stream.
+    DownloadCancelled {
+        id: DownloadId,
+        destination_path: std::path::PathBuf,
+    },
+}
+
+/// Opaque per-producer identifier for a download. Issued when
+/// WebKit promotes a navigation to a download; used by the host to
+/// correlate `DownloadStarted` / `DownloadProgress` /
+/// `DownloadFinished` / `DownloadCancelled` events and to drive
+/// [`crate::wkwebview_producer::WkWebViewProducer::cancel_download`].
+///
+/// IDs are monotonically increasing per producer and are not
+/// reused. They have no meaning across producers.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DownloadId(pub u64);
+
+/// Information passed to a host-registered download-destination
+/// handler (see
+/// [`crate::wkwebview_producer::WkWebViewProducer::set_download_handler`]).
+/// The host returns a [`DownloadDecision`] describing whether to
+/// accept the download (and where to write it) or cancel it.
+#[derive(Clone, Debug)]
+pub struct DownloadDestinationRequest {
+    pub id: DownloadId,
+    pub url: String,
+    pub suggested_filename: String,
+    pub mime_type: String,
+    pub total_bytes_expected: Option<u64>,
+}
+
+/// Disposition the host's destination handler returns to
+/// [`DownloadDestinationRequest`].
+#[derive(Clone, Debug)]
+pub enum DownloadDecision {
+    /// Accept the download and write it to this absolute path.
+    /// Parent directory is created if it doesn't exist.
+    AcceptAt(std::path::PathBuf),
+    /// Cancel the download. Triggers a `DownloadCancelled` event;
+    /// no bytes are written.
+    Cancel,
 }
 
 /// Information passed to a host-registered auth-challenge handler
