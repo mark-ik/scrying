@@ -173,6 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         || cli.profile_test
         || cli.two_tabs
         || cli.browser_test
+        || cli.interaction_state_test
     {
         event_loop.set_control_flow(ControlFlow::Poll);
     } else {
@@ -230,6 +231,11 @@ struct Cli {
     /// timed schedule and assert deterministic effects. Items 2, 5,
     /// 6, 8 need network or harder triggers and aren't covered.
     browser_test: bool,
+    /// Round-trip `serialize_interaction_state` / `restore_interaction_state`.
+    /// Loads three pages (A → B → C), serializes, navigates back to
+    /// A, restores, and asserts the WebView ends up at C with the
+    /// full A–B–C back-forward history intact.
+    interaction_state_test: bool,
 }
 
 impl Cli {
@@ -252,6 +258,7 @@ impl Cli {
                 "--profile-test" => cli.profile_test = true,
                 "--two-tabs" => cli.two_tabs = true,
                 "--browser-test" => cli.browser_test = true,
+                "--interaction-state-test" => cli.interaction_state_test = true,
                 _ => eprintln!("demo-mac: unknown arg: {arg}"),
             }
         }
@@ -299,6 +306,9 @@ struct AppState {
     /// Set by `--browser-test`. Drives a state machine across items
     /// 1, 3, 4, 9.
     browser_test: Option<BrowserTestState>,
+    /// Set by `--interaction-state-test`. Drives the
+    /// serialize → mutate-history → restore → assert round-trip.
+    interaction_state_test: Option<InteractionStateTestState>,
     started_at: Instant,
 }
 
@@ -334,6 +344,42 @@ enum BrowserTestStep {
     AwaitFindResult,
     RequestPdf,
     AwaitPdfResult,
+    Done,
+}
+
+#[derive(Default)]
+struct InteractionStateTestState {
+    step: InteractionStateStep,
+    step_started_at: Option<Instant>,
+    /// Bytes captured by `serialize_interaction_state`. Restored
+    /// later in the run to verify round-trip correctness.
+    serialized: Option<Vec<u8>>,
+    /// Most recent URL observed via a `Completed` event. Stricter
+    /// than `SourceChanged` — only fires once WebKit has fully
+    /// committed the navigation into its back-forward list, so the
+    /// test can fire the next `load_url` without racing the
+    /// previous nav out of the history stack.
+    last_completed_url: String,
+    failures: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum InteractionStateStep {
+    #[default]
+    LoadA,
+    AwaitA,
+    LoadB,
+    AwaitB,
+    LoadC,
+    AwaitC,
+    Serialize,
+    GoBackOne,
+    AwaitBackOne,
+    GoBackTwo,
+    AwaitBackTwo,
+    Restore,
+    AwaitRestore,
+    Verify,
     Done,
 }
 
@@ -423,6 +469,7 @@ impl ApplicationHandler for App {
         if state.scripted.is_some()
             || state.profile_test.is_some()
             || state.browser_test.is_some()
+            || state.interaction_state_test.is_some()
         {
             drain_events(state);
         }
@@ -435,6 +482,9 @@ impl ApplicationHandler for App {
         }
         if state.browser_test.is_some() {
             advance_browser_test(state, event_loop);
+        }
+        if state.interaction_state_test.is_some() {
+            advance_interaction_state_test(state, event_loop);
         }
         if let Some(deadline) = state.two_tabs_deadline {
             // Drain second-producer events with a "[tab2]" prefix so
@@ -771,6 +821,11 @@ fn drain_events(state: &mut AppState) {
                     test.last_committed_url = url.clone();
                 }
                 _ => {}
+            }
+        }
+        if let Some(test) = state.interaction_state_test.as_mut() {
+            if let NavigationEvent::Completed { url, .. } = &event {
+                test.last_completed_url = url.clone();
             }
         }
     }
@@ -1334,6 +1389,242 @@ fn advance_browser_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
     }
 }
 
+/// Drive `--interaction-state-test`. Loads three pages so the
+/// WKWebView's back-forward list contains [A, B, *C], serializes
+/// the interaction state at C, navigates back to A (so the list
+/// is [*A, B, C]), then restores the captured blob and asserts
+/// the WebView ends up at C with `can_go_back == true` and
+/// `can_go_forward == false`.
+fn advance_interaction_state_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
+    let Some(test) = state.interaction_state_test.as_mut() else {
+        return;
+    };
+    let now = Instant::now();
+    if test.step_started_at.is_none() {
+        test.step_started_at = Some(now);
+    }
+    let elapsed = now.duration_since(test.step_started_at.unwrap_or(now));
+    let step = test.step;
+    macro_rules! step_to {
+        ($next:expr) => {{
+            test.step = $next;
+            test.step_started_at = Some(Instant::now());
+        }};
+    }
+    macro_rules! await_ms {
+        ($ms:expr) => {
+            elapsed < Duration::from_millis($ms)
+        };
+    }
+    const A: &str = "scrying-test://history-1";
+    const B: &str = "scrying-test://history-2";
+    const C: &str = "scrying-test://find-target";
+    match step {
+        InteractionStateStep::LoadA => {
+            if let Err(e) = state.producer.load_url(A) {
+                test.failures.push(format!("load A: {e}"));
+                step_to!(InteractionStateStep::Done);
+                return;
+            }
+            step_to!(InteractionStateStep::AwaitA);
+        }
+        InteractionStateStep::AwaitA => {
+            if test.last_completed_url == A {
+                step_to!(InteractionStateStep::LoadB);
+            } else if elapsed > Duration::from_secs(5) {
+                test.failures.push("page A never loaded".into());
+                step_to!(InteractionStateStep::Done);
+            }
+        }
+        InteractionStateStep::LoadB => {
+            if let Err(e) = state.producer.load_url(B) {
+                test.failures.push(format!("load B: {e}"));
+                step_to!(InteractionStateStep::Done);
+                return;
+            }
+            step_to!(InteractionStateStep::AwaitB);
+        }
+        InteractionStateStep::AwaitB => {
+            if test.last_completed_url == B {
+                step_to!(InteractionStateStep::LoadC);
+            } else if elapsed > Duration::from_secs(5) {
+                test.failures.push("page B never loaded".into());
+                step_to!(InteractionStateStep::Done);
+            }
+        }
+        InteractionStateStep::LoadC => {
+            if let Err(e) = state.producer.load_url(C) {
+                test.failures.push(format!("load C: {e}"));
+                step_to!(InteractionStateStep::Done);
+                return;
+            }
+            step_to!(InteractionStateStep::AwaitC);
+        }
+        InteractionStateStep::AwaitC => {
+            if test.last_completed_url == C {
+                step_to!(InteractionStateStep::Serialize);
+            } else if elapsed > Duration::from_secs(5) {
+                test.failures.push("page C never loaded".into());
+                step_to!(InteractionStateStep::Done);
+            }
+        }
+        InteractionStateStep::Serialize => {
+            // Settle so WebKit commits C into its back-forward list.
+            // serialize_interaction_state pulls a snapshot of that
+            // list, so a too-early call captures only [A, B].
+            if await_ms!(250) {
+                return;
+            }
+            match state.producer.serialize_interaction_state() {
+                Some(bytes) if !bytes.is_empty() => {
+                    println!(
+                        "demo-mac: interaction-state-test: serialized {} bytes at C",
+                        bytes.len()
+                    );
+                    test.serialized = Some(bytes);
+                    step_to!(InteractionStateStep::GoBackOne);
+                }
+                Some(_) => {
+                    test.failures
+                        .push("serialize_interaction_state returned empty blob".into());
+                    step_to!(InteractionStateStep::Done);
+                }
+                None => {
+                    test.failures
+                        .push("serialize_interaction_state returned None".into());
+                    step_to!(InteractionStateStep::Done);
+                }
+            }
+        }
+        InteractionStateStep::GoBackOne => {
+            if await_ms!(150) {
+                return;
+            }
+            match state.producer.go_back() {
+                Ok(true) => step_to!(InteractionStateStep::AwaitBackOne),
+                Ok(false) => {
+                    test.failures.push("go_back #1 returned Ok(false)".into());
+                    step_to!(InteractionStateStep::Done);
+                }
+                Err(e) => {
+                    test.failures.push(format!("go_back #1: {e}"));
+                    step_to!(InteractionStateStep::Done);
+                }
+            }
+        }
+        InteractionStateStep::AwaitBackOne => {
+            if test.last_completed_url == B {
+                step_to!(InteractionStateStep::GoBackTwo);
+            } else if elapsed > Duration::from_secs(5) {
+                test.failures.push(format!(
+                    "go_back #1 didn't land on B (saw '{}')",
+                    test.last_completed_url
+                ));
+                step_to!(InteractionStateStep::Done);
+            }
+        }
+        InteractionStateStep::GoBackTwo => {
+            if await_ms!(150) {
+                return;
+            }
+            match state.producer.go_back() {
+                Ok(true) => step_to!(InteractionStateStep::AwaitBackTwo),
+                Ok(false) => {
+                    test.failures.push("go_back #2 returned Ok(false)".into());
+                    step_to!(InteractionStateStep::Done);
+                }
+                Err(e) => {
+                    test.failures.push(format!("go_back #2: {e}"));
+                    step_to!(InteractionStateStep::Done);
+                }
+            }
+        }
+        InteractionStateStep::AwaitBackTwo => {
+            if test.last_completed_url == A {
+                step_to!(InteractionStateStep::Restore);
+            } else if elapsed > Duration::from_secs(5) {
+                test.failures.push(format!(
+                    "go_back #2 didn't land on A (saw '{}')",
+                    test.last_completed_url
+                ));
+                step_to!(InteractionStateStep::Done);
+            }
+        }
+        InteractionStateStep::Restore => {
+            if await_ms!(150) {
+                return;
+            }
+            let bytes = match test.serialized.as_ref() {
+                Some(b) => b.clone(),
+                None => {
+                    test.failures.push("no serialized blob to restore".into());
+                    step_to!(InteractionStateStep::Done);
+                    return;
+                }
+            };
+            // Clear the URL tracker so we can detect the post-restore
+            // SourceChanged unambiguously.
+            test.last_completed_url.clear();
+            match state.producer.restore_interaction_state(&bytes) {
+                Ok(()) => {
+                    println!("demo-mac: interaction-state-test: restore_interaction_state ok");
+                    step_to!(InteractionStateStep::AwaitRestore);
+                }
+                Err(e) => {
+                    test.failures.push(format!("restore_interaction_state: {e}"));
+                    step_to!(InteractionStateStep::Done);
+                }
+            }
+        }
+        InteractionStateStep::AwaitRestore => {
+            if test.last_completed_url == C {
+                println!("demo-mac: interaction-state-test: restored to C");
+                step_to!(InteractionStateStep::Verify);
+            } else if elapsed > Duration::from_secs(5) {
+                test.failures.push(format!(
+                    "restore didn't reload C (saw '{}')",
+                    test.last_completed_url
+                ));
+                step_to!(InteractionStateStep::Done);
+            }
+        }
+        InteractionStateStep::Verify => {
+            // After restoring the state captured at C with history
+            // [A, B, *C], we expect: at C, can_go_back true, can_go_forward false.
+            if await_ms!(200) {
+                return;
+            }
+            if !state.producer.can_go_back() {
+                test.failures
+                    .push("post-restore can_go_back was false (expected true)".into());
+            }
+            if state.producer.can_go_forward() {
+                test.failures
+                    .push("post-restore can_go_forward was true (expected false)".into());
+            }
+            step_to!(InteractionStateStep::Done);
+        }
+        InteractionStateStep::Done => {
+            if test.failures.is_empty() {
+                println!(
+                    "demo-mac: interaction-state-test: PASS — serialize/restore round-trip verified"
+                );
+                println!(
+                    "  - serialized at C ({} bytes), navigated back to A, restore landed on C",
+                    test.serialized.as_ref().map(|b| b.len()).unwrap_or(0)
+                );
+                println!("  - post-restore can_go_back == true, can_go_forward == false");
+            } else {
+                eprintln!("demo-mac: interaction-state-test: FAIL");
+                for f in &test.failures {
+                    eprintln!("  - {f}");
+                }
+            }
+            event_loop.exit();
+        }
+    }
+}
+
 impl AppState {
     fn new(
         event_loop: &ActiveEventLoop,
@@ -1376,13 +1667,16 @@ impl AppState {
         };
         let producer_config = WkWebViewProducerConfig::new(webview_size, &data_dir);
 
-        // Browser-test mode registers a custom URL scheme so the
-        // canned test pages don't depend on the network.
-        let url_schemes: Vec<(String, UrlSchemeHandlerFn)> = if cli.browser_test {
-            vec![("scrying-test".to_string(), browser_test_scheme_handler())]
-        } else {
-            Vec::new()
-        };
+        // Browser-test and interaction-state-test modes register a
+        // custom URL scheme so the canned test pages don't depend on
+        // the network and have stable origins suitable for
+        // `serialize_interaction_state` round-trips.
+        let url_schemes: Vec<(String, UrlSchemeHandlerFn)> =
+            if cli.browser_test || cli.interaction_state_test {
+                vec![("scrying-test".to_string(), browser_test_scheme_handler())]
+            } else {
+                Vec::new()
+            };
 
         // SAFETY: ns_view_ptr is the live NSView from winit's window,
         // which outlives the producer (window is owned by AppState
@@ -1405,7 +1699,12 @@ impl AppState {
         // panics under winit's "no nested event handling" guard).
         // Completion arrives asynchronously via the navigation event
         // FIFO.
-        if !cli.scripted && !cli.profile_test && !cli.two_tabs && !cli.browser_test {
+        if !cli.scripted
+            && !cli.profile_test
+            && !cli.two_tabs
+            && !cli.browser_test
+            && !cli.interaction_state_test
+        {
             if let Err(error) = producer.load_url(INITIAL_URL) {
                 eprintln!("demo-mac: initial load_url failed: {error}");
             } else {
@@ -1487,6 +1786,9 @@ impl AppState {
             second_producer,
             two_tabs_deadline: cli.two_tabs.then_some(Duration::from_secs(8)),
             browser_test: cli.browser_test.then(BrowserTestState::default),
+            interaction_state_test: cli
+                .interaction_state_test
+                .then(InteractionStateTestState::default),
             started_at: Instant::now(),
         })
     }
