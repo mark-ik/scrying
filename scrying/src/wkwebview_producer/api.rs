@@ -294,6 +294,35 @@ impl WkWebViewProducer {
         }
     }
 
+    /// Register a host-driven cursor-change handler. The closure
+    /// runs synchronously on the main thread inside
+    /// [`Self::send_mouse_input`] / [`Self::send_pointer_input`]
+    /// every time `NSCursor.currentSystemCursor` reports a
+    /// different shape from the previous observation.
+    ///
+    /// The pull-model [`Self::poll_cursor_shape`] keeps working
+    /// regardless — both surfaces fire on the same change, so a
+    /// host can mix and match. Useful for hosts that prefer
+    /// callbacks for cursor changes (e.g., to set the host
+    /// window's cursor immediately) but still want to drain other
+    /// per-frame state via polling.
+    pub fn set_cursor_handler<F>(&mut self, handler: F)
+    where
+        F: Fn(crate::CursorShape) + Send + Sync + 'static,
+    {
+        if let Ok(mut h) = self.cursor_handler.lock() {
+            *h = Some(Box::new(handler));
+        }
+    }
+
+    /// Drop the registered cursor handler. Future cursor changes
+    /// will only surface through [`Self::poll_cursor_shape`].
+    pub fn clear_cursor_handler(&mut self) {
+        if let Ok(mut h) = self.cursor_handler.lock() {
+            *h = None;
+        }
+    }
+
     /// Cancel an in-flight download by [`DownloadId`]. Returns
     /// `Ok(true)` if the ID matched an active download (a
     /// [`crate::NavigationEvent::DownloadCancelled`] event will

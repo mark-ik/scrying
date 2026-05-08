@@ -93,6 +93,6 @@ pub use capture::CaptureStatus;
 pub use config::WkWebViewProducerConfig;
 pub use download_handler::DownloadHandlerFn;
 pub use nav_delegate::AuthHandlerFn;
-pub use producer::WkWebViewProducer;
+pub use producer::{CursorHandlerFn, WkWebViewProducer};
 pub use scheme_handler::{UrlSchemeHandlerFn, UrlSchemeResponse};
 pub use ui_delegate::PermissionHandlerFn;

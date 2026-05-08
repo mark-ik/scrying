@@ -363,7 +363,7 @@ impl NavDelegate {
 /// genuinely doesn't respond) or the call returns null. Caller
 /// should treat both as "auth info unavailable, default-handle the
 /// challenge."
-fn read_protection_space(
+pub(super) fn read_protection_space(
     challenge: &NSURLAuthenticationChallenge,
 ) -> Option<Retained<NSURLProtectionSpace>> {
     use objc2::ffi;

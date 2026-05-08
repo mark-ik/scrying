@@ -38,6 +38,15 @@ use super::download_handler::{
 };
 use super::helpers::{backing_scale_for, ns_rect_from_pixels, profile_uuid_for_path};
 use super::nav_delegate::{AuthHandlerFn, NavDelegate, NavState};
+
+/// Host-registered cursor-change handler. Invoked synchronously
+/// on the main thread inside [`super::WkWebViewProducer::send_mouse_input`]
+/// / [`super::WkWebViewProducer::send_pointer_input`] every time
+/// `NSCursor.currentSystemCursor` reports a different shape from
+/// the previous observation. Hosts that prefer the pull model can
+/// use [`super::WkWebViewProducer::poll_cursor_shape`] instead;
+/// both fire on the same change so consumers can use either.
+pub type CursorHandlerFn = Box<dyn Fn(crate::CursorShape) + Send + Sync + 'static>;
 use super::scheme_handler::{SchemeHandler, UrlSchemeHandlerFn};
 use super::script_message::{ScriptMessageHandler, HOST_BRIDGE_HANDLER_NAME, HOST_BRIDGE_USER_SCRIPT};
 use super::title_observer::TitleObserver;
@@ -165,6 +174,12 @@ pub struct WkWebViewProducer {
     /// `DownloadHandler` ivars; behind a `Mutex` so
     /// `set_download_handler` can mutate live.
     pub(super) download_host_handler: Arc<Mutex<Option<DownloadHandlerFn>>>,
+    /// Optional host-driven cursor handler. Invoked synchronously
+    /// in `observe_cursor_change` whenever the system cursor
+    /// changes after a forwarded input event. Pull-model
+    /// consumers can keep using `poll_cursor_shape`; the two
+    /// surfaces fire on the same change.
+    pub(super) cursor_handler: Arc<Mutex<Option<CursorHandlerFn>>>,
 }
 
 pub(super) type PendingPdfSlot = Arc<Mutex<Option<Result<Vec<u8>, String>>>>;
@@ -318,6 +333,13 @@ impl WkWebViewProducer {
         let download_id_allocator = Arc::new(DownloadIdAllocator::new());
         let download_host_handler: Arc<Mutex<Option<DownloadHandlerFn>>> =
             Arc::new(Mutex::new(None));
+        let cursor_handler: Arc<Mutex<Option<CursorHandlerFn>>> =
+            Arc::new(Mutex::new(None));
+        // Allocated before `DownloadHandler::new` so the same handler
+        // can route both page-level and download-level auth
+        // challenges. Hosts that need to differentiate can branch
+        // on the URL inside the handler.
+        let auth_handler: Arc<Mutex<Option<AuthHandlerFn>>> = Arc::new(Mutex::new(None));
         let download_handler = DownloadHandler::new(
             mtm,
             Arc::clone(&nav_state),
@@ -325,8 +347,8 @@ impl WkWebViewProducer {
             Arc::clone(&download_registry),
             Arc::clone(&download_id_allocator),
             Arc::clone(&download_host_handler),
+            Arc::clone(&auth_handler),
         );
-        let auth_handler: Arc<Mutex<Option<AuthHandlerFn>>> = Arc::new(Mutex::new(None));
         let nav_delegate = NavDelegate::new(
             mtm,
             Arc::clone(&nav_state),
@@ -429,6 +451,7 @@ impl WkWebViewProducer {
             download_registry,
             _download_id_allocator: download_id_allocator,
             download_host_handler,
+            cursor_handler,
         })
     }
 
@@ -501,7 +524,15 @@ impl WkWebViewProducer {
         let shape = super::helpers::current_cursor_shape();
         if self.last_cursor_shape.as_ref() != Some(&shape) {
             self.cursor_shapes.push_back(shape.clone());
-            self.last_cursor_shape = Some(shape);
+            self.last_cursor_shape = Some(shape.clone());
+            // Fire the host's push-model handler if registered.
+            // The pull-model `cursor_shapes` queue is updated above
+            // regardless, so consumers can use either or both.
+            if let Ok(guard) = self.cursor_handler.lock()
+                && let Some(handler) = guard.as_ref()
+            {
+                handler(shape);
+            }
         }
     }
 

@@ -23,15 +23,21 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
+use objc2::AnyThread;
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
 use objc2_foundation::{
-    MainThreadMarker, NSData, NSError, NSObject, NSObjectProtocol, NSString, NSURLResponse, NSURL,
+    MainThreadMarker, NSData, NSError, NSObject, NSObjectProtocol, NSString,
+    NSURLAuthenticationChallenge, NSURLCredential, NSURLCredentialPersistence, NSURLResponse,
+    NSURLSessionAuthChallengeDisposition, NSURL,
 };
 use objc2_web_kit::{WKDownload, WKDownloadDelegate};
 
-use crate::{DownloadDecision, DownloadDestinationRequest, DownloadId, NavigationEvent};
+use crate::{
+    AuthChallenge, AuthDisposition, DownloadDecision, DownloadDestinationRequest, DownloadId,
+    NavigationEvent,
+};
 
-use super::nav_delegate::NavState;
+use super::nav_delegate::{read_protection_space, AuthHandlerFn, NavState};
 
 /// Host-registered destination handler. Called synchronously inside
 /// the WKDownload `decideDestination` callback. `None` falls back
@@ -122,6 +128,14 @@ pub(super) struct DownloadHandlerIvars {
     pub(super) registry: Arc<Mutex<DownloadRegistry>>,
     pub(super) id_allocator: Arc<DownloadIdAllocator>,
     pub(super) host_handler: Arc<Mutex<Option<DownloadHandlerFn>>>,
+    /// Optional host-driven auth-challenge handler. Shared with
+    /// the page-level [`super::nav_delegate::NavDelegate`] so a
+    /// single registered handler covers both navigation auth and
+    /// download auth — hosts that need download-specific
+    /// behavior can branch on the URL inside their handler. With
+    /// no handler, downloads default to `PerformDefaultHandling`
+    /// (system Keychain / interactive prompts).
+    pub(super) auth_handler: Arc<Mutex<Option<AuthHandlerFn>>>,
 }
 
 define_class!(
@@ -395,6 +409,102 @@ define_class!(
                 });
             }
         }
+
+        /// HTTP basic / digest / server-trust / client-cert auth
+        /// challenge fired during a download (separate from the
+        /// page-level auth callback). Mirrors
+        /// [`super::nav_delegate::NavDelegate`]'s page-level
+        /// auth handling: emits [`crate::NavigationEvent::AuthChallenged`]
+        /// for logging, then either consults a host-registered
+        /// handler (option B) or falls back to
+        /// `PerformDefaultHandling` (option A — system Keychain /
+        /// interactive prompts).
+        ///
+        /// Skipping the typed `protectionSpace()` accessor for
+        /// the same reason `nav_delegate.rs` does — see
+        /// `read_protection_space` for the bypass rationale.
+        #[unsafe(method(download:didReceiveAuthenticationChallenge:completionHandler:))]
+        fn download_did_receive_auth_challenge(
+            &self,
+            _download: &WKDownload,
+            challenge: &NSURLAuthenticationChallenge,
+            completion_handler: &block2::DynBlock<
+                dyn Fn(NSURLSessionAuthChallengeDisposition, *mut NSURLCredential),
+            >,
+        ) {
+            let ivars = self.ivars();
+            let (host, auth_method, realm) = match read_protection_space(challenge) {
+                Some(ps) => {
+                    let host = ps.host().to_string();
+                    let auth_method = ps.authenticationMethod().to_string();
+                    let realm =
+                        ps.realm().map(|r| r.to_string()).unwrap_or_default();
+                    (host, auth_method, realm)
+                }
+                None => (String::new(), String::new(), String::new()),
+            };
+
+            // Use the empty string for `url` because WKDownload's
+            // auth challenge is conceptually about the request
+            // for the download bytes, not the page that initiated
+            // it. Hosts that need cross-correlation can match on
+            // host / auth_method.
+            if let Ok(mut state) = ivars.state.lock() {
+                state.events.push_back(NavigationEvent::AuthChallenged {
+                    url: String::new(),
+                    host: host.clone(),
+                    auth_method: auth_method.clone(),
+                });
+            }
+
+            let disposition = if let Ok(guard) = ivars.auth_handler.lock() {
+                guard.as_ref().map(|f| {
+                    f(AuthChallenge {
+                        url: String::new(),
+                        host,
+                        auth_method,
+                        realm,
+                    })
+                })
+            } else {
+                None
+            };
+
+            match disposition {
+                None | Some(AuthDisposition::PerformDefault) => {
+                    completion_handler.call((
+                        NSURLSessionAuthChallengeDisposition::PerformDefaultHandling,
+                        std::ptr::null_mut(),
+                    ));
+                }
+                Some(AuthDisposition::Cancel) => {
+                    completion_handler.call((
+                        NSURLSessionAuthChallengeDisposition::CancelAuthenticationChallenge,
+                        std::ptr::null_mut(),
+                    ));
+                }
+                Some(AuthDisposition::RejectProtectionSpace) => {
+                    completion_handler.call((
+                        NSURLSessionAuthChallengeDisposition::RejectProtectionSpace,
+                        std::ptr::null_mut(),
+                    ));
+                }
+                Some(AuthDisposition::UseCredential { username, password }) => {
+                    let user_ns = NSString::from_str(&username);
+                    let pass_ns = NSString::from_str(&password);
+                    let credential = NSURLCredential::initWithUser_password_persistence(
+                        NSURLCredential::alloc(),
+                        &user_ns,
+                        &pass_ns,
+                        NSURLCredentialPersistence::ForSession,
+                    );
+                    completion_handler.call((
+                        NSURLSessionAuthChallengeDisposition::UseCredential,
+                        Retained::as_ptr(&credential) as *mut _,
+                    ));
+                }
+            }
+        }
     }
 );
 
@@ -406,6 +516,7 @@ impl DownloadHandler {
         registry: Arc<Mutex<DownloadRegistry>>,
         id_allocator: Arc<DownloadIdAllocator>,
         host_handler: Arc<Mutex<Option<DownloadHandlerFn>>>,
+        auth_handler: Arc<Mutex<Option<AuthHandlerFn>>>,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DownloadHandlerIvars {
             state,
@@ -413,6 +524,7 @@ impl DownloadHandler {
             registry,
             id_allocator,
             host_handler,
+            auth_handler,
         });
         unsafe { msg_send![super(this), init] }
     }
