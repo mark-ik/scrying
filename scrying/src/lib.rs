@@ -215,6 +215,155 @@ pub enum NavigationEvent {
     Completed { url: String, success: bool },
     /// The document title changed.
     TitleChanged { title: String },
+    /// The page tried to open a new window (`target="_blank"`,
+    /// `window.open(...)`, JS-triggered popup). The producer
+    /// suppresses the engine-level popup unconditionally — browser-
+    /// shape consumers (multiple tabs per process) want full control
+    /// over how popups are routed and should observe this event,
+    /// then call `load_url(url)` on a fresh producer instance to
+    /// open it as a tab.
+    NewWindowRequested { url: String },
+    /// The web content process backing this WebView terminated
+    /// (typically a content-side crash). The producer's WKWebView
+    /// is no longer rendering; the host should reload (and may show
+    /// a "tab crashed" UI). Recovery is `producer.reload()` or
+    /// `load_url(...)` — the WKWebView itself is reusable.
+    ContentProcessTerminated,
+    /// The engine received an authentication challenge for the
+    /// given URL and protection space. The producer responds with
+    /// `PerformDefaultHandling` (system Keychain / interactive UI),
+    /// so this event is informational only — useful for browser
+    /// chrome that wants to log auth events or show a status
+    /// indicator. A future slice may grow a `respond_to_auth`
+    /// method for hosts that need to drive the disposition
+    /// themselves.
+    AuthChallenged {
+        url: String,
+        /// Host the credential is being requested for.
+        host: String,
+        /// Authentication method identifier (NSURLAuthenticationMethod*),
+        /// e.g. `NSURLAuthenticationMethodHTTPBasic`,
+        /// `NSURLAuthenticationMethodServerTrust`,
+        /// `NSURLAuthenticationMethodClientCertificate`.
+        auth_method: String,
+    },
+    /// A WebKit-managed download started. The producer chose
+    /// `destination_path` automatically (under the configured
+    /// download directory); the host is responsible for any UI
+    /// (progress bars, "show in Finder", etc.). Watching the
+    /// filesystem at `destination_path` is the simplest way to
+    /// observe progress until a future slice exposes streaming
+    /// progress events.
+    DownloadStarted {
+        url: String,
+        suggested_filename: String,
+        destination_path: std::path::PathBuf,
+    },
+    /// A download completed. `error` is `Some` on failure (the file
+    /// at `destination_path` may be partial or absent), `None` on
+    /// successful completion.
+    DownloadFinished {
+        destination_path: std::path::PathBuf,
+        error: Option<String>,
+    },
+}
+
+/// Information passed to a host-registered auth-challenge handler
+/// (see `WkWebViewProducer::set_auth_handler`). The host returns an
+/// [`AuthDisposition`] describing how the challenge should be
+/// resolved.
+#[derive(Clone, Debug)]
+pub struct AuthChallenge {
+    pub url: String,
+    /// Host the credential is being requested for.
+    pub host: String,
+    /// Authentication method identifier
+    /// (`NSURLAuthenticationMethodHTTPBasic`,
+    /// `...HTTPDigest`, `...ServerTrust`,
+    /// `...ClientCertificate`, etc.).
+    pub auth_method: String,
+    /// Realm the server announced (HTTP basic / digest only —
+    /// empty for other methods).
+    pub realm: String,
+}
+
+/// Disposition the host returns from its auth-challenge handler.
+/// Maps onto `NSURLSessionAuthChallengeDisposition`.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum AuthDisposition {
+    /// Fall back to WebKit's default handling (system Keychain /
+    /// interactive prompts).
+    PerformDefault,
+    /// Cancel the auth challenge — the load fails.
+    Cancel,
+    /// "I can't satisfy this protection space; ask the next one."
+    /// Useful for client-cert challenges where the host has no
+    /// matching cert.
+    RejectProtectionSpace,
+    /// Provide a username + password credential (HTTP basic /
+    /// digest). Persistence is session-only — no Keychain write.
+    UseCredential { username: String, password: String },
+}
+
+/// Information passed to a host-registered permission handler
+/// (see `WkWebViewProducer::set_permission_handler`). The host
+/// returns a [`PermissionDecision`].
+#[derive(Clone, Debug)]
+pub struct PermissionRequest {
+    /// Web origin requesting the permission, e.g.
+    /// `"https://example.com"`. Empty for `about:` / `data:` URLs.
+    pub origin: String,
+    /// URL of the frame that initiated the request — usually the
+    /// same as `origin` plus the path; differs from `origin` for
+    /// nested iframes.
+    pub frame_url: String,
+    pub kind: PermissionKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum PermissionKind {
+    Camera,
+    Microphone,
+    CameraAndMicrophone,
+    /// `DeviceMotionEvent` / `DeviceOrientationEvent`.
+    DeviceOrientation,
+}
+
+/// Disposition the host returns from its permission handler. Maps
+/// onto `WKPermissionDecision`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum PermissionDecision {
+    /// Allow the requested permission.
+    Grant,
+    /// Refuse the requested permission.
+    Deny,
+    /// Fall back to WebKit's default behavior — for media-capture
+    /// requests this means the OS shows its standard prompt; for
+    /// device-orientation it means the engine prompts according to
+    /// its own policy. Use this when the host doesn't have an
+    /// opinion (e.g. for an "untrusted page, let WebKit handle it"
+    /// fallback).
+    Prompt,
+}
+
+/// HTTP cookie payload used by the producer's cookie-store API
+/// (`request_all_cookies` / `set_cookie` / `delete_cookie` on the
+/// macOS producer). Mirrors the subset of `NSHTTPCookie` that
+/// browser-shape consumers actually need; `expires_at` is a Unix
+/// timestamp (seconds since 1970-01-01 UTC), `None` for session
+/// cookies.
+#[derive(Clone, Debug)]
+pub struct Cookie {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    pub expires_at: Option<f64>,
+    pub is_secure: bool,
+    pub is_http_only: bool,
 }
 
 /// Reason supplied to a focus move.
