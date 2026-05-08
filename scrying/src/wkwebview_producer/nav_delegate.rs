@@ -11,7 +11,8 @@ use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_foundation::{
     MainThreadMarker, NSError, NSObject, NSObjectProtocol, NSString, NSURLAuthenticationChallenge,
-    NSURLCredential, NSURLCredentialPersistence, NSURLSessionAuthChallengeDisposition,
+    NSURLCredential, NSURLCredentialPersistence, NSURLProtectionSpace,
+    NSURLSessionAuthChallengeDisposition,
 };
 use objc2_web_kit::{
     WKDownload, WKNavigation, WKNavigationAction, WKNavigationDelegate, WKNavigationResponse,
@@ -214,13 +215,30 @@ define_class!(
             >,
         ) {
             let url = webview_url_string(web_view);
-            let protection_space = challenge.protectionSpace();
-            let host = protection_space.host().to_string();
-            let auth_method = protection_space.authenticationMethod().to_string();
-            let realm = protection_space
-                .realm()
-                .map(|r| r.to_string())
-                .unwrap_or_default();
+            // WebKit hands us a `WKNSURLAuthenticationChallenge`
+            // forwarding-proxy subclass that does NOT register
+            // `protectionSpace` in its dispatch table — Apple's
+            // `class_getInstanceMethod(...)` returns null for it,
+            // which trips objc2's debug-build verification check on
+            // both the typed `protectionSpace()` accessor and the
+            // `msg_send!` macro. The selector still routes correctly
+            // via `respondsToSelector:` + dynamic forwarding at
+            // runtime, so we bypass the static-table check by
+            // calling `objc_msgSend` directly. If the proxy
+            // genuinely doesn't respond to the selector (defensive
+            // case for future macOS changes), we report empty
+            // protection-space fields and fall through to default
+            // handling rather than panicking.
+            let (host, auth_method, realm) = match read_protection_space(challenge) {
+                Some(ps) => {
+                    let host = ps.host().to_string();
+                    let auth_method = ps.authenticationMethod().to_string();
+                    let realm =
+                        ps.realm().map(|r| r.to_string()).unwrap_or_default();
+                    (host, auth_method, realm)
+                }
+                None => (String::new(), String::new(), String::new()),
+            };
             if let Ok(mut state) = self.ivars().state.lock() {
                 state.events.push_back(NavigationEvent::AuthChallenged {
                     url: url.clone(),
@@ -300,4 +318,59 @@ impl NavDelegate {
         // SAFETY: NSObject's `init` returns a valid initialized instance.
         unsafe { msg_send![super(this), init] }
     }
+}
+
+/// Read `[challenge protectionSpace]` while bypassing objc2's
+/// debug-build static-method-table verification check.
+///
+/// `WKNSURLAuthenticationChallenge` (the WebKit-private subclass we
+/// receive in the auth callback) doesn't list `protectionSpace` in
+/// its own dispatch table. `class_getInstanceMethod` returns null,
+/// which makes objc2's typed `protectionSpace()` accessor and the
+/// `msg_send!` macro both panic in debug builds. The selector still
+/// resolves correctly via Apple's runtime lookup at message-send
+/// time, so we call `objc_msgSend` directly.
+///
+/// Returns `None` if either the runtime lookup fails (proxy
+/// genuinely doesn't respond) or the call returns null. Caller
+/// should treat both as "auth info unavailable, default-handle the
+/// challenge."
+fn read_protection_space(
+    challenge: &NSURLAuthenticationChallenge,
+) -> Option<Retained<NSURLProtectionSpace>> {
+    use objc2::ffi;
+    use objc2::runtime::{AnyObject, Sel};
+    use std::ptr::NonNull;
+
+    let sel = objc2::sel!(protectionSpace);
+
+    // Defensive: confirm the runtime says the receiver responds
+    // before sending. `respondsToSelector:` walks Apple's normal
+    // forwarding chain, so a `true` here promises the message-send
+    // will reach an IMP.
+    let responds: bool = unsafe { msg_send![challenge, respondsToSelector: sel] };
+    if !responds {
+        return None;
+    }
+
+    // Apple requires casting `objc_msgSend` to a function pointer of
+    // the actual method's prototype before invoking — the symbol's
+    // declared `()` signature is a stand-in for the real C-variadic
+    // dispatcher.
+    type Imp = unsafe extern "C" fn(*const AnyObject, Sel) -> *mut NSURLProtectionSpace;
+    // SAFETY: `protectionSpace` returns an `NSURLProtectionSpace*` at
+    // +0; the function pointer we transmute to matches that
+    // signature. The receiver is a live `&NSURLAuthenticationChallenge`
+    // bridged through `AnyObject` since objc_msgSend's first
+    // argument is the generic `id` type.
+    let imp: Imp = unsafe { std::mem::transmute(ffi::objc_msgSend as *const ()) };
+    let receiver = challenge as *const NSURLAuthenticationChallenge as *const AnyObject;
+    let raw = unsafe { imp(receiver, sel) };
+
+    let non_null = NonNull::new(raw)?;
+    // SAFETY: the result of `protectionSpace` is +0 (Apple's getter
+    // convention for non-`init`/`copy`/`new`/`mutableCopy` methods),
+    // so we retain to take ownership of a reference balanced against
+    // our `Retained` Drop.
+    unsafe { Retained::retain(non_null.as_ptr()) }
 }
