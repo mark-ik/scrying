@@ -1001,13 +1001,40 @@ impl WkWebViewProducer {
     /// See [`Self::load_url`] for when to prefer this over the
     /// blocking trait method.
     pub fn load_html(&self, html: &str) -> Result<(), WryWebSurfaceError> {
+        self.load_html_inner(html, None)
+    }
+
+    /// Like [`Self::load_html`] but takes a base URL string. The
+    /// inline HTML loads with that URL as its document origin —
+    /// required for `document.cookie` (and any same-origin
+    /// JavaScript API) to behave the same way it would for a real
+    /// network load. Useful for cookie / storage persistence
+    /// testing where the inline HTML wants to interact with the
+    /// per-profile [`WKWebsiteDataStore`].
+    pub fn load_html_with_base_url(
+        &self,
+        html: &str,
+        base_url: &str,
+    ) -> Result<(), WryWebSurfaceError> {
+        let url_ns = NSString::from_str(base_url);
+        let parsed = NSURL::URLWithString(&url_ns).ok_or_else(|| {
+            WryWebSurfaceError::Platform(format!("could not parse base URL: {base_url}"))
+        })?;
+        self.load_html_inner(html, Some(&parsed))
+    }
+
+    fn load_html_inner(
+        &self,
+        html: &str,
+        base_url: Option<&NSURL>,
+    ) -> Result<(), WryWebSurfaceError> {
         if MainThreadMarker::new().is_none() {
             return Err(WryWebSurfaceError::Platform(
                 "load_html must be called on the main thread".into(),
             ));
         }
         let html_ns = NSString::from_str(html);
-        unsafe { self.webview.loadHTMLString_baseURL(&html_ns, None) };
+        unsafe { self.webview.loadHTMLString_baseURL(&html_ns, base_url) };
         Ok(())
     }
 
@@ -2764,6 +2791,20 @@ fn key_modifier_flags(keys: crate::KeyModifierFlags) -> NSEventModifierFlags {
 /// `Some(value)` or `timeout` elapses.
 ///
 /// Returns `Ok(value)` on resolution, `Err(())` on timeout.
+///
+/// # ⚠️ Re-entrancy hazard
+///
+/// This function calls `NSRunLoop::runMode_beforeDate` which dispatches
+/// AppKit events from the main run loop. If the call site is itself
+/// inside a host event-loop callback (winit's `resumed` /
+/// `window_event`), AppKit may dispatch a window event that re-enters
+/// the host's handler and trips its "no nested event handling" guard
+/// → panic. Every public method that ultimately calls `pump_until`
+/// is doc-warned; new callers should add the same warning. Prefer
+/// completion-block + `Mutex<...>` slot + `poll_*` patterns
+/// (e.g. `request_snapshot` / `poll_snapshot`,
+/// `start_capture_async` / `capture_status`) for new APIs that need
+/// to bridge between async AppKit callbacks and the consumer.
 fn pump_until<T>(
     timeout: std::time::Duration,
     mut predicate: impl FnMut() -> Option<T>,

@@ -16,6 +16,7 @@ By default the demo opens an overlay-mode WebView at
 messages to stdout. The CLI flags below add automated test modes.
 
 ### `--probe-snapshot`
+
 Requests a CPU snapshot ~3 s after launch via the non-blocking
 [`request_snapshot`](../scrying/src/wkwebview_producer.rs) /
 [`poll_snapshot`](../scrying/src/wkwebview_producer.rs) pair, writes
@@ -23,6 +24,7 @@ it to `demo-mac-snapshot.png`, and exits. Automated proof-of-life for
 slice F (no interactive input required).
 
 ### `--scripted`
+
 Loads an inline test page with known DOM (input box + JS message
 listener + scrollable region) and drives a state machine that:
 
@@ -41,6 +43,7 @@ which round-trips through the `chrome.webview` shim, is the strongest
 end-to-end demonstration. G/I are asserted at the API-dispatch level.
 
 ### `--capture`
+
 Sets up a Metal-backed wgpu surface tied to the winit window,
 positions the WKWebView at the **left half** of the window, kicks
 off [`start_capture_async`](../scrying/src/wkwebview_producer.rs)
@@ -58,15 +61,42 @@ Verifies, end-to-end:
   with `--resize-test`)
 
 ### `--capture --dump-every N`
+
 Every Nth imported texture is read back via `copy_texture_to_buffer`
 and saved as `demo-mac-frame-NNNN.png`. Pixel-faithful proof of the
 IOSurface → MTLTexture → wgpu chain.
 
 ### `--capture --resize-test`
+
 Programmatically resizes the window mid-run on a 6/10/14 s schedule.
 Each resize triggers the producer's `resize` and (because capture is
 live) `SCStream::updateConfiguration:`. Verifies slice N at runtime;
 combine with `--dump-every` to see captures at the new dimensions.
+
+### `--profile-test`
+
+Loads an inline page with a stable `https://demo-mac.scrying.local/`
+origin (via the producer's
+[`load_html_with_base_url`](../scrying/src/wkwebview_producer.rs)),
+reads `document.cookie`, then sets a fresh `demo_token=val_<timestamp>`
+cookie. Run twice in a row with the same `data_dir`
+(`target/demo-mac-profile-test`): the second run observes the
+cookie set by the first, proving slice L's per-profile
+`WKWebsiteDataStore` is keyed deterministically by the path-derived
+UUID and persists across producer instances.
+
+```sh
+# First run: PRIMED (no prior cookie)
+cargo run -p demo-mac -- --profile-test
+# Second run: PERSISTED (sees the value the first run set)
+cargo run -p demo-mac -- --profile-test
+```
+
+Note: macOS keeps the data store inside the app container keyed by
+UUID — `rm -rf target/demo-mac-profile-test` does **not** reset the
+store. Use a different `data_dir` to truly start cold, or call
+`WKWebsiteDataStore::removeDataStoreForIdentifier:` (not currently
+exposed).
 
 ## Interactive keys
 

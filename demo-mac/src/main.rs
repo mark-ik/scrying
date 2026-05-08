@@ -33,14 +33,48 @@ use winit::window::{Window, WindowAttributes};
 
 const INITIAL_URL: &str = "https://example.com";
 
-/// Offline HTML page used by `--scripted`. Contains:
-/// - An input box (id=`text`) so synthetic key events can change the
-///   value and the page can post the new value to the host.
-/// - A scrollable region so synthetic scroll-wheel events change
-///   `window.scrollY` and the page can post the new offset.
-/// - A `chrome.webview` listener that echoes any message it receives
-///   from the host back as `echo:<payload>` so the host can verify
-///   round-trip JS messaging.
+/// Inline HTML loaded by `--profile-test`. Reads the existing cookie
+/// for the page's origin (set by [`PROFILE_TEST_BASE_URL`]) and posts
+/// the result back to the host. Then sets a fresh `demo_token`
+/// cookie so the next run can observe it.
+const PROFILE_TEST_HTML: &str = r#"<!doctype html>
+<html><body>
+<script>
+(function() {
+  function post(msg) {
+    if (window.chrome && window.chrome.webview) {
+      window.chrome.webview.postMessage(msg);
+    }
+  }
+  // 1. Report what's in the cookie jar at load time. First run with
+  //    a fresh data_dir: empty. Second run with the persisted data
+  //    store: should contain the value set by run 1.
+  post('cookie-on-load:' + (document.cookie || ''));
+
+  // 2. Set / refresh a token so subsequent runs (if launched within
+  //    the cookie's max-age) observe persistence.
+  var token = 'val_' + Date.now();
+  document.cookie =
+    'demo_token=' + token + '; max-age=3600; path=/; SameSite=Lax';
+  post('cookie-set:' + token);
+  post('cookie-after-set:' + (document.cookie || ''));
+  post('done');
+})();
+</script>
+</body></html>"#;
+
+/// Stable origin for the profile-test page. Required so
+/// `document.cookie` is namespaced and persisted to the per-profile
+/// `WKWebsiteDataStore`. WebKit treats cookies set on `about:blank`
+/// or `data:` origins as ephemeral, so we need a real-looking URL.
+const PROFILE_TEST_BASE_URL: &str = "https://demo-mac.scrying.local/";
+
+/// Offline HTML page used by `--scripted`. Contains an input box
+/// (id=`text`) so synthetic key events can change the value, a
+/// scrollable region so synthetic scroll-wheel events change
+/// `window.scrollY`, and a `chrome.webview` listener that echoes any
+/// message it receives back as `echo:<payload>` for round-trip
+/// verification.
 const SCRIPTED_HTML: &str = r#"<!doctype html>
 <html><head><meta charset="utf-8"><title>scrying-test</title></head>
 <body style="margin:0;font-family:monospace;background:#1c1c1c;color:#f0f0f0;">
@@ -92,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `about_to_wait` fires regularly enough to advance their state
     // machines / request redraws. Plain overlay mode can sleep on
     // `Wait`.
-    if cli.probe_snapshot || cli.capture || cli.scripted {
+    if cli.probe_snapshot || cli.capture || cli.scripted || cli.profile_test {
         event_loop.set_control_flow(ControlFlow::Poll);
     } else {
         event_loop.set_control_flow(ControlFlow::Wait);
@@ -128,6 +162,15 @@ struct Cli {
     /// to exercise slice N's `SCStream::updateConfiguration:` path.
     /// The window cycles 1024→1280→1024 over the run.
     resize_test: bool,
+    /// Run the cookie / per-profile-data-store persistence test.
+    /// Uses `target/demo-mac-profile-test` as the data dir (so it
+    /// doesn't collide with the regular demo profile). Loads an
+    /// inline test page with a stable base URL, reads
+    /// `document.cookie`, and either reports the existing cookie
+    /// (proving persistence from a prior run) or sets a fresh one
+    /// (priming for the next run). Exits as soon as the JS handshake
+    /// completes.
+    profile_test: bool,
 }
 
 impl Cli {
@@ -147,6 +190,7 @@ impl Cli {
                     });
                 }
                 "--resize-test" => cli.resize_test = true,
+                "--profile-test" => cli.profile_test = true,
                 _ => eprintln!("demo-mac: unknown arg: {arg}"),
             }
         }
@@ -180,7 +224,18 @@ struct AppState {
     /// post_web_message / scroll / keyboard at scheduled offsets,
     /// asserts on the JS-echoed responses, and exits.
     scripted: Option<ScriptedState>,
+    /// Set by `--profile-test`. Loads the cookie test page once and
+    /// reports observed cookie state.
+    profile_test: Option<ProfileTestState>,
     started_at: Instant,
+}
+
+#[derive(Default)]
+struct ProfileTestState {
+    started: bool,
+    saw_on_load: Option<String>,
+    saw_set: Option<String>,
+    saw_done: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -256,11 +311,20 @@ impl ApplicationHandler for App {
         let Some(state) = self.state.as_mut() else {
             return;
         };
+        // Drain any messages that arrived since the last wakeup
+        // before advancing test-mode state machines. Without this
+        // pre-drain the profile-test driver can race to "TIMED OUT"
+        // even when the JS handshake messages are sitting in the
+        // FIFO waiting to be observed.
+        if state.scripted.is_some() || state.profile_test.is_some() {
+            drain_events(state);
+        }
         if state.scripted.is_some() {
             advance_scripted(state, event_loop);
-            // Drain again so messages posted by the scripted step
-            // are observed within this same wakeup tick.
             drain_events(state);
+        }
+        if state.profile_test.is_some() {
+            advance_profile_test(state, event_loop);
         }
         // Capture mode: kick off `start_capture_async` after the
         // kickoff delay elapses (so the initial navigation has time
@@ -573,6 +637,15 @@ fn drain_events(state: &mut AppState) {
     }
     while let Some(message) = state.producer.poll_web_message() {
         println!("demo-mac: js->host: {message}");
+        if let Some(profile) = state.profile_test.as_mut() {
+            if let Some(rest) = message.strip_prefix("cookie-on-load:") {
+                profile.saw_on_load = Some(rest.to_string());
+            } else if let Some(rest) = message.strip_prefix("cookie-set:") {
+                profile.saw_set = Some(rest.to_string());
+            } else if message == "done" {
+                profile.saw_done = true;
+            }
+        }
         if let Some(scripted) = state.scripted.as_mut() {
             if message == "ready" {
                 scripted.saw_ready = true;
@@ -819,6 +892,49 @@ fn advance_scripted(state: &mut AppState, event_loop: &ActiveEventLoop) {
     }
 }
 
+/// Drive the `--profile-test` cookie-persistence run. Loads the test
+/// page on first tick, waits for the JS handshake, and exits with a
+/// summary that lets a test runner verify across-process persistence.
+fn advance_profile_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
+    let Some(profile) = state.profile_test.as_mut() else {
+        return;
+    };
+    if !profile.started {
+        profile.started = true;
+        if let Err(error) = state
+            .producer
+            .load_html_with_base_url(PROFILE_TEST_HTML, PROFILE_TEST_BASE_URL)
+        {
+            eprintln!("demo-mac: profile-test load_html failed: {error}");
+            event_loop.exit();
+            return;
+        }
+        println!(
+            "demo-mac: profile-test: page loaded with origin {PROFILE_TEST_BASE_URL}"
+        );
+        return;
+    }
+    if profile.saw_done {
+        let on_load = profile.saw_on_load.as_deref().unwrap_or("");
+        let set = profile.saw_set.as_deref().unwrap_or("");
+        if on_load.is_empty() {
+            println!(
+                "demo-mac: profile-test: PRIMED — no prior cookie observed, set demo_token={set}"
+            );
+        } else {
+            println!(
+                "demo-mac: profile-test: PERSISTED — cookies on load = '{on_load}'; refreshed to demo_token={set}"
+            );
+        }
+        event_loop.exit();
+        return;
+    }
+    if state.started_at.elapsed() > std::time::Duration::from_secs(10) {
+        eprintln!("demo-mac: profile-test: TIMED OUT — JS handshake never completed");
+        event_loop.exit();
+    }
+}
+
 impl AppState {
     fn new(
         event_loop: &ActiveEventLoop,
@@ -851,8 +967,14 @@ impl AppState {
         // macOS — the producer hashes it into a UUID and resolves a
         // per-profile WKWebsiteDataStore. Using the cargo target dir
         // segregates demo cookies from any other scrying instance the
-        // host might run.
-        let data_dir = std::env::current_dir()?.join("target/demo-mac-profile");
+        // host might run. The profile-test mode uses its own subdir
+        // so multiple back-to-back runs share a stable persistent
+        // store without bleeding into the regular demo profile.
+        let data_dir = if cli.profile_test {
+            std::env::current_dir()?.join("target/demo-mac-profile-test")
+        } else {
+            std::env::current_dir()?.join("target/demo-mac-profile")
+        };
         let producer_config = WkWebViewProducerConfig::new(webview_size, &data_dir);
 
         // SAFETY: ns_view_ptr is the live NSView from winit's window,
@@ -870,7 +992,7 @@ impl AppState {
         // panics under winit's "no nested event handling" guard).
         // Completion arrives asynchronously via the navigation event
         // FIFO.
-        if !cli.scripted {
+        if !cli.scripted && !cli.profile_test {
             if let Err(error) = producer.load_url(INITIAL_URL) {
                 eprintln!("demo-mac: initial load_url failed: {error}");
             } else {
@@ -918,6 +1040,7 @@ impl AppState {
                 request_at: Duration::from_secs(3),
             }),
             scripted: cli.scripted.then(ScriptedState::new),
+            profile_test: cli.profile_test.then(ProfileTestState::default),
             started_at: Instant::now(),
         })
     }
