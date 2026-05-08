@@ -519,12 +519,94 @@ all three.
 These don't fit on the version-by-version curve and can ship
 independently when the work is ready:
 
-- **macOS producer scaffold**: ✅ landed in 0.4.0. Slices A–H
+- **macOS producer scaffold**: ✅ landed in 0.4.0. Slices A–N
   (lifecycle / SCK pipeline / nav parity / mouse / JS messaging /
-  CPU snapshots / scroll wheel / title-changed via KVO) bring the
-  macOS WKWebView producer to full Windows-0.2.0 parity. Follow-up
-  slices for keyboard + IME, cursor changes, drag-and-drop, and
-  per-profile data stores are documented in the macOS section above.
+  CPU snapshots / scroll wheel / title-changed / keyboard + IME /
+  cursor changes / drag-doc / per-profile data stores /
+  `MTLSharedEvent` scaffold / resize-applies-to-stream) bring the
+  macOS WKWebView producer past Windows-0.2.0 parity. Browser-class
+  items 1–9 (history controls / new-window intercept / settings /
+  custom URL schemes / process-failure recovery / auth pass-through /
+  multi-instance verification / downloads / find + PDF) bring it to
+  a usable shape for browser-shape consumers like mere. Runtime
+  verification via [`demo-mac`](../demo-mac/) covers slices A–N (12
+  of 13; drag is structurally SPI-blocked); items 1–9 are
+  compile-tested and item 7 runtime-verified — the rest will
+  pick up runtime coverage as mere drives them.
+
+---
+
+## Browser-class consumer roadmap
+
+Beyond the parity baseline, an embeddable WebView library has to
+support a browser-shape consumer (e.g. [`mark-ik/mere`](https://github.com/mark-ik/mere)):
+multiple tabs per process, full navigation control, customizable
+chrome, robust lifecycle hooks. Items 1–9 below landed in 0.4.x;
+each has a brief notes column describing the API shape and known
+limitations.
+
+| # | Slice | Status | Public surface | macOS impl notes |
+| --- | --- | --- | --- | --- |
+| 1 | History controls | ✅ | `reload` / `stop` / `go_back` / `go_forward` / `can_go_back` / `can_go_forward` (trait) | direct `WKWebView::reload` / `stopLoading` / `goBack` / `goForward`; `go_back/forward` return `Ok(false)` if `canGoBack/Forward` is false |
+| 2 | New-window intercept | ✅ | `NavigationEvent::NewWindowRequested { url }` | `WKUIDelegate::webView:createWebViewWithConfiguration:...` returns null to suppress the engine popup; host opens its own tab in response |
+| 3 | Settings application | ✅ | `apply_settings(&WebSurfaceSettings)` (trait) | `pageZoom`, `customUserAgent`, `setInspectable` (macOS 13.3+), `WKPreferences::setJavaScriptEnabled`. Context-menu / accelerator-key fields silently ignored |
+| 4 | Custom URL schemes | ✅ | `UrlSchemeHandlerFn`, `UrlSchemeResponse`, `WkWebViewProducer::new_with_url_schemes` | `WKURLSchemeHandler` delegate per registered scheme; serves bytes synchronously inside `webView:startURLSchemeTask:` |
+| 5 | Process-failure recovery | ✅ | `NavigationEvent::ContentProcessTerminated` | `WKNavigationDelegate::webViewWebContentProcessDidTerminate:` |
+| 6 | Auth challenges | ✅ (option A) | `NavigationEvent::AuthChallenged { url, host, auth_method }` | `webView:didReceiveAuthenticationChallenge:` defaults to `PerformDefaultHandling`; option B (host-driven disposition) deferred until mere has auth UI |
+| 7 | Multi-instance verification | ✅ | n/a — architectural | `demo-mac --two-tabs` validates two producers in one process / one window cleanly drain independent event streams |
+| 8 | Downloads | ✅ | `NavigationEvent::DownloadStarted` / `DownloadFinished`, `WkWebViewProducerConfig::download_dir` | `WKDownloadDelegate` chooses unique destination paths; routed via `webView:navigationResponse:didBecomeDownload:` and `webView:navigationAction:didBecomeDownload:` |
+| 9 | Find / PDF | ✅ | `find_in_page` + `poll_find_match`, `request_pdf` + `poll_pdf`, `FindOptions` | both async-only via completion blocks; mirrors the snapshot pattern |
+
+**Recently shipped (post-9):**
+
+- ✅ Auth option B — `WkWebViewProducer::set_auth_handler` /
+  `clear_auth_handler` registers a `Fn(AuthChallenge) -> AuthDisposition`
+  closure invoked synchronously inside the navigation delegate.
+  Translates to `NSURLSessionAuthChallengeDisposition` with
+  optional `NSURLCredential` (HTTP basic via
+  `AuthDisposition::UseCredential { username, password }`).
+- ✅ Cookie store API — `request_all_cookies` / `poll_cookies`
+  (async fetch), `set_cookie(&Cookie)` / `delete_cookie(name,
+  domain, path)` (fire-and-forget). Wraps the
+  `WKHTTPCookieStore` on the producer's `WKWebsiteDataStore`.
+  Public `Cookie` struct mirrors `NSHTTPCookie`'s essential
+  fields.
+- ✅ Permission handlers — `set_permission_handler` /
+  `clear_permission_handler` registers a
+  `Fn(PermissionRequest) -> PermissionDecision` closure invoked
+  for camera / microphone / device-orientation requests.
+  No-handler default is `Prompt` (system UI).
+
+**Outstanding for follow-up slices:**
+
+- Incognito / non-persistent profile — expose
+  `WKWebsiteDataStore::nonPersistentDataStore` via a
+  `WkWebViewProducerConfig` flag.
+- Tab-state serialization — `WKWebView::interactionState` (Codable
+  blob) for "restore tabs" features.
+- Context-menu interception — `WKUIDelegate::webView:contextMenuConfigurationForElement:`
+  for browser chrome that wants to override right-click menus.
+- Touch / pen / pointer input — `send_pointer_input` is on the
+  trait but not yet wired on macOS (NSTouch is limited; NSEvent
+  `tabletPoint:` for pen is the bigger payoff).
+- DPI awareness across monitor moves — listen for
+  `viewDidChangeBackingProperties` and re-resize the WKWebView /
+  re-`updateConfiguration:` the SCStream.
+- Throttling control — `WKWebView::isLoading` is fine for
+  observation; suspending / resuming page activity for hidden tabs
+  needs SPI (`_setSuspended:`) and is risky.
+
+**Reference implementations.** [`tauri-apps/wry`](https://github.com/tauri-apps/wry)
+is a useful reference even though scrying doesn't depend on it. Its
+[`wkwebview/`](https://github.com/tauri-apps/wry/tree/dev/src/wkwebview)
+producer has solved many of the same Cocoa / objc2 lifetime and
+threading footguns ahead of us — when adding a follow-up slice
+above, skim wry's matching subsystem first; it'll often have a
+ready-made answer to "does this delegate method retain its
+arguments?" or "is `_setX:` actually reachable via objc2-web-kit?"
+
+---
+
 - **Linux WPE producer scaffold**: WPE + DMABUF + VkSemaphore
   pipeline alone.
 - **Linux WebKitGTK fallback**: probably ships only if a downstream

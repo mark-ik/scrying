@@ -10,8 +10,9 @@ This repo was extracted from [`wgpu-graft`](https://github.com/mark-ik/wgpu-graf
 
 | Crate | Purpose |
 | --- | --- |
-| [`scrying`](scrying/) | The library. Capability probe (`WebSurfaceMode`), per-platform `WryWebSurfaceProducer` impls, fallbacks. Windows producer is the reference implementation; macOS and Linux producers are skeletons. |
-| [`demo-wry-winit`](demo-wry-winit/) | Minimal winit + wgpu host probe. Creates a Wry webview, asks `scrying` which surface mode is viable, and on Windows captures the WebView2 composition target into a wgpu texture. |
+| [`scrying`](scrying/) | The library. Capability probe (`WebSurfaceMode`), per-platform `WryWebSurfaceProducer` impls, fallbacks. Windows + macOS producers are real implementations; Linux is a skeleton awaiting WPE/WebKitGTK work. |
+| [`demo-wry-winit`](demo-wry-winit/) | Windows host probe. Creates a Wry webview, asks `scrying` which surface mode is viable, and captures the WebView2 composition target into a wgpu texture. |
+| [`demo-mac`](demo-mac/) | macOS host probe. Hosts a `WkWebViewProducer` against a winit window's `NSView`; flagged modes drive nav / input / JS-messaging / SCK-capture / per-profile-data-store paths so each producer slice gets exercised at runtime. See [`demo-mac/README.md`](demo-mac/README.md). |
 
 See [`scrying/README.md`](scrying/README.md) for the producer/consumer contract, the Windows WGC + shared D3D11 path, and the future explicit-fence-sync work.
 
@@ -19,7 +20,15 @@ See [`scrying/README.md`](scrying/README.md) for the producer/consumer contract,
 
 ```bash
 cargo check -p scrying
-cargo run   -p demo-wry-winit
+# Windows
+cargo run -p demo-wry-winit
+# macOS — overlay mode (default)
+cargo run -p demo-mac
+# macOS — automated runtime tests
+cargo run -p demo-mac -- --scripted              # JS messaging + input forwarding
+cargo run -p demo-mac -- --probe-snapshot        # CPU snapshot via takeSnapshot:
+cargo run -p demo-mac -- --capture --dump-every 30   # SCK pipeline + per-N-frame readback
+cargo run -p demo-mac -- --profile-test          # per-profile WKWebsiteDataStore persistence
 ```
 
 ## Relationship to wgpu-graft

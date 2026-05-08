@@ -36,11 +36,11 @@ Per-platform producer modules:
 
 | Platform | Module | Status | Capture path |
 | --- | --- | --- | --- |
-| Windows | [`webview2_composition_producer`] | **Implemented.** Used by [`demo-wry-winit`]. | WebView2 CompositionController → `Windows.UI.Composition.Visual` → `Windows.Graphics.Capture` → shared D3D11 NT-handle texture → `wgpu` D3D12 import. |
-| macOS | [`wkwebview_producer`] | **Skeleton.** Module exists, returns `OverlayOnly` until ScreenCaptureKit + IOSurface plumbing lands. | `WKWebView` hosted in NSView → `ScreenCaptureKit` stream bound to the view → `IOSurfaceRef` → `MTLTexture` → `wgpu` Metal import. |
+| Windows | [`webview2_composition_producer`] | **Implemented.** Reference implementation; runtime-driven by [`demo-wry-winit`]. | WebView2 CompositionController → `Windows.UI.Composition.Visual` → `Windows.Graphics.Capture` → shared D3D11 NT-handle texture → `wgpu` D3D12 import. |
+| macOS | [`wkwebview_producer`] | **Implemented.** Runtime-driven by [`demo-mac`]. Slices A–N + the `MetalTextureRef` import path all exercised end-to-end. See [`design_docs/2026-05-07_platform_ceilings.md`](../design_docs/2026-05-07_platform_ceilings.md). | `WKWebView` hosted in NSView → `ScreenCaptureKit` stream bound to the host window → `CMSampleBuffer` → `IOSurfaceRef` → `MTLTexture` (via `MTLDevice::newTextureWithDescriptor:iosurface:plane:`) → `wgpu` Metal import (via `wgpu::hal::metal::Device::texture_from_raw`). |
 | Linux | [`webkitgtk_producer`] | **Skeleton.** Module exists, returns `OverlayOnly`; the actual capture path isn't yet wired. | `WebKitWebView` (or WPE) → `WPEViewBackendDMABuf` DMABUF + `VkSemaphore` → `wgpu` Vulkan import. wlroots `zwlr_screencopy_manager_v1` is a possible coarser fallback. |
 
-The Windows producer is the primary proof point and the reference implementation for the producer/consumer split, persistent shared texture, debounced resize, and cache-coherence handling.
+Both implemented producers cover the producer/consumer split, lazy capture standup, lifecycle teardown, and platform-appropriate cross-API sync (D3D11 keyed-mutex on Windows; implicit IOSurface coherence + `MTLSharedEvent` scaffolding on macOS).
 
 ## Windows producer details
 
@@ -63,9 +63,33 @@ The lower-level building blocks live in [`windows_capture`]:
 
 ## Fallbacks
 
-`NativeChildOverlay` remains the normal Wry fallback on every platform. The macOS skeleton currently advertises `CpuSnapshot` as well (`WKWebView.takeSnapshot` is good enough for thumbnails / previews if you don't need interactive frame rate); the Linux skeleton does not (`webkit_web_view_get_snapshot` would work but no consumer yet wants it).
+`NativeChildOverlay` remains the normal Wry fallback on every platform. macOS supports `CpuSnapshot` end-to-end via `WKWebView.takeSnapshot` (synchronous via `capture_cpu_snapshot`, non-blocking via `request_snapshot` / `poll_snapshot`); the Linux skeleton does not yet (`webkit_web_view_get_snapshot` would work but no consumer yet wants it).
 
 `CpuSnapshot` is useful for diagnostics, thumbnails, and low-frequency preview paths, but it is not the target for interactive composited web surfaces.
+
+## macOS producer details
+
+The macOS producer ([`wkwebview_producer::WkWebViewProducer`]) was developed in slice-by-slice fashion. Slices A–N cover the core surface (lifecycle, SCK pipeline, navigation, mouse / scroll / keyboard, JS messaging, snapshots, KVO, cursor reporting, profile data store, MTLSharedEvent scaffolding, resize-applies-to-stream). Items 1–9 of the browser-class roadmap (history controls, new-window intercept, settings, custom URL schemes, process-failure recovery, auth pass-through, multi-instance, downloads, find + PDF) build on top to make scrying usable for browser-shape consumers. Both rosters are tracked in [`design_docs/2026-05-07_platform_ceilings.md`](../design_docs/2026-05-07_platform_ceilings.md) with API hooks and known limitations.
+
+Browser-class additions on top of `WryWebSurfaceProducer`:
+
+- **History.** `reload`, `stop`, `go_back`, `go_forward`, `can_go_back`, `can_go_forward` — straight `WKWebView` mappings.
+- **New-window intercept.** `NavigationEvent::NewWindowRequested { url }` fires when a page tries to open a popup; the producer suppresses the engine-level popup so browser-shape consumers can route the URL into a new tab.
+- **Settings.** `apply_settings(&WebSurfaceSettings)` applies zoom factor, custom user-agent, JS-enabled, and devtools (via `setInspectable`, macOS 13.3+).
+- **Custom URL schemes.** `WkWebViewProducer::new_with_url_schemes(parent, config, schemes)` registers `WKURLSchemeHandler`s on the configuration. Each scheme handler is a closure `Fn(&str) -> UrlSchemeResponse + Send + Sync`.
+- **Process-failure recovery.** `NavigationEvent::ContentProcessTerminated` fires when the WebKit content process crashes; the WKWebView is reusable via `producer.reload()` or another `load_url`.
+- **Auth.** `NavigationEvent::AuthChallenged { url, host, auth_method }` fires when the engine receives an auth challenge. The producer responds with `PerformDefaultHandling` so WebKit falls back to the system keychain / interactive prompts; future host-driven disposition is a separate slice.
+- **Downloads.** `NavigationEvent::DownloadStarted` / `DownloadFinished` track WebKit-managed downloads. The producer chooses unique destination paths under `WkWebViewProducerConfig::download_dir`.
+- **Find / PDF.** `find_in_page(query, FindOptions)` + `poll_find_match() -> Option<bool>` and `request_pdf()` + `poll_pdf() -> Option<Result<Vec<u8>, String>>` are async, mirroring the snapshot pattern.
+
+Key cross-API GPU-sync notes:
+
+- The `MetalTextureRef` import path is the analog of the Windows D3D12 shared-handle path — it takes a raw `MTLTexture *` and wraps it as a `wgpu::Texture` via `wgpu::hal::metal::Device::texture_from_raw` (whose API drifted in wgpu 29 to take `Retained<ProtocolObject<dyn MTLTexture>>` directly, dropping the `metal` crate).
+- IOSurface has implicit cross-API cache coherence on Apple silicon and via IOSurface locks on Intel, so today's correctness model doesn't require an explicit fence. A `MetalSharedEventSynchronizer` (parallel to `Dx12FenceSynchronizer`) is scaffolded but inert; ScreenCaptureKit doesn't expose its render queue, so there's no producer-side hook to drive a signal from. The infrastructure is ready for when SCK extends or a downstream consumer wires manual signal points.
+
+Critical caveat for event-loop hosts: blocking entry points (`navigate_to_url`, `navigate_to_string`, `start_capture`, `capture_cpu_snapshot`) pump the main `NSRunLoop` and **must not be called from inside a host event-loop callback** (winit's `resumed` / `window_event` etc.) — the pump re-enters the host's dispatch and panics. Each blocking method's docstring carries a `⚠️` warning and a pointer to the non-blocking equivalent (`load_url` / `load_html`, `start_capture_async` + `capture_status`, `request_snapshot` + `poll_snapshot`).
+
+Reference implementations: [`tauri-apps/wry`](https://github.com/tauri-apps/wry) is a useful reference for the Cocoa / objc2 lifetime and threading footguns even though scrying doesn't depend on it. When adding a follow-up slice on macOS, skim wry's [`wkwebview/`](https://github.com/tauri-apps/wry/tree/dev/src/wkwebview) producer first.
 
 ## Cross-API GPU sync (Windows)
 

@@ -73,6 +73,31 @@ Each resize triggers the producer's `resize` and (because capture is
 live) `SCStream::updateConfiguration:`. Verifies slice N at runtime;
 combine with `--dump-every` to see captures at the new dimensions.
 
+### `--browser-test`
+
+Drives items 1, 3, 4, and 9 of the browser-class roadmap on a timed
+schedule and asserts deterministic effects:
+
+- **Item 1 — history controls**: registers a `scrying-test://` URL
+  scheme, loads `scrying-test://history-1` then
+  `scrying-test://history-2`, calls `go_back` and `go_forward`,
+  observes the round-trip via `SourceChanged` nav events.
+- **Item 3 — settings**: calls `apply_settings(zoom=1.5,
+  user_agent=…, javascript_enabled=true, devtools_enabled=false)`,
+  asserts `Ok`.
+- **Item 4 — URL schemes**: any navigation to `scrying-test://*`
+  succeeds via the registered scheme handler. Verified by item 1's
+  navigation events.
+- **Item 9 — find / PDF**: navigates to a page containing the
+  marker `scrying-find-marker`, calls `find_in_page`, asserts
+  `poll_find_match → Some(true)`. Then `request_pdf` and asserts
+  `poll_pdf → Some(Ok(>100 bytes))`.
+
+Items 2, 5, 6, 8 (new-window intercept, process-failure recovery,
+auth challenges, downloads) need network access or harder-to-trigger
+conditions and aren't covered by `--browser-test`. They'll pick up
+runtime coverage as mere drives them.
+
 ### `--profile-test`
 
 Loads an inline page with a stable `https://demo-mac.scrying.local/`
