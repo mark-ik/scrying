@@ -438,3 +438,13 @@ required.
   probe?** The demo currently keeps a wry HWND-WebView for sanity
   checking. Once scrying covers input + lifecycle on every platform,
   the wry path inside the demo is just legacy ballast.
+
+
+prompt for mac:
+Things I'm guessing at that may need fixing once you compile on Mac:
+
+wgpu 29 hal API drift on Metal. wgpu::hal::metal::Device::texture_from_raw signature might differ from what I lifted from wgpu-graft. If it errors, the fix is usually a renamed parameter or shifted arg order.
+metal::Texture::from_ptr's exact import path. I import foreign_types_shared::ForeignType for the trait it requires; the metal crate at 0.33 should still expose from_ptr via that trait. Worth confirming.
+objc2-metal coexistence with metal crate. Both depend on Objective-C runtime types. Should coexist but could conflict if dep features are mismatched.
+Anything else macOS-specific I can't see from a Windows compile.
+Push errors back and I'll iterate. After the import path compiles clean on Mac, M3 (WKWebView lifecycle) is the next big chunk — that's the bulk of the macOS producer work.
