@@ -349,6 +349,49 @@ pub enum CursorShape {
     Custom(String),
 }
 
+/// One key / modifier-change event forwarded to the underlying webview.
+#[derive(Clone, Debug)]
+pub struct KeyboardInput {
+    pub kind: KeyEventKind,
+    /// Platform-native virtual-key code. Windows: VK_*, Mac: AppKit
+    /// `keyCode` (Apple HID usage, e.g. 0x00 = A, 0x24 = Return),
+    /// Linux: xkb keycode. Producers map this to whatever the
+    /// underlying engine expects.
+    pub virtual_key_code: u32,
+    /// Text characters this event would produce (after IME / dead-key
+    /// composition), if any. Empty for pure modifier-state changes.
+    pub characters: String,
+    /// Same text but with modifier keys (shift / alt) ignored, for
+    /// keyboard-shortcut handling. Empty when not applicable.
+    pub characters_ignoring_modifiers: String,
+    pub modifiers: KeyModifierFlags,
+    /// `true` when the OS reports this event as auto-repeat.
+    pub is_repeat: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum KeyEventKind {
+    Down,
+    Up,
+    /// A modifier key (shift, control, alt, meta / cmd) toggled.
+    /// `virtual_key_code` identifies which one; `characters` is empty.
+    ModifiersChanged,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct KeyModifierFlags {
+    pub shift: bool,
+    pub control: bool,
+    /// `Alt` on Windows, `Option` on macOS, `Mod1` on Linux.
+    pub alt: bool,
+    /// `Win` on Windows, `Command` on macOS, `Mod4` / `Super` on
+    /// Linux.
+    pub meta: bool,
+    /// Caps-lock toggle state at the moment of the event.
+    pub caps_lock: bool,
+}
+
 /// Drag-and-drop event forwarded to the webview.
 #[derive(Clone, Copy, Debug)]
 pub struct DragInput {
@@ -524,6 +567,18 @@ pub trait WryWebSurfaceProducer {
         let _ = event;
         Err(WryWebSurfaceError::Unsupported(
             "WryWebSurfaceProducer::send_pointer_input is not implemented for this platform",
+        ))
+    }
+
+    /// Forward a keyboard / modifier-state event to the webview. The
+    /// host typically calls this when the webview is the focus target
+    /// (see [`WryWebSurfaceProducer::move_focus`]) and the windowing
+    /// system delivers a key event. Producers that don't yet support
+    /// keyboard forwarding return [`WryWebSurfaceError::Unsupported`].
+    fn send_keyboard_input(&mut self, event: KeyboardInput) -> Result<(), WryWebSurfaceError> {
+        let _ = event;
+        Err(WryWebSurfaceError::Unsupported(
+            "WryWebSurfaceProducer::send_keyboard_input is not implemented for this platform",
         ))
     }
 

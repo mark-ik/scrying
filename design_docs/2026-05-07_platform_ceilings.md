@@ -120,28 +120,120 @@ Metal import.
   window), sub-iframe capture.
 
 **Current scrying state (0.4.0+):**
-[`native_frame::metal`](../scrying/src/native_frame/metal.rs) lands the
-`MTLTexture` → `wgpu::Texture` import path (lifted from wgpu-graft's
-proven `import_metal_texture_ref` pattern). The
-[`MetalTextureRef`](../scrying/src/native_frame/mod.rs) variant on
-`NativeFrame` is wired into the import dispatch.
-[`wkwebview_producer`](../scrying/src/wkwebview_producer.rs) advertises
-`NativeFrameKind::MetalTextureRef` in `supported_frames` but is still
-a structural skeleton — it does not yet host a `WKWebView`, set up
-ScreenCaptureKit, or emit real frames. All trait methods (`navigate`,
-`acquire_frame`, `send_mouse_input`, etc.) currently return
-`Unsupported` until the capture pipeline lands.
+The macOS producer is a real working WebView, not a skeleton.
+Implementation landed in five cohesive slices on top of the
+[`native_frame::metal`](../scrying/src/native_frame/metal.rs)
+`MTLTexture` → `wgpu::Texture` import (initial M2 work, lifted
+structurally from wgpu-graft and adapted to the wgpu-hal 29 API drift
+where `texture_from_raw` now takes
+`Retained<ProtocolObject<dyn MTLTexture>>` directly):
 
-**Next slice (M3 / M4):** Stand up the WKWebView lifecycle (NSView
-host, `WKWebViewConfiguration`, `WKNavigationDelegate`), bind a
-`SCStream` content filter to the WKWebView's NSView, and route
-`SCStreamOutput`'s `CMSampleBuffer` → `IOSurfaceRef` →
-`[MTLDevice newTextureWithDescriptor:iosurface:plane:]` →
-`MetalTextureRef` → `WryWebSurfaceFrame::Native(...)`. Threading
-note: `SCStreamOutput` callbacks fire on a background `dispatch_queue`;
-the producer needs a `Mutex<Option<Retained<CMSampleBuffer>>>` for
-the most-recent-sample handoff, and `try_acquire_frame` reads it on
-the main thread.
+- **Slice A — WKWebView lifecycle.** `WkWebViewProducer::new` retains
+  the parent `NSView`, builds a default `WKWebViewConfiguration`,
+  creates the `WKWebView` with an NSRect derived from
+  `config.offset` (points) and `config.size` (physical pixels →
+  points via the parent window's `backingScaleFactor`), wires a
+  navigation delegate, and adds the WebView as a subview.
+  `navigate_to_string` waits on `WKNavigationDelegate.didFinishNavigation:`
+  while pumping the main run loop in 16 ms slices; `resize` /
+  `set_offset` reshape the live view; `Drop` removes from superview
+  and clears the delegate.
+- **Slice B — ScreenCaptureKit pipeline.**
+  [`WkWebViewProducer::start_capture(host, timeout)`](../scrying/src/wkwebview_producer.rs)
+  pulls the host wgpu's `MTLDevice` via
+  `as_hal::<Metal>().raw_device().clone()`, walks
+  `SCShareableContent.windows` for the WKWebView's host
+  `NSWindow.windowNumber`, builds an
+  `SCContentFilter::initWithDesktopIndependentWindow:`, configures an
+  `SCStream` for `kCVPixelFormatType_32BGRA` /
+  `setShowsCursor(false)` / `setQueueDepth(3)`, attaches custom
+  `SCStreamDelegate` + `SCStreamOutput` delegates on a dedicated
+  `DispatchQueue`, and blocks on `startCaptureWithCompletionHandler:`.
+  `try_acquire_frame` then takes the latest `CMSampleBuffer`,
+  extracts `IOSurfaceRef` via `CVPixelBufferGetIOSurface`, wraps it
+  as `MTLTexture` on the host device, and emits
+  `WryWebSurfaceFrame::Native(NativeFrame::MetalTextureRef(...))`.
+  A small `SendCFRetained<T>` newtype wraps the dispatch-queue →
+  main-thread sample handoff. `acquire_frame` is blocking — pumps
+  the run loop until a sample arrives or `frame_timeout` elapses.
+- **Slice C — navigation parity.** `navigate_to_url` loads a URL via
+  `loadRequest:`. The navigation delegate now fires `Starting` /
+  `SourceChanged` / `Completed` events into a FIFO drained by
+  `poll_navigation_event`. `move_focus` sends the WKWebView to
+  first-responder via the host `NSWindow`.
+- **Slice D — mouse forwarding.** `send_mouse_input` synthesizes an
+  `NSEvent` (window-coordinates, points, bottom-left origin via
+  `convertPoint_toView(None)`), and dispatches directly through the
+  WKWebView's NSResponder slots — `mouseDown:` / `mouseUp:` /
+  `mouseDragged:` / `mouseMoved:` / `rightMouse*` / `otherMouse*` /
+  `mouseExited:`. `Move` differentiates dragged-with-button from
+  plain `MouseMoved` based on `MouseVirtualKeys` button state;
+  `DoubleClick` rides on `clickCount = 2`. Scroll wheel and
+  X-button `buttonNumber` distinction are deferred (need the
+  `CGEvent` path).
+- **Slice E — bidirectional JS messaging.**
+  `WKUserContentController` is pre-loaded on the configuration with
+  a `WKScriptMessageHandler` named `scryingHostBridge` and a
+  document-start user script that builds a `window.chrome.webview`
+  shim. JS-side `window.chrome.webview.postMessage(s)` lands in a
+  FIFO drained by `poll_web_message`; host-side `post_web_message(s)`
+  runs an `evaluateJavaScript:` with a JSON-encoded literal that
+  dispatches to listeners registered via
+  `window.chrome.webview.addEventListener('message', ...)`. The shim
+  is idempotent and the JS API matches WebView2's surface so
+  consumers can write portable bridge code.
+- **Slice F — CPU snapshots.** `capture_cpu_snapshot` runs
+  `takeSnapshotWithConfiguration:completionHandler:` (main-thread
+  callback, no Screen Recording permission needed), pumps the run
+  loop until the NSImage arrives or `config.frame_timeout` elapses,
+  and decodes the `NSImage::TIFFRepresentation` through the `image`
+  crate's TIFF decoder into an `RgbaImage` returned as
+  `WryWebSurfaceFrame::CpuRgba`. Independent of `start_capture` —
+  works as a fallback diagnostic path, useful for thumbnails or for
+  verifying the WebView is rendering before standing up the SCK
+  pipeline.
+- **Slice G — scroll wheel via CGEvent.** `MouseEventKind::Wheel` /
+  `HorizontalWheel` build a `CGEventCreateScrollWheelEvent2` (pixel
+  units, AppKit sign convention) and convert through
+  `NSEvent::eventWithCGEvent:` before dispatching to
+  `webview.scrollWheel:`. Removes the only "deferred" caveat from
+  slice D's mouse forwarding.
+- **Slice H — title-changed events via KVO.** A `TitleObserver`
+  NSObject subclass is registered as a `title` key-path observer on
+  the WKWebView at construction time (`addObserver:forKeyPath:options:context:`
+  with `NSKeyValueObservingOptions::New`). When the page mutates
+  `document.title` after the initial load, the KVO callback pushes
+  `NavigationEvent::TitleChanged { title }` into the same FIFO the
+  navigation delegate writes to. `Drop` calls `removeObserver:`
+  before any retained references cascade so the observed object
+  outlives its observer registration.
+
+The producer struct accumulates over the slices: parent NSView,
+`WKWebView`, navigation delegate (with shared `NavState` carrying both
+the navigation completion signal and the events FIFO), script-message
+handler, web-message FIFO, and an `Option<CaptureState>` that's `Some`
+once `start_capture` has resolved. Capabilities flip from
+`NativeChildOverlay` (default) to `ImportedTexture` when capture
+starts, and back on `stop_capture` / `Drop`.
+
+Threading: SCK output callbacks fire on a background dispatch queue
+and write the latest sample into a `Mutex<Option<SendCFRetained<CMSampleBuffer>>>`
+that `try_acquire_frame` reads on the main thread; the
+`SCShareableContent` async resolution carries a similar
+`unsafe impl Send` wrapper around the matched `Retained<SCWindow>`.
+
+**Windows-0.2.0 parity status:** ✅ achieved by slices A–H. The
+remaining minor difference is X-button `buttonNumber` distinction
+(currently X1/X2 arrive as Other-mouse with the default button
+index); could be added by routing X-button cases through CGEvent in
+the same way slice G handled scroll wheel.
+
+**Outstanding for follow-up slices:** keyboard + IME forwarding
+(`keyDown:`, `NSTextInputClient`); cursor-change reporting; drag-and-
+drop forwarding; explicit `MTLSharedEvent` cross-queue sync (precaution
+— implicit IOSurface coherence is sufficient on Apple silicon today);
+per-profile `WKWebsiteDataStore` wiring; auto-applying
+`SCStreamConfiguration` resize on `resize`.
 
 ---
 
@@ -240,20 +332,22 @@ every row marked `—` is structurally not on that platform.
 
 | Capability | Windows WV2 | macOS WKWebView | Linux WPE | Linux WebKitGTK |
 | --- | --- | --- | --- | --- |
-| Imported GPU texture per frame | ✅ 0.1.0 | ? | ? | ? (degraded) |
-| Resize / offset | ✅ | ? | ? | ? |
-| Navigate (URL + HTML) | ✅ 0.2.0 | ? | ? | ? |
+| Imported GPU texture per frame | ✅ 0.1.0 | ✅ 0.4.0 | ? | ? (degraded) |
+| Resize / offset | ✅ | ✅ 0.4.0 | ? | ? |
+| Navigate (URL + HTML) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | Reload / Stop / Back / Forward | ? | ? | ? | ? |
-| Mouse + scroll forwarding | ✅ 0.2.0 | ? | ? | ? |
+| Mouse forwarding (buttons + move + leave) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
+| Scroll wheel forwarding | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | Touch + pen forwarding | ? | ? | ? | ? |
 | Keyboard forwarding (basic) | ? | ? | ? | ? |
 | IME (CJK / non-Latin) | ? | ? | ? | ? |
 | Drag-and-drop into webview | ? | ? | ? | ? |
-| Focus management | ✅ 0.2.0 | ? | ? | ? |
+| Focus management | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | Cursor-change reporting | ? | ? | ? | ? |
-| Navigation events (start/source/complete/title) | ✅ 0.2.0 | ? | ? | ? |
-| JS messaging (bidirectional) | ✅ 0.2.0 | ? | ? | ? |
-| PNG snapshot | ✅ 0.2.0 | ? (`takeSnapshot`) | ? (`get_snapshot`) | ? |
+| Navigation events (start/source/complete) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
+| Title-changed event | ✅ 0.2.0 | ✅ 0.4.0 (KVO) | ? | ? |
+| JS messaging (bidirectional) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
+| PNG / CPU snapshot | ✅ 0.2.0 | ✅ 0.4.0 (CPU RGBA) | ? (`get_snapshot`) | ? |
 | Settings (zoom, UA, JS, devtools) | ? | ? | ? | ? |
 | Profile / cookies / storage | ? | ? | ? | ? |
 | Custom URL schemes | ? | ? | ? | ? |
@@ -367,8 +461,12 @@ all three.
 These don't fit on the version-by-version curve and can ship
 independently when the work is ready:
 
-- **macOS producer scaffold**: WKWebView + SCK + IOSurface + Metal
-  pipeline alone, before driving the input surface.
+- **macOS producer scaffold**: ✅ landed in 0.4.0. Slices A–H
+  (lifecycle / SCK pipeline / nav parity / mouse / JS messaging /
+  CPU snapshots / scroll wheel / title-changed via KVO) bring the
+  macOS WKWebView producer to full Windows-0.2.0 parity. Follow-up
+  slices for keyboard + IME, cursor changes, drag-and-drop, and
+  per-profile data stores are documented in the macOS section above.
 - **Linux WPE producer scaffold**: WPE + DMABUF + VkSemaphore
   pipeline alone.
 - **Linux WebKitGTK fallback**: probably ships only if a downstream
@@ -438,13 +536,3 @@ required.
   probe?** The demo currently keeps a wry HWND-WebView for sanity
   checking. Once scrying covers input + lifecycle on every platform,
   the wry path inside the demo is just legacy ballast.
-
-
-prompt for mac:
-Things I'm guessing at that may need fixing once you compile on Mac:
-
-wgpu 29 hal API drift on Metal. wgpu::hal::metal::Device::texture_from_raw signature might differ from what I lifted from wgpu-graft. If it errors, the fix is usually a renamed parameter or shifted arg order.
-metal::Texture::from_ptr's exact import path. I import foreign_types_shared::ForeignType for the trait it requires; the metal crate at 0.33 should still expose from_ptr via that trait. Worth confirming.
-objc2-metal coexistence with metal crate. Both depend on Objective-C runtime types. Should coexist but could conflict if dep features are mismatched.
-Anything else macOS-specific I can't see from a Windows compile.
-Push errors back and I'll iterate. After the import path compiles clean on Mac, M3 (WKWebView lifecycle) is the next big chunk — that's the bulk of the macOS producer work.

@@ -12,9 +12,9 @@
 
 #![cfg(target_os = "macos")]
 
-use foreign_types_shared::ForeignType;
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::ProtocolObject;
+use objc2_metal::{MTLTexture, MTLTextureType};
 
 use super::{
     HostWgpuContext, ImportedTexture, InteropBackend, InteropError, MetalTextureRef,
@@ -37,22 +37,20 @@ pub(super) fn import(
     let texture = unsafe {
         // Retain the caller's MTLTexture so wgpu can take ownership of
         // the reference we hand it without invalidating the caller's copy.
-        let obj_ptr = frame.raw_metal_texture as *mut AnyObject;
+        let obj_ptr = frame.raw_metal_texture as *mut ProtocolObject<dyn MTLTexture>;
         let retained = Retained::retain(obj_ptr)
             .ok_or_else(|| InteropError::Metal("failed to retain Metal texture".into()))?;
-        let raw_ptr = Retained::into_raw(retained) as *mut _;
-        let metal_texture = metal::Texture::from_ptr(raw_ptr);
 
         let hal_texture = wgpu::hal::metal::Device::texture_from_raw(
-            metal_texture,
+            retained,
             frame.format,
-            metal::MTLTextureType::D2,
-            0,
-            0,
+            MTLTextureType::Type2D,
+            1,
+            1,
             wgpu::hal::CopyExtent {
                 width: frame.size.width,
                 height: frame.size.height,
-                depth: 0,
+                depth: 1,
             },
         );
 

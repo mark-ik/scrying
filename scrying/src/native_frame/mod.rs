@@ -319,7 +319,7 @@ fn import_metal_texture_ref(
 ) -> Result<ImportedTexture, InteropError> {
     #[cfg(target_os = "macos")]
     {
-        return metal::import(frame, host);
+        metal::import(frame, host)
     }
 
     #[cfg(not(target_os = "macos"))]
