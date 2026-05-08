@@ -364,7 +364,7 @@ define_class!(
             &self,
             download: &WKDownload,
             error: &NSError,
-            _resume_data: Option<&NSData>,
+            resume_data: Option<&NSData>,
         ) {
             let ivars = self.ivars();
             let pointer_key = download as *const WKDownload as usize;
@@ -385,6 +385,14 @@ define_class!(
             };
             let Some(entry) = entry else { return };
 
+            // Materialize the resume bytes (if any) before the
+            // borrow expires. Apple hands us the opaque blob
+            // they'd want back through
+            // `resumeDownloadFromResumeData:`; we copy the bytes
+            // into a `Vec<u8>` so the host can stash them across
+            // process restarts if desired.
+            let resume_bytes = resume_data.map(|d| d.to_vec()).filter(|v| !v.is_empty());
+
             // NSURLError = -999 means "user cancelled", which Apple
             // emits both for our `completion(NULL)` from the host
             // Cancel path and for `WKDownload::cancel(_:)` calls.
@@ -395,6 +403,7 @@ define_class!(
                     state.events.push_back(NavigationEvent::DownloadCancelled {
                         id: entry.id,
                         destination_path: entry.destination_path,
+                        resume_data: resume_bytes,
                     });
                 }
                 return;

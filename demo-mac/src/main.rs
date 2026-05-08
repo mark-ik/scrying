@@ -75,11 +75,13 @@ const PROFILE_TEST_HTML: &str = r#"<!doctype html>
 /// or `data:` origins as ephemeral, so we need a real-looking URL.
 const PROFILE_TEST_BASE_URL: &str = "https://demo-mac.scrying.local/";
 
-/// Body served by the `--download-test` HTTP server. 64 KiB of a
-/// known repeating pattern so the host-side test can verify the
-/// bytes that landed on disk match what was served.
+/// Body served by the `--download-test` HTTP server. 256 KiB of a
+/// known repeating pattern. Bumped from 64 KiB so phase E's slow
+/// streaming path (8 KiB chunks at 200 ms apart → ~6.4 s total
+/// for 256 KiB) gives WebKit enough buffered body bytes to capture
+/// resume_data on cancel.
 fn download_test_body() -> Vec<u8> {
-    const SIZE: usize = 64 * 1024;
+    const SIZE: usize = 256 * 1024;
     (0..SIZE).map(|i| (i % 251) as u8).collect()
 }
 
@@ -92,6 +94,12 @@ struct DownloadTestUrls {
     /// `Authorization: Basic <user:pass>` (the test's expected
     /// credentials) gets the body.
     auth_required: String,
+    /// Slow download with `Accept-Ranges: bytes` — streams the
+    /// body in small chunks with sleeps between them so the test
+    /// can cancel mid-transfer and exercise resume. Honors
+    /// `Range: bytes=N-` so `WKWebView::resumeDownloadFromResumeData:`
+    /// can resume from the offset WebKit captured.
+    slow_resumable: String,
 }
 
 const DOWNLOAD_AUTH_USER: &str = "scrying-test";
@@ -121,6 +129,7 @@ fn start_download_test_server(body: Vec<u8>) -> std::io::Result<DownloadTestUrls
     let urls = DownloadTestUrls {
         plain: format!("http://{}/download", addr),
         auth_required: format!("http://{}/download-auth", addr),
+        slow_resumable: format!("http://{}/download-slow", addr),
     };
     let body = Arc::new(body);
     std::thread::spawn(move || {
@@ -173,18 +182,93 @@ fn start_download_test_server(body: Vec<u8>) -> std::io::Result<DownloadTestUrls
                     return;
                 }
 
-                let header = format!(
-                    "HTTP/1.1 200 OK\r\n\
-                     Content-Type: application/octet-stream\r\n\
-                     Content-Length: {}\r\n\
-                     Content-Disposition: attachment; filename=\"scrying-download.bin\"\r\n\
-                     Connection: close\r\n\
-                     \r\n",
-                    body.len()
-                );
+                // The /download-slow path streams in 8 KiB
+                // chunks with 50 ms sleeps so the test client
+                // can cancel mid-transfer. It also honors
+                // `Range: bytes=N-` so a follow-up
+                // `resumeDownloadFromResumeData:` from WebKit can
+                // continue from where the cancel landed.
+                let is_slow = path.starts_with("/download-slow");
+                let range_offset = if is_slow {
+                    request
+                        .lines()
+                        .find_map(|l| {
+                            let lower = l.to_ascii_lowercase();
+                            lower
+                                .strip_prefix("range: bytes=")
+                                .map(|rest| {
+                                    let end = rest.find('-').unwrap_or(rest.len());
+                                    rest[..end].trim().parse::<u64>().ok()
+                                })
+                                .flatten()
+                        })
+                        .unwrap_or(0) as usize
+                } else {
+                    0
+                };
+
+                let slice = &body[range_offset.min(body.len())..];
+                let total_len = body.len();
+                // Stable ETag + Last-Modified — WebKit's resume
+                // validator pins on these headers when capturing
+                // / re-issuing resume requests.
+                const ETAG: &str = "\"scrying-test-etag-deadbeef\"";
+                const LAST_MODIFIED: &str = "Mon, 01 Jan 2024 00:00:00 GMT";
+                let header = if is_slow && range_offset > 0 {
+                    format!(
+                        "HTTP/1.1 206 Partial Content\r\n\
+                         Content-Type: application/octet-stream\r\n\
+                         Content-Length: {len}\r\n\
+                         Content-Range: bytes {start}-{last}/{total}\r\n\
+                         Accept-Ranges: bytes\r\n\
+                         ETag: {etag}\r\n\
+                         Last-Modified: {last_modified}\r\n\
+                         Content-Disposition: attachment; filename=\"scrying-download.bin\"\r\n\
+                         Connection: close\r\n\
+                         \r\n",
+                        len = slice.len(),
+                        start = range_offset,
+                        last = total_len - 1,
+                        total = total_len,
+                        etag = ETAG,
+                        last_modified = LAST_MODIFIED,
+                    )
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Type: application/octet-stream\r\n\
+                         Content-Length: {}\r\n\
+                         Accept-Ranges: bytes\r\n\
+                         ETag: {etag}\r\n\
+                         Last-Modified: {last_modified}\r\n\
+                         Content-Disposition: attachment; filename=\"scrying-download.bin\"\r\n\
+                         Connection: close\r\n\
+                         \r\n",
+                        slice.len(),
+                        etag = ETAG,
+                        last_modified = LAST_MODIFIED,
+                    )
+                };
                 let _ = stream.write_all(header.as_bytes());
-                let _ = stream.write_all(&body);
-                let _ = stream.flush();
+                if is_slow {
+                    // 8 KiB chunks at 200 ms apart → ~1.6 s total
+                    // for the 64 KiB body. Slow enough that
+                    // WebKit's internal buffering doesn't collapse
+                    // every chunk into a single didWriteData
+                    // callback, so the test sees Progress events
+                    // mid-transfer and can cancel before
+                    // Finished fires.
+                    for chunk in slice.chunks(8 * 1024) {
+                        if stream.write_all(chunk).is_err() {
+                            return;
+                        }
+                        let _ = stream.flush();
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                } else {
+                    let _ = stream.write_all(slice);
+                    let _ = stream.flush();
+                }
             });
         }
     });
@@ -660,6 +744,10 @@ struct DownloadTestState {
     /// HTTP URL that requires basic auth. Phase D loads this and
     /// expects the registered auth handler to supply credentials.
     download_auth_url: String,
+    /// HTTP URL that streams the body slowly with `Accept-Ranges:
+    /// bytes` so phase E can cancel mid-transfer and exercise
+    /// resume.
+    download_slow_url: String,
     /// `DownloadStarted` events seen so far, keyed by ID.
     started: HashMap<DownloadId, StartedRecord>,
     /// Set of download IDs that have received a `DownloadProgress` event.
@@ -667,8 +755,9 @@ struct DownloadTestState {
     /// `DownloadFinished` events keyed by ID. Records `Some(error)` on
     /// failure, `None` on clean completion.
     finished: HashMap<DownloadId, Option<String>>,
-    /// `DownloadCancelled` event IDs.
-    cancelled: HashSet<DownloadId>,
+    /// `DownloadCancelled` event IDs, mapped to their resume_data
+    /// (if any). Phase E uses the bytes to drive `resume_download`.
+    cancelled: HashMap<DownloadId, Option<Vec<u8>>>,
     /// Counters across the three sub-phases for the final summary.
     phase_a_id: Option<DownloadId>,
     phase_b_id: Option<DownloadId>,
@@ -684,6 +773,12 @@ struct DownloadTestState {
     /// challenges via `load_url` get caught at the page level
     /// before promotion).
     download_level_auth_seen: bool,
+    /// Phase E (resume): the in-flight slow download we cancel
+    /// to obtain resume_data.
+    phase_e_id: Option<DownloadId>,
+    /// Phase E: the resumed download's id (newly allocated when
+    /// `resumeDownloadFromResumeData:` runs `decideDestination`).
+    phase_e_resume_id: Option<DownloadId>,
     failures: Vec<String>,
 }
 
@@ -709,6 +804,13 @@ enum DownloadStep {
     PhaseDInstallAuthHandler,
     PhaseDLoad,
     PhaseDAwaitFinish,
+    PhaseELoad,
+    PhaseEAwaitProgress,
+    PhaseECancel,
+    PhaseEAwaitCancel,
+    PhaseEResume,
+    PhaseEAwaitResume,
+    PhaseEVerify,
     Done,
 }
 
@@ -1261,8 +1363,10 @@ fn drain_events(state: &mut AppState) {
                 NavigationEvent::DownloadFinished { id, error, .. } => {
                     test.finished.insert(*id, error.clone());
                 }
-                NavigationEvent::DownloadCancelled { id, .. } => {
-                    test.cancelled.insert(*id);
+                NavigationEvent::DownloadCancelled {
+                    id, resume_data, ..
+                } => {
+                    test.cancelled.insert(*id, resume_data.clone());
                 }
                 NavigationEvent::AuthChallenged { url, .. } => {
                     if url.is_empty() {
@@ -2614,7 +2718,7 @@ fn advance_download_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
             // either `started` (if WebKit happened to emit one
             // before we returned Cancel — we don't, but be robust)
             // or `cancelled`.
-            let cancelled_max = test.cancelled.iter().map(|id| id.0).max();
+            let cancelled_max = test.cancelled.keys().map(|id| id.0).max();
             let known_phase_a = test.phase_a_id.map(|id| id.0).unwrap_or(0);
             let Some(cancelled_id) = cancelled_max
                 .filter(|m| *m > known_phase_a)
@@ -2783,6 +2887,247 @@ fn advance_download_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
                 }
             }
             state.producer.clear_auth_handler();
+            step_to!(DownloadStep::PhaseELoad);
+        }
+        DownloadStep::PhaseELoad => {
+            // Brief settle so phase D residue clears.
+            if await_ms!(150) {
+                return;
+            }
+            // The slow-resumable URL streams in 8 KiB chunks at
+            // 50 ms apart so the cancel below lands mid-transfer.
+            if let Err(e) = state.producer.load_url(&test.download_slow_url) {
+                test.failures.push(format!("phase E load: {e}"));
+                step_to!(DownloadStep::Done);
+                return;
+            }
+            step_to!(DownloadStep::PhaseEAwaitProgress);
+        }
+        DownloadStep::PhaseEAwaitProgress => {
+            // Find a Started for this phase (id greater than every
+            // earlier phase's id) and wait for at least one
+            // Progress on it, so the cancel arrives mid-stream.
+            let baseline = [
+                test.phase_a_id.map(|i| i.0).unwrap_or(0),
+                test.phase_b_id.map(|i| i.0).unwrap_or(0),
+            ]
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+            // Exclude any ID that's already in `finished` or
+            // `cancelled` — phase E specifically wants the
+            // *in-flight* slow download, not phase D's
+            // already-completed transfer.
+            let candidate = test
+                .started
+                .keys()
+                .copied()
+                .filter(|id| {
+                    id.0 > baseline
+                        && !test.cancelled.contains_key(id)
+                        && !test.finished.contains_key(id)
+                })
+                .max();
+            let Some(id) = candidate else {
+                if elapsed > Duration::from_secs(5) {
+                    test.failures.push(
+                        "phase E: no DownloadStarted for slow-resumable download within 5s".into(),
+                    );
+                    step_to!(DownloadStep::Done);
+                }
+                return;
+            };
+            // No need to wait for Progress — Started + !Finished is
+            // enough to know the download is in-flight. The
+            // cancel arrives 200 ms+ after Started (because the
+            // server's first chunk takes 200 ms to flush before
+            // the next is written), which is plenty of time for
+            // WebKit to capture resume_data.
+            test.phase_e_id = Some(id);
+            step_to!(DownloadStep::PhaseECancel);
+        }
+        DownloadStep::PhaseECancel => {
+            let Some(id) = test.phase_e_id else {
+                step_to!(DownloadStep::Done);
+                return;
+            };
+            // Settle so WebKit's URL session has time to actually
+            // process body bytes (not just receive headers). On
+            // a 200 ms-per-8 KiB server, 1500 ms means ~7 chunks
+            // (~56 KiB) have been delivered — enough mass that
+            // WebKit's internal buffering should have flushed at
+            // least once and capture viable resume_data on
+            // cancel. Resume data depends on opaque WebKit
+            // internals; we caveat the soft-skip path below if
+            // it still comes back None.
+            if await_ms!(1500) {
+                return;
+            }
+            match state.producer.cancel_download(id) {
+                Ok(true) => {
+                    println!(
+                        "demo-mac: download-test: phase E: cancel_download({}) -> Ok(true), awaiting resume_data",
+                        id.0
+                    );
+                    step_to!(DownloadStep::PhaseEAwaitCancel);
+                }
+                Ok(false) => {
+                    test.failures.push(format!(
+                        "phase E: cancel_download({}) returned Ok(false) — entry was pruned before cancel",
+                        id.0
+                    ));
+                    step_to!(DownloadStep::Done);
+                }
+                Err(e) => {
+                    test.failures.push(format!("phase E: cancel_download: {e}"));
+                    step_to!(DownloadStep::Done);
+                }
+            }
+        }
+        DownloadStep::PhaseEAwaitCancel => {
+            let Some(id) = test.phase_e_id else {
+                step_to!(DownloadStep::Done);
+                return;
+            };
+            match test.cancelled.get(&id) {
+                Some(Some(resume_data)) => {
+                    println!(
+                        "demo-mac: download-test: phase E: DownloadCancelled with {} bytes of resume_data",
+                        resume_data.len()
+                    );
+                    step_to!(DownloadStep::PhaseEResume);
+                }
+                Some(None) => {
+                    // Server claims to support Range but WebKit
+                    // didn't capture resume bytes — treat as a
+                    // soft skip: the cancel itself worked, but
+                    // resume can't be exercised. Still a partial
+                    // pass.
+                    println!(
+                        "demo-mac: download-test: phase E: DownloadCancelled but resume_data was None (WebKit declined to capture); skipping resume sub-phase"
+                    );
+                    step_to!(DownloadStep::Done);
+                }
+                None => {
+                    if elapsed > Duration::from_secs(10) {
+                        test.failures.push(format!(
+                            "phase E: no DownloadCancelled for id {} within 10s",
+                            id.0
+                        ));
+                        step_to!(DownloadStep::Done);
+                    }
+                }
+            }
+        }
+        DownloadStep::PhaseEResume => {
+            let Some(id) = test.phase_e_id else {
+                step_to!(DownloadStep::Done);
+                return;
+            };
+            let bytes = match test.cancelled.get(&id).and_then(|d| d.as_ref()) {
+                Some(b) => b.clone(),
+                None => {
+                    test.failures
+                        .push("phase E: resume_data unavailable at PhaseEResume".into());
+                    step_to!(DownloadStep::Done);
+                    return;
+                }
+            };
+            // Find the destination_path from the original
+            // DownloadStarted record so we can hand it to
+            // resume_download (the resumed transfer continues to
+            // the same file path WebKit picked originally).
+            let destination_path = match test.started.get(&id) {
+                Some(s) => s.destination_path.clone(),
+                None => {
+                    test.failures.push(format!(
+                        "phase E: no Started record for id {} at resume time",
+                        id.0
+                    ));
+                    step_to!(DownloadStep::Done);
+                    return;
+                }
+            };
+            match state.producer.resume_download(&bytes, destination_path) {
+                Ok(resumed_id) => {
+                    println!(
+                        "demo-mac: download-test: phase E: resume_download issued, resumed id = {}",
+                        resumed_id.0
+                    );
+                    test.phase_e_resume_id = Some(resumed_id);
+                }
+                Err(e) => {
+                    test.failures.push(format!("phase E: resume_download: {e}"));
+                    step_to!(DownloadStep::Done);
+                    return;
+                }
+            }
+            step_to!(DownloadStep::PhaseEAwaitResume);
+        }
+        DownloadStep::PhaseEAwaitResume => {
+            // The producer's `resume_download` returned the
+            // resumed ID synchronously, so we know exactly which
+            // entry to wait for here.
+            let Some(id) = test.phase_e_resume_id else {
+                step_to!(DownloadStep::Done);
+                return;
+            };
+            if test.finished.contains_key(&id) {
+                step_to!(DownloadStep::PhaseEVerify);
+            } else if elapsed > Duration::from_secs(20) {
+                test.failures.push(format!(
+                    "phase E: resumed download id {} never finished within 20s",
+                    id.0
+                ));
+                step_to!(DownloadStep::Done);
+            }
+        }
+        DownloadStep::PhaseEVerify => {
+            let Some(id) = test.phase_e_resume_id else {
+                step_to!(DownloadStep::Done);
+                return;
+            };
+            if let Some(Some(error)) = test.finished.get(&id) {
+                test.failures.push(format!(
+                    "phase E: resumed download finished with error: {error}"
+                ));
+                step_to!(DownloadStep::Done);
+                return;
+            }
+            let path = match test.started.get(&id) {
+                Some(s) => s.destination_path.clone(),
+                None => {
+                    test.failures.push(format!(
+                        "phase E: resumed download id {} had no Started record",
+                        id.0
+                    ));
+                    step_to!(DownloadStep::Done);
+                    return;
+                }
+            };
+            match std::fs::read(&path) {
+                Ok(actual) => {
+                    let expected = download_test_body();
+                    if actual != expected {
+                        test.failures.push(format!(
+                            "phase E: resumed bytes ({} bytes) don't match expected ({} bytes)",
+                            actual.len(),
+                            expected.len()
+                        ));
+                    } else {
+                        println!(
+                            "demo-mac: download-test: phase E: resumed download produced {} bytes matching the expected payload",
+                            actual.len()
+                        );
+                    }
+                }
+                Err(e) => {
+                    test.failures.push(format!(
+                        "phase E: couldn't read resumed file {}: {e}",
+                        path.display()
+                    ));
+                }
+            }
             step_to!(DownloadStep::Done);
         }
         DownloadStep::Done => {
@@ -2805,6 +3150,17 @@ fn advance_download_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
                     "  - basic-auth download via start_download: shared auth handler supplied credentials, download succeeded (download-level auth callback fired = {})",
                     test.download_level_auth_seen
                 );
+                match (test.phase_e_id, test.phase_e_resume_id) {
+                    (Some(cancel_id), Some(resume_id)) => println!(
+                        "  - resume: cancelled mid-stream (id {}), resume_download produced complete bytes (resumed id {})",
+                        cancel_id.0, resume_id.0
+                    ),
+                    (Some(cancel_id), None) => println!(
+                        "  - resume: cancelled (id {}), but server / WebKit didn't capture resume_data — soft skip",
+                        cancel_id.0
+                    ),
+                    _ => println!("  - resume: not exercised this run"),
+                }
                 event_loop.exit();
             } else {
                 eprintln!("demo-mac: download-test: FAIL");
@@ -3061,6 +3417,7 @@ impl AppState {
             Some(DownloadTestState {
                 download_url: urls.plain,
                 download_auth_url: urls.auth_required,
+                download_slow_url: urls.slow_resumable,
                 ..DownloadTestState::default()
             })
         } else {

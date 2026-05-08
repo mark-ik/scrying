@@ -5,7 +5,7 @@
 //! round-trip for tab restoration.
 
 use std::ptr::NonNull;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use block2::RcBlock;
 use objc2::rc::Retained;
@@ -387,6 +387,139 @@ impl WkWebViewProducer {
         Ok(())
     }
 
+    /// Resume a previously-cancelled download from the
+    /// `resume_data` blob WebKit captured in the matching
+    /// [`crate::NavigationEvent::DownloadCancelled`] event.
+    ///
+    /// Wraps `WKWebView::resumeDownloadFromResumeData:completionHandler:`.
+    /// On success a fresh [`crate::DownloadId`] is allocated and
+    /// the resumed transfer fires its own
+    /// `DownloadStarted` / `DownloadProgress` / `DownloadFinished`
+    /// events; on failure (corrupt blob, server no longer accepts
+    /// the resume request, etc.) a `DownloadFinished` with
+    /// `error: Some(_)` lands instead.
+    ///
+    /// Returns immediately. The resumed download is wired to the
+    /// same [`super::download_handler::DownloadHandler`] as
+    /// promotion-driven and `start_download`-initiated transfers,
+    /// so the existing event surface covers it without any
+    /// special casing.
+    pub fn resume_download(
+        &mut self,
+        resume_data: &[u8],
+        destination_path: std::path::PathBuf,
+    ) -> Result<crate::DownloadId, WryWebSurfaceError> {
+        if MainThreadMarker::new().is_none() {
+            return Err(WryWebSurfaceError::Platform(
+                "resume_download must be called on the main thread".into(),
+            ));
+        }
+        if resume_data.is_empty() {
+            return Err(WryWebSurfaceError::Platform(
+                "resume_download called with empty resume_data".into(),
+            ));
+        }
+        // SAFETY: `resume_data` outlives the `dataWithBytes_length`
+        // call; NSData copies into its own buffer.
+        let ns_data = unsafe {
+            NSData::dataWithBytes_length(
+                resume_data.as_ptr() as *mut std::ffi::c_void,
+                resume_data.len(),
+            )
+        };
+
+        // Allocate the resumed download's id up-front so the
+        // caller can correlate the eventual `DownloadFinished`
+        // event before WebKit creates its `WKDownload`. WebKit
+        // skips `decideDestination` for resumed downloads (the
+        // destination is already encoded in the resume_data
+        // plist), so we register the entry here in
+        // `resume_download` rather than in the delegate.
+        let id = self.allocate_download_id();
+
+        // Emit a `DownloadStarted` event synchronously so hosts
+        // listening on the nav-event FIFO see the resume kick
+        // off. `total_bytes_expected: None` because the resumed
+        // request returns 206 Partial Content with a
+        // remaining-bytes content-length, not the full file
+        // size; expressing it as "we'll see when the bytes
+        // land" matches WebKit's actual behavior.
+        if let Ok(mut state) = self.nav_state.lock() {
+            state.events.push_back(crate::NavigationEvent::DownloadStarted {
+                id,
+                url: String::new(),
+                suggested_filename: destination_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                destination_path: destination_path.clone(),
+                total_bytes_expected: None,
+            });
+        }
+
+        struct SendBundle {
+            delegate: Retained<super::download_handler::DownloadHandler>,
+            registry: Arc<Mutex<super::download_handler::DownloadRegistry>>,
+            destination_path: std::path::PathBuf,
+            id: crate::DownloadId,
+        }
+        // SAFETY: see `start_download` for the same wrapper rationale.
+        unsafe impl Send for SendBundle {}
+        let bundle = SendBundle {
+            delegate: self.download_handler_strong.clone(),
+            registry: Arc::clone(&self.download_registry),
+            destination_path,
+            id,
+        };
+
+        let block = RcBlock::new(move |download: NonNull<WKDownload>| {
+            // SAFETY: WebKit hands us a +0 reference valid for
+            // the duration of the completion-handler call;
+            // retaining extends the lifetime to match our
+            // registry entry.
+            let download_ref = unsafe { download.as_ref() };
+            let download_strong = unsafe {
+                Retained::retain(NonNull::from(download_ref).as_ptr())
+            }
+            .expect("Retained::retain on resumed WKDownload returned None");
+
+            let pointer_key = Retained::as_ptr(&download_strong) as usize;
+            if let Ok(mut registry) = bundle.registry.lock() {
+                registry.by_pointer.insert(pointer_key, bundle.id);
+                registry.by_id.insert(
+                    bundle.id,
+                    super::download_handler::DownloadEntry {
+                        id: bundle.id,
+                        destination_path: bundle.destination_path.clone(),
+                        wk_download: download_strong,
+                        last_progress_emit: std::time::Instant::now(),
+                        last_progress_bytes: 0,
+                        cancelled_by_host: false,
+                    },
+                );
+            }
+
+            unsafe {
+                download_ref
+                    .setDelegate(Some(ProtocolObject::from_ref(&*bundle.delegate)));
+            }
+        });
+
+        unsafe {
+            self.webview()
+                .resumeDownloadFromResumeData_completionHandler(&ns_data, &block);
+        }
+        Ok(id)
+    }
+
+    /// Allocate a fresh [`crate::DownloadId`] from the producer's
+    /// shared atomic counter. Used by `resume_download` (which
+    /// can't wait for `decideDestination` to do this for it,
+    /// since WebKit skips that callback for resumed downloads).
+    fn allocate_download_id(&self) -> crate::DownloadId {
+        self.download_id_allocator.next()
+    }
+
     /// Cancel an in-flight download by [`DownloadId`]. Returns
     /// `Ok(true)` if the ID matched an active download (a
     /// [`crate::NavigationEvent::DownloadCancelled`] event will
@@ -407,25 +540,61 @@ impl WkWebViewProducer {
                 "cancel_download must be called on the main thread".into(),
             ));
         }
-        let download = {
+        let (download, destination_path) = {
             let mut registry = self.download_registry.lock().map_err(|_| {
                 WryWebSurfaceError::Platform(
                     "download registry lock poisoned".into(),
                 )
             })?;
-            let Some(entry) = registry.by_id.get_mut(&id) else {
+            let Some(entry) = registry.by_id.get(&id) else {
                 return Ok(false);
             };
-            // Mark host-driven so the ensuing
-            // `download:didFailWithError:` callback routes to
-            // `DownloadCancelled` rather than `DownloadFinished`.
-            entry.cancelled_by_host = true;
-            entry.wk_download.clone()
+            let download = entry.wk_download.clone();
+            let dest = entry.destination_path.clone();
+            // Remove the registry entry now. Apple's `cancel:` with
+            // a non-nil completion block deliberately suppresses
+            // `didFailWithError:resumeData:` on the delegate (per
+            // their docs: "Once the cancel: completion block is
+            // called, you don't receive any further messages
+            // about the canceled download"), so the delegate's
+            // `didFail` cleanup path won't fire for this entry —
+            // we have to prune it here.
+            let pointer_key = Retained::as_ptr(&download) as usize;
+            registry.by_pointer.remove(&pointer_key);
+            registry.by_id.remove(&id);
+            (download, dest)
         };
-        // `cancel:` takes a completion block that receives
-        // optional resumeData. We pass `None` (no completion
-        // handler) — resume support is deferred.
-        unsafe { download.cancel(None) };
+
+        // The cancel completion block IS the path the
+        // `DownloadCancelled` event flows through (didFail is
+        // suppressed by Apple — see comment above). We capture
+        // the producer's nav-event FIFO + the entry data into
+        // the closure and emit the event when WebKit signals the
+        // cancel-with-resume-data is ready.
+        let nav_state = Arc::clone(&self.nav_state);
+        let block = RcBlock::new(move |resume_data: *mut NSData| {
+            let resume_bytes = if resume_data.is_null() {
+                None
+            } else {
+                let data: &NSData = unsafe { &*resume_data };
+                let v = data.to_vec();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v)
+                }
+            };
+            if let Ok(mut state) = nav_state.lock() {
+                state
+                    .events
+                    .push_back(crate::NavigationEvent::DownloadCancelled {
+                        id,
+                        destination_path: destination_path.clone(),
+                        resume_data: resume_bytes,
+                    });
+            }
+        });
+        unsafe { download.cancel(Some(&block)) };
         Ok(true)
     }
 

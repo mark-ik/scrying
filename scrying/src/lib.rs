@@ -288,9 +288,19 @@ pub enum NavigationEvent {
     /// host-registered destination handler returned
     /// `DownloadDecision::Cancel`, or because the host called
     /// `cancel_download(id)` mid-stream.
+    ///
+    /// `resume_data` is `Some` when WebKit captured enough state
+    /// to potentially resume the download via
+    /// [`crate::wkwebview_producer::WkWebViewProducer::resume_download`].
+    /// `None` when the cancel happened before any bytes
+    /// transferred (e.g. host destination handler returned
+    /// `Cancel` from `decideDestination`) or when the protocol /
+    /// server doesn't support resumption (no `Accept-Ranges`
+    /// support, etc.).
     DownloadCancelled {
         id: DownloadId,
         destination_path: std::path::PathBuf,
+        resume_data: Option<Vec<u8>>,
     },
 }
 

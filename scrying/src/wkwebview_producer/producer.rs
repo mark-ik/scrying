@@ -174,7 +174,7 @@ pub struct WkWebViewProducer {
     /// without needing `&mut self`. The producer holds a strong
     /// ref purely as a lifetime anchor; allocation happens
     /// delegate-side.
-    pub(super) _download_id_allocator: Arc<DownloadIdAllocator>,
+    pub(super) download_id_allocator: Arc<DownloadIdAllocator>,
     /// Optional host-driven destination handler. Shared with the
     /// `DownloadHandler` ivars; behind a `Mutex` so
     /// `set_download_handler` can mutate live.
@@ -454,7 +454,7 @@ impl WkWebViewProducer {
             dpi_pending,
             dpi_observer,
             download_registry,
-            _download_id_allocator: download_id_allocator,
+            download_id_allocator: download_id_allocator,
             download_host_handler,
             cursor_handler,
         })
