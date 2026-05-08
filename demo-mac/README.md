@@ -93,10 +93,63 @@ schedule and asserts deterministic effects:
   `poll_find_match → Some(true)`. Then `request_pdf` and asserts
   `poll_pdf → Some(Ok(>100 bytes))`.
 
-Items 2, 5, 6, 8 (new-window intercept, process-failure recovery,
-auth challenges, downloads) need network access or harder-to-trigger
-conditions and aren't covered by `--browser-test`. They'll pick up
-runtime coverage as mere drives them.
+Items 2, 5, 6 (new-window intercept, process-failure recovery,
+auth challenges) need network or harder-to-trigger conditions
+and aren't covered by `--browser-test`. They'll pick up runtime
+coverage as mere drives them. Item 8 (downloads) has its own
+mode — see [`--download-test`](#--download-test) below.
+
+### `--interaction-state-test`
+
+Loads three pages via the `scrying-test://` scheme, serializes
+the interaction state at the third, walks `go_back` twice so the
+back-forward cursor is at the first page, restores the captured
+blob, and asserts the WebView ends up back at the third page
+with `can_go_back == true` / `can_go_forward == false`. Verifies
+`serialize_interaction_state` ↔ `restore_interaction_state`
+round-trip preserves the WebKit-internal back-forward list.
+
+### `--pointer-input-test`
+
+Loads a page with `pointerdown` / `pointermove` / `pointerup` /
+`pointerleave` listeners that bridge each event to the JS host
+bridge, then synthesizes Down → Update → Up → Leave via
+`send_pointer_input` (with `PointerDevice::Touch`). Asserts the
+JS side observes `pointerdown`, `pointermove`, and `pointerup`,
+and records the JS-reported `pointerType` so the
+"macOS collapses every device to mouse" mapping is documented.
+
+### `--incognito-test`
+
+Stands up two producers in one process: one with
+`non_persistent = true`, one persistent at a separate `data_dir`.
+Sets a uniquely-named cookie via `set_cookie` on the incognito
+producer, queries both stores via `request_all_cookies` /
+`poll_cookies`, and asserts the cookie is visible to the
+incognito producer but absent from the persistent one — proves
+non-persistent stores stay isolated from persistent ones.
+
+### `--download-test`
+
+Spins up a loopback HTTP server (random `127.0.0.1:0` port)
+serving a 64 KiB known-pattern body with
+`Content-Disposition: attachment`, then drives three sub-phases:
+
+- **Basic**: navigates to the loopback URL, asserts
+  `DownloadStarted`/`DownloadProgress`/`DownloadFinished` events
+  carry a real `DownloadId` and `destination_path`, and that the
+  bytes on disk byte-for-byte match what was served.
+- **Host Cancel decision**: registers a `set_download_handler`
+  that returns `DownloadDecision::Cancel`, triggers a second
+  download, asserts `DownloadCancelled` fires for a fresh ID
+  *without* either `DownloadStarted` or `DownloadFinished` for
+  that ID.
+- **`cancel_download(unknown_id)`**: asserts the API returns
+  `Ok(false)` for an ID that was never issued.
+
+The HTTP-server detour is necessary because WebKit doesn't
+promote custom URL-scheme responses to downloads regardless of
+MIME type or `decidePolicyForNavigationResponse:` override.
 
 ### `--profile-test`
 

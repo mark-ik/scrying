@@ -526,13 +526,16 @@ independently when the work is ready:
   `MTLSharedEvent` scaffold / resize-applies-to-stream) bring the
   macOS WKWebView producer past Windows-0.2.0 parity. Browser-class
   items 1–9 (history controls / new-window intercept / settings /
-  custom URL schemes / process-failure recovery / auth pass-through /
+  custom URL schemes / process-failure recovery / auth /
   multi-instance verification / downloads / find + PDF) bring it to
   a usable shape for browser-shape consumers like mere. Runtime
-  verification via [`demo-mac`](../demo-mac/) covers slices A–N (12
-  of 13; drag is structurally SPI-blocked); items 1–9 are
-  compile-tested and item 7 runtime-verified — the rest will
-  pick up runtime coverage as mere drives them.
+  verification via [`demo-mac`](../demo-mac/) covers slices A–N
+  (12 of 13; drag is structurally SPI-blocked) plus six dedicated
+  `--*-test` modes that exercise items 1, 3, 4, 7, 8, 9 +
+  follow-ups (incognito, interactionState round-trip, pointer
+  input, downloads). The suite runs headless via
+  `bash scripts/test-mac.sh` and on every push via
+  `.github/workflows/test-mac.yml`.
 
 ---
 
@@ -554,7 +557,7 @@ limitations.
 | 5 | Process-failure recovery | ✅ | `NavigationEvent::ContentProcessTerminated` | `WKNavigationDelegate::webViewWebContentProcessDidTerminate:` |
 | 6 | Auth challenges | ✅ (option A) | `NavigationEvent::AuthChallenged { url, host, auth_method }` | `webView:didReceiveAuthenticationChallenge:` defaults to `PerformDefaultHandling`; option B (host-driven disposition) deferred until mere has auth UI |
 | 7 | Multi-instance verification | ✅ | n/a — architectural | `demo-mac --two-tabs` validates two producers in one process / one window cleanly drain independent event streams |
-| 8 | Downloads | ✅ | `NavigationEvent::DownloadStarted` / `DownloadFinished`, `WkWebViewProducerConfig::download_dir` | `WKDownloadDelegate` chooses unique destination paths; routed via `webView:navigationResponse:didBecomeDownload:` and `webView:navigationAction:didBecomeDownload:` |
+| 8 | Downloads | ✅ | `DownloadId`, `DownloadDestinationRequest`, `DownloadDecision`, `set_download_handler` / `clear_download_handler`, `cancel_download(id)`, `NavigationEvent::DownloadStarted` / `DownloadProgress` / `DownloadFinished` / `DownloadCancelled`, `WkWebViewProducerConfig::download_dir` | Per-download `DownloadId` correlates lifecycle events; `decidePolicyForNavigationResponse:` promotes non-displayable HTTP responses to downloads; per-download throttle (100ms / 1MiB) on progress; `WKDownload::cancel(_:)` for host-driven cancel; host destination handler runs synchronously inside `decideDestination` |
 | 9 | Find / PDF | ✅ | `find_in_page` + `poll_find_match`, `request_pdf` + `poll_pdf`, `FindOptions` | both async-only via completion blocks; mirrors the snapshot pattern |
 
 **Recently shipped (post-9):**
@@ -576,25 +579,70 @@ limitations.
   `Fn(PermissionRequest) -> PermissionDecision` closure invoked
   for camera / microphone / device-orientation requests.
   No-handler default is `Prompt` (system UI).
+- ✅ Incognito / non-persistent profile —
+  `WkWebViewProducerConfig::non_persistent` (or the
+  `.non_persistent()` builder) wires
+  `WKWebsiteDataStore::nonPersistentDataStore`. Cookie / local
+  storage / IndexedDB live only for the producer's lifetime.
+  Verified by `demo-mac --incognito-test`.
+- ✅ Tab-state serialization —
+  `WkWebViewProducer::serialize_interaction_state` /
+  `restore_interaction_state` round-trip the WKWebView's
+  `interactionState` (back-forward list, scroll position, form
+  data) as opaque bytes. Verified by
+  `demo-mac --interaction-state-test`.
+- ✅ Touch / pen / pointer input —
+  `WryWebSurfaceProducer::send_pointer_input` synthesizes
+  `NSEvent`s through the same path as `send_mouse_input`. WebKit's
+  pointer-events JS API observes them as
+  `pointerType: "mouse"` (macOS has no public direct-touch
+  synthesis API). Verified by
+  `demo-mac --pointer-input-test`.
+- ✅ DPI awareness across monitor moves — `NSWindowDidChangeBackingPropertiesNotification`
+  observer registered in `WkWebViewProducer::new_with_url_schemes`,
+  re-applies `config.size` on the next `try_acquire_frame` /
+  `resize` so points/pixels stay coherent. Cleaned up explicitly
+  in `Drop`.
+- ✅ Downloads (item 8 expansion) — see the row in the table
+  above. `DownloadId` correlates events; throttled progress;
+  host-driven destination and cancellation. Verified by
+  `demo-mac --download-test`.
+- ✅ Producer module split — the previous single-file
+  ~4000-LOC `wkwebview_producer.rs` is now 18 submodules each
+  under a 600-LOC ceiling (`producer.rs`, `capture/{mod,
+  blocking, async_start}.rs`, `api.rs`, `trait_impl.rs`,
+  per-delegate `*_handler.rs`, `helpers.rs`, etc.).
+- ✅ Auth-challenge `protectionSpace` panic fix — bypass
+  objc2's debug-build `class_getInstanceMethod` check
+  (which doesn't see through `WKNSURLAuthenticationChallenge`'s
+  forwarding-proxy class) by reading the property via
+  `objc_msgSend` directly, gated on `respondsToSelector:` so
+  defensive failure modes still surface as empty fields rather
+  than a panic.
+- ✅ Headless test runs — `demo-mac --*-test` modes default to
+  hidden window + `NSApplicationActivationPolicyProhibited`, so
+  `bash scripts/test-mac.sh` runs silently in the background.
+  `--visible` overrides for debugging.
+- ✅ CI — `.github/workflows/test-mac.yml` runs the suite on
+  `macos-latest` (currently Apple Silicon).
 
 **Outstanding for follow-up slices:**
 
-- Incognito / non-persistent profile — expose
-  `WKWebsiteDataStore::nonPersistentDataStore` via a
-  `WkWebViewProducerConfig` flag.
-- Tab-state serialization — `WKWebView::interactionState` (Codable
-  blob) for "restore tabs" features.
-- Context-menu interception — `WKUIDelegate::webView:contextMenuConfigurationForElement:`
-  for browser chrome that wants to override right-click menus.
-- Touch / pen / pointer input — `send_pointer_input` is on the
-  trait but not yet wired on macOS (NSTouch is limited; NSEvent
-  `tabletPoint:` for pen is the bigger payoff).
-- DPI awareness across monitor moves — listen for
-  `viewDidChangeBackingProperties` and re-resize the WKWebView /
-  re-`updateConfiguration:` the SCStream.
-- Throttling control — `WKWebView::isLoading` is fine for
-  observation; suspending / resuming page activity for hidden tabs
-  needs SPI (`_setSuspended:`) and is risky.
+- Resume support for cancelled downloads —
+  `cancel:resumeData:` returns bytes that
+  `resumeDownloadFromResumeData:` can restart from. Surface
+  would be `cancel_download_with_resume(id) -> ResumeData` +
+  `resume_download(bytes) -> DownloadId`.
+- Authentication during downloads —
+  `download:didReceiveAuthenticationChallenge:`. Currently
+  unhandled; defaults to `PerformDefaultHandling`. Same
+  option-A/B shape as the page-level auth handler.
+- Context-menu interception —
+  `WKUIDelegate::webView:contextMenuConfigurationForElement:`.
+- Throttling control — suspending / resuming page activity for
+  hidden tabs needs SPI (`_setSuspended:`) and is risky.
+- Cursor handler API parity — Windows has a `set_cursor_handler`
+  callback; macOS still uses `poll_cursor_shape` only.
 
 **Reference implementations.** [`tauri-apps/wry`](https://github.com/tauri-apps/wry)
 is a useful reference even though scrying doesn't depend on it. Its

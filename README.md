@@ -25,11 +25,20 @@ cargo run -p demo-wry-winit
 # macOS — overlay mode (default)
 cargo run -p demo-mac
 # macOS — automated runtime tests
-cargo run -p demo-mac -- --scripted              # JS messaging + input forwarding
-cargo run -p demo-mac -- --probe-snapshot        # CPU snapshot via takeSnapshot:
+cargo run -p demo-mac -- --scripted                  # JS messaging + input forwarding
+cargo run -p demo-mac -- --browser-test              # history / settings / URL schemes / find / PDF
+cargo run -p demo-mac -- --interaction-state-test    # interactionState round-trip
+cargo run -p demo-mac -- --pointer-input-test        # send_pointer_input → JS pointer events
+cargo run -p demo-mac -- --incognito-test            # nonPersistentDataStore isolation
+cargo run -p demo-mac -- --download-test             # downloads pipeline (HTTP loopback)
+cargo run -p demo-mac -- --probe-snapshot            # CPU snapshot via takeSnapshot:
 cargo run -p demo-mac -- --capture --dump-every 30   # SCK pipeline + per-N-frame readback
-cargo run -p demo-mac -- --profile-test          # per-profile WKWebsiteDataStore persistence
+cargo run -p demo-mac -- --profile-test              # per-profile WKWebsiteDataStore persistence
+# All assertion-style runs at once (headless, exit 1 on any FAIL)
+bash scripts/test-mac.sh
 ```
+
+`--*-test` modes default to a hidden window and `NSApplicationActivationPolicyProhibited` so they run silently in the background; pass `--visible` to watch the WKWebView in real time. `.github/workflows/test-mac.yml` runs `scripts/test-mac.sh` on every push to master against `macos-latest`.
 
 ## Relationship to wgpu-graft
 
