@@ -12,6 +12,8 @@
 
 mod render;
 
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -23,9 +25,9 @@ use scrying::wkwebview_producer::{
     FindOptions, UrlSchemeHandlerFn, UrlSchemeResponse, WkWebViewProducer, WkWebViewProducerConfig,
 };
 use scrying::{
-    Cookie, KeyEventKind, KeyModifierFlags, KeyboardInput, MouseEventKind, MouseInput,
-    MouseVirtualKeys, NavigationEvent, PointerDevice, PointerEventKind, PointerInput,
-    WryWebSurfaceProducer,
+    Cookie, DownloadDecision, DownloadId, KeyEventKind, KeyModifierFlags, KeyboardInput,
+    MouseEventKind, MouseInput, MouseVirtualKeys, NavigationEvent, PointerDevice,
+    PointerEventKind, PointerInput, WryWebSurfaceProducer,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -73,6 +75,62 @@ const PROFILE_TEST_HTML: &str = r#"<!doctype html>
 /// or `data:` origins as ephemeral, so we need a real-looking URL.
 const PROFILE_TEST_BASE_URL: &str = "https://demo-mac.scrying.local/";
 
+/// Body served by the `--download-test` HTTP server. 64 KiB of a
+/// known repeating pattern so the host-side test can verify the
+/// bytes that landed on disk match what was served.
+fn download_test_body() -> Vec<u8> {
+    const SIZE: usize = 64 * 1024;
+    (0..SIZE).map(|i| (i % 251) as u8).collect()
+}
+
+/// Spin up a single-purpose loopback HTTP server that serves the
+/// `--download-test` payload as a `Content-Disposition: attachment`
+/// response. WebKit promotes any HTTP navigation that carries a
+/// `Content-Disposition: attachment` response into a download
+/// regardless of whether `decidePolicyForNavigationResponse:`
+/// overrides — which is what unblocks our hermetic download test
+/// (custom URL-scheme responses are NOT downloadable by WebKit
+/// even when their MIME type can't be displayed; HTTP responses
+/// are).
+///
+/// Returns the URL the host should navigate to. The server keeps
+/// running for the rest of the process's lifetime; the OS reaps
+/// the listener thread on exit.
+fn start_download_test_server(body: Vec<u8>) -> std::io::Result<String> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let url = format!("http://{}/download", addr);
+    let body = Arc::new(body);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let body = Arc::clone(&body);
+            std::thread::spawn(move || {
+                // Drain the request line + headers; we don't
+                // dispatch on path so the contents don't matter.
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Content-Type: application/octet-stream\r\n\
+                     Content-Length: {}\r\n\
+                     Content-Disposition: attachment; filename=\"scrying-download.bin\"\r\n\
+                     Connection: close\r\n\
+                     \r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            });
+        }
+    });
+    Ok(url)
+}
+
 /// `--browser-test` URL scheme handler. Routes by path within the
 /// `scrying-test://` scheme to canned HTML responses that drive the
 /// browser-class state machine. Each response embeds known marker
@@ -102,6 +160,22 @@ fn browser_test_scheme_handler() -> UrlSchemeHandlerFn {
               }
             </script>
             </body>"#
+        } else if url.contains("/download") {
+            // Download-test payload. `Content-Disposition: attachment`
+            // is the canonical signal that promotes the navigation
+            // to a download via
+            // `webView:navigationResponse:didBecomeDownload:`. The
+            // body is a known-size pattern so the host-side test
+            // can verify what landed on disk.
+            return UrlSchemeResponse {
+                mime_type: "application/octet-stream".into(),
+                body: download_test_body(),
+                headers: Vec::new(),
+            }
+            .with_header(
+                "Content-Disposition",
+                "attachment; filename=\"scrying-download.bin\"",
+            );
         } else if url.contains("/pointer") {
             // Pointer-event observer page. Captures pointerdown /
             // pointermove / pointerup / pointerleave on the document
@@ -137,6 +211,7 @@ fn browser_test_scheme_handler() -> UrlSchemeHandlerFn {
         UrlSchemeResponse {
             mime_type: "text/html".into(),
             body: body.as_bytes().to_vec(),
+            headers: Vec::new(),
         }
     })
 }
@@ -217,6 +292,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         || cli.interaction_state_test
         || cli.pointer_input_test
         || cli.incognito_test
+        || cli.download_test
     {
         event_loop.set_control_flow(ControlFlow::Poll);
     } else {
@@ -293,6 +369,14 @@ struct Cli {
     /// `WKWebsiteDataStore::nonPersistentDataStore` and that
     /// non-persistent stores don't leak into persistent ones.
     incognito_test: bool,
+    /// Drive the downloads pipeline (browser-class item 8) end to
+    /// end: serves an octet-stream payload via the
+    /// `scrying-test://download` scheme, observes
+    /// `DownloadStarted` / `DownloadProgress` / `DownloadFinished`
+    /// events with non-empty IDs and paths, verifies the bytes on
+    /// disk, then exercises `set_download_handler` returning
+    /// `Cancel` and `cancel_download(unknown_id)`.
+    download_test: bool,
     /// Force the demo window to remain visible even when the test
     /// mode would normally run headless. Useful for debugging a
     /// failing test by watching the WKWebView in real time.
@@ -314,6 +398,7 @@ impl Cli {
             || self.interaction_state_test
             || self.pointer_input_test
             || self.incognito_test
+            || self.download_test
     }
 }
 
@@ -340,6 +425,7 @@ impl Cli {
                 "--interaction-state-test" => cli.interaction_state_test = true,
                 "--pointer-input-test" => cli.pointer_input_test = true,
                 "--incognito-test" => cli.incognito_test = true,
+                "--download-test" => cli.download_test = true,
                 "--visible" => cli.visible = true,
                 _ => eprintln!("demo-mac: unknown arg: {arg}"),
             }
@@ -397,6 +483,9 @@ struct AppState {
     /// Set by `--incognito-test`. Drives the two-producer
     /// non_persistent-isolation assertion.
     incognito_test: Option<IncognitoTestState>,
+    /// Set by `--download-test`. Drives the three-phase
+    /// download-pipeline assertion.
+    download_test: Option<DownloadTestState>,
     started_at: Instant,
 }
 
@@ -468,6 +557,52 @@ enum InteractionStateStep {
     Restore,
     AwaitRestore,
     Verify,
+    Done,
+}
+
+#[derive(Default)]
+struct DownloadTestState {
+    step: DownloadStep,
+    step_started_at: Option<Instant>,
+    /// HTTP URL the loopback server is serving. Set in
+    /// `AppState::new` after `start_download_test_server` returns.
+    download_url: String,
+    /// `DownloadStarted` events seen so far, keyed by ID.
+    started: HashMap<DownloadId, StartedRecord>,
+    /// Set of download IDs that have received a `DownloadProgress` event.
+    progress_seen: HashSet<DownloadId>,
+    /// `DownloadFinished` events keyed by ID. Records `Some(error)` on
+    /// failure, `None` on clean completion.
+    finished: HashMap<DownloadId, Option<String>>,
+    /// `DownloadCancelled` event IDs.
+    cancelled: HashSet<DownloadId>,
+    /// Counters across the three sub-phases for the final summary.
+    phase_a_id: Option<DownloadId>,
+    phase_b_id: Option<DownloadId>,
+    /// Result of `cancel_download(unknown_id)`.
+    phase_c_unknown_returned_false: bool,
+    failures: Vec<String>,
+}
+
+struct StartedRecord {
+    destination_path: PathBuf,
+    /// Captured for diagnostic logging; not asserted on directly
+    /// because the scrying-test scheme handler fills
+    /// `expectedContentLength` from its NSData length so the value
+    /// is trivially correct.
+    _total_bytes_expected: Option<u64>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum DownloadStep {
+    #[default]
+    PhaseALoad,
+    PhaseAAwaitFinish,
+    PhaseAVerifyFile,
+    PhaseBInstallCancelHandler,
+    PhaseBLoad,
+    PhaseBAwaitCancel,
+    PhaseCCancelUnknown,
     Done,
 }
 
@@ -624,6 +759,7 @@ impl ApplicationHandler for App {
             || state.browser_test.is_some()
             || state.interaction_state_test.is_some()
             || state.pointer_input_test.is_some()
+            || state.download_test.is_some()
         {
             drain_events(state);
         }
@@ -645,6 +781,9 @@ impl ApplicationHandler for App {
         }
         if state.incognito_test.is_some() {
             advance_incognito_test(state, event_loop);
+        }
+        if state.download_test.is_some() {
+            advance_download_test(state, event_loop);
         }
         if let Some(deadline) = state.two_tabs_deadline {
             // Drain second-producer events with a "[tab2]" prefix so
@@ -986,6 +1125,34 @@ fn drain_events(state: &mut AppState) {
         if let Some(test) = state.interaction_state_test.as_mut() {
             if let NavigationEvent::Completed { url, .. } = &event {
                 test.last_completed_url = url.clone();
+            }
+        }
+        if let Some(test) = state.download_test.as_mut() {
+            match &event {
+                NavigationEvent::DownloadStarted {
+                    id,
+                    destination_path,
+                    total_bytes_expected,
+                    ..
+                } => {
+                    test.started.insert(
+                        *id,
+                        StartedRecord {
+                            destination_path: destination_path.clone(),
+                            _total_bytes_expected: *total_bytes_expected,
+                        },
+                    );
+                }
+                NavigationEvent::DownloadProgress { id, .. } => {
+                    test.progress_seen.insert(*id);
+                }
+                NavigationEvent::DownloadFinished { id, error, .. } => {
+                    test.finished.insert(*id, error.clone());
+                }
+                NavigationEvent::DownloadCancelled { id, .. } => {
+                    test.cancelled.insert(*id);
+                }
+                _ => {}
             }
         }
     }
@@ -2149,6 +2316,264 @@ fn advance_incognito_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
     }
 }
 
+/// Drive `--download-test`. Three sub-phases:
+///
+/// - **Phase A (basic flow)**: load `scrying-test://download`,
+///   observe `DownloadStarted` → `DownloadProgress` →
+///   `DownloadFinished` events with non-empty IDs and a real
+///   `destination_path`, verify the bytes on disk match what the
+///   scheme handler served.
+/// - **Phase B (host Cancel decision)**: register a destination
+///   handler that returns `DownloadDecision::Cancel`, load again,
+///   observe `DownloadCancelled` (and *no* `DownloadStarted`,
+///   since the cancel happens before we promote the download to
+///   the host).
+/// - **Phase C (cancel_download(unknown))**: assert
+///   `cancel_download(DownloadId(99_999_999))` returns
+///   `Ok(false)` for an ID that was never issued.
+fn advance_download_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
+    let Some(test) = state.download_test.as_mut() else {
+        return;
+    };
+    let now = Instant::now();
+    if test.step_started_at.is_none() {
+        test.step_started_at = Some(now);
+    }
+    let elapsed = now.duration_since(test.step_started_at.unwrap_or(now));
+    let step = test.step;
+    macro_rules! step_to {
+        ($next:expr) => {{
+            test.step = $next;
+            test.step_started_at = Some(Instant::now());
+        }};
+    }
+    macro_rules! await_ms {
+        ($ms:expr) => {
+            elapsed < Duration::from_millis($ms)
+        };
+    }
+    match step {
+        DownloadStep::PhaseALoad => {
+            if let Err(e) = state.producer.load_url(&test.download_url) {
+                test.failures.push(format!("phase A load: {e}"));
+                step_to!(DownloadStep::Done);
+                return;
+            }
+            step_to!(DownloadStep::PhaseAAwaitFinish);
+        }
+        DownloadStep::PhaseAAwaitFinish => {
+            // Find the most-recent (by ID) DownloadStarted; once a
+            // matching DownloadFinished is recorded we move on.
+            let candidate = test
+                .started
+                .iter()
+                .max_by_key(|(id, _)| id.0)
+                .map(|(id, _)| *id);
+            let Some(id) = candidate else {
+                if elapsed > Duration::from_secs(5) {
+                    test.failures.push(
+                        "phase A: no DownloadStarted observed within 5s".into(),
+                    );
+                    step_to!(DownloadStep::Done);
+                }
+                return;
+            };
+            if test.finished.contains_key(&id) {
+                test.phase_a_id = Some(id);
+                step_to!(DownloadStep::PhaseAVerifyFile);
+            } else if elapsed > Duration::from_secs(5) {
+                test.failures.push(format!(
+                    "phase A: DownloadStarted({}) seen but no DownloadFinished within 5s",
+                    id.0
+                ));
+                step_to!(DownloadStep::Done);
+            }
+        }
+        DownloadStep::PhaseAVerifyFile => {
+            let Some(id) = test.phase_a_id else {
+                step_to!(DownloadStep::Done);
+                return;
+            };
+            let started = test.started.get(&id).cloned_path();
+            let path = match started {
+                Some(p) => p,
+                None => {
+                    test.failures
+                        .push("phase A: lost DownloadStarted record".into());
+                    step_to!(DownloadStep::Done);
+                    return;
+                }
+            };
+            if path.as_os_str().is_empty() {
+                test.failures.push(format!(
+                    "phase A: DownloadStarted carried an empty destination_path for id {}",
+                    id.0
+                ));
+                step_to!(DownloadStep::Done);
+                return;
+            }
+            let finished_error = test.finished.get(&id).cloned().flatten();
+            if let Some(err) = finished_error {
+                test.failures
+                    .push(format!("phase A: DownloadFinished error: {err}"));
+                step_to!(DownloadStep::Done);
+                return;
+            }
+            if !test.progress_seen.contains(&id) {
+                test.failures.push(format!(
+                    "phase A: no DownloadProgress observed for id {} (final-tick should always emit)",
+                    id.0
+                ));
+            }
+            // Read the file and compare against the served body.
+            match std::fs::read(&path) {
+                Ok(actual) => {
+                    let expected = download_test_body();
+                    if actual != expected {
+                        test.failures.push(format!(
+                            "phase A: bytes on disk ({} bytes) don't match served payload ({} bytes)",
+                            actual.len(),
+                            expected.len()
+                        ));
+                    } else {
+                        println!(
+                            "demo-mac: download-test: phase A: {} bytes landed at {} (matches served payload)",
+                            actual.len(),
+                            path.display()
+                        );
+                    }
+                }
+                Err(e) => {
+                    test.failures.push(format!(
+                        "phase A: couldn't read destination file {}: {e}",
+                        path.display()
+                    ));
+                }
+            }
+            step_to!(DownloadStep::PhaseBInstallCancelHandler);
+        }
+        DownloadStep::PhaseBInstallCancelHandler => {
+            state
+                .producer
+                .set_download_handler(|_request| DownloadDecision::Cancel);
+            step_to!(DownloadStep::PhaseBLoad);
+        }
+        DownloadStep::PhaseBLoad => {
+            // Brief settle so the previous nav's residual events
+            // don't bleed into phase B's ID accounting.
+            if await_ms!(150) {
+                return;
+            }
+            if let Err(e) = state.producer.load_url(&test.download_url) {
+                test.failures.push(format!("phase B load: {e}"));
+                step_to!(DownloadStep::Done);
+                return;
+            }
+            step_to!(DownloadStep::PhaseBAwaitCancel);
+        }
+        DownloadStep::PhaseBAwaitCancel => {
+            // Phase B's download ID is the largest one observed in
+            // either `started` (if WebKit happened to emit one
+            // before we returned Cancel — we don't, but be robust)
+            // or `cancelled`.
+            let cancelled_max = test.cancelled.iter().map(|id| id.0).max();
+            let known_phase_a = test.phase_a_id.map(|id| id.0).unwrap_or(0);
+            let Some(cancelled_id) = cancelled_max
+                .filter(|m| *m > known_phase_a)
+                .map(DownloadId)
+            else {
+                if elapsed > Duration::from_secs(5) {
+                    test.failures.push(
+                        "phase B: no DownloadCancelled observed within 5s".into(),
+                    );
+                    step_to!(DownloadStep::Done);
+                }
+                return;
+            };
+            test.phase_b_id = Some(cancelled_id);
+            // Defensive: confirm we did NOT see a DownloadStarted
+            // for the cancelled ID — host Cancel suppresses Started.
+            if test.started.contains_key(&cancelled_id) {
+                test.failures.push(format!(
+                    "phase B: host Cancel decision still emitted DownloadStarted for id {}",
+                    cancelled_id.0
+                ));
+            }
+            // Defensive: confirm the same ID never produced a
+            // DownloadFinished — Cancel routes solely to Cancelled.
+            if test.finished.contains_key(&cancelled_id) {
+                test.failures.push(format!(
+                    "phase B: host Cancel decision still emitted DownloadFinished for id {}",
+                    cancelled_id.0
+                ));
+            }
+            println!(
+                "demo-mac: download-test: phase B: DownloadCancelled fired for id {} after host Cancel decision",
+                cancelled_id.0
+            );
+            // Drop the host handler so it doesn't bleed into any
+            // future test runs that share the same producer.
+            state.producer.clear_download_handler();
+            step_to!(DownloadStep::PhaseCCancelUnknown);
+        }
+        DownloadStep::PhaseCCancelUnknown => {
+            match state.producer.cancel_download(DownloadId(99_999_999)) {
+                Ok(false) => {
+                    test.phase_c_unknown_returned_false = true;
+                    println!(
+                        "demo-mac: download-test: phase C: cancel_download(unknown) returned Ok(false) as expected"
+                    );
+                }
+                Ok(true) => test
+                    .failures
+                    .push("phase C: cancel_download(unknown) returned Ok(true)".into()),
+                Err(e) => test
+                    .failures
+                    .push(format!("phase C: cancel_download(unknown): {e}")),
+            }
+            step_to!(DownloadStep::Done);
+        }
+        DownloadStep::Done => {
+            if test.failures.is_empty() {
+                println!(
+                    "demo-mac: download-test: PASS — item 8 download pipeline verified"
+                );
+                println!(
+                    "  - basic: DownloadStarted/Progress/Finished events landed with id {} and bytes match served payload",
+                    test.phase_a_id.map(|i| i.0).unwrap_or(0)
+                );
+                println!(
+                    "  - host Cancel decision: DownloadCancelled fired (no Started, no Finished) for id {}",
+                    test.phase_b_id.map(|i| i.0).unwrap_or(0)
+                );
+                println!(
+                    "  - cancel_download(unknown_id): returned Ok(false) as expected"
+                );
+                event_loop.exit();
+            } else {
+                eprintln!("demo-mac: download-test: FAIL");
+                for f in &test.failures {
+                    eprintln!("  - {f}");
+                }
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+/// Trait helper to extract a clone of the destination path from a
+/// `&StartedRecord` without the borrow checker tripping on an
+/// in-place clone.
+trait StartedRecordExt {
+    fn cloned_path(self) -> Option<PathBuf>;
+}
+
+impl StartedRecordExt for Option<&StartedRecord> {
+    fn cloned_path(self) -> Option<PathBuf> {
+        self.map(|r| r.destination_path.clone())
+    }
+}
+
 impl AppState {
     fn new(
         event_loop: &ActiveEventLoop,
@@ -2198,6 +2623,13 @@ impl AppState {
             // pass a unique one anyway so the bookkeeping in the
             // producer is unambiguous if we ever flip the flag off.
             std::env::current_dir()?.join("target/demo-mac-incognito")
+        } else if cli.download_test {
+            // PID-suffixed so each run gets a fresh
+            // WKWebsiteDataStore (test asserts cleanly even if a
+            // prior run crashed mid-download).
+            let pid = std::process::id();
+            std::env::current_dir()?
+                .join(format!("target/demo-mac-download-test-{pid}"))
         } else {
             std::env::current_dir()?.join("target/demo-mac-profile")
         };
@@ -2205,13 +2637,26 @@ impl AppState {
         if cli.incognito_test {
             producer_config = producer_config.non_persistent();
         }
+        if cli.download_test {
+            // Override the default `<data_dir>/downloads` so we can
+            // verify the file landed at a known per-run path.
+            producer_config.download_dir =
+                data_dir.join("download-output");
+            // Pre-clean so prior-run file detritus can't mask a real
+            // failure on the "file landed" assertion.
+            let _ = std::fs::remove_dir_all(&producer_config.download_dir);
+        }
 
         // Browser-test and interaction-state-test modes register a
         // custom URL scheme so the canned test pages don't depend on
         // the network and have stable origins suitable for
         // `serialize_interaction_state` round-trips.
         let url_schemes: Vec<(String, UrlSchemeHandlerFn)> =
-            if cli.browser_test || cli.interaction_state_test || cli.pointer_input_test {
+            if cli.browser_test
+                || cli.interaction_state_test
+                || cli.pointer_input_test
+                || cli.download_test
+            {
                 vec![("scrying-test".to_string(), browser_test_scheme_handler())]
             } else {
                 Vec::new()
@@ -2245,6 +2690,7 @@ impl AppState {
             && !cli.interaction_state_test
             && !cli.pointer_input_test
             && !cli.incognito_test
+            && !cli.download_test
         {
             if let Err(error) = producer.load_url(INITIAL_URL) {
                 eprintln!("demo-mac: initial load_url failed: {error}");
@@ -2324,6 +2770,26 @@ impl AppState {
             None
         };
 
+        // Download-test mode needs a `Content-Disposition: attachment`
+        // HTTP response — WebKit doesn't promote custom URL-scheme
+        // responses to downloads even when they're octet-stream, so
+        // we serve the test payload via a loopback HTTP listener
+        // and navigate to that URL instead.
+        let download_test_state = if cli.download_test {
+            let url = start_download_test_server(download_test_body())
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    format!("download-test: failed to start loopback server: {e}")
+                        .into()
+                })?;
+            println!("demo-mac: download-test: serving payload at {url}");
+            Some(DownloadTestState {
+                download_url: url,
+                ..DownloadTestState::default()
+            })
+        } else {
+            None
+        };
+
         Ok(Self {
             window,
             producer,
@@ -2354,6 +2820,7 @@ impl AppState {
                 cookie_name: format!("scrying-incognito-{}", std::process::id()),
                 ..IncognitoTestState::default()
             }),
+            download_test: download_test_state,
             started_at: Instant::now(),
         })
     }

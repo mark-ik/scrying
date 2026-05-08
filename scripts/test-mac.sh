@@ -37,6 +37,7 @@ MODES=(
     --interaction-state-test
     --pointer-input-test
     --incognito-test
+    --download-test
 )
 
 # Build once so each `cargo run` invocation skips compile overhead.
