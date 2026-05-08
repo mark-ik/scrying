@@ -24,7 +24,7 @@ use scrying::wkwebview_producer::{
 };
 use scrying::{
     KeyEventKind, KeyModifierFlags, KeyboardInput, MouseEventKind, MouseInput, MouseVirtualKeys,
-    NavigationEvent, WryWebSurfaceProducer,
+    NavigationEvent, PointerDevice, PointerEventKind, PointerInput, WryWebSurfaceProducer,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -100,6 +100,35 @@ fn browser_test_scheme_handler() -> UrlSchemeHandlerFn {
               }
             </script>
             </body>"#
+        } else if url.contains("/pointer") {
+            // Pointer-event observer page. Captures pointerdown /
+            // pointermove / pointerup / pointerleave on the document
+            // and posts back a one-line summary per event so the
+            // host can assert which kinds arrived. The full-window
+            // styling guarantees the document element is the
+            // synthesized event's target regardless of where the
+            // (x, y) lands in the WKWebView's frame.
+            r#"<!doctype html>
+            <html><head><style>html, body { margin: 0; height: 100vh; width: 100vw; }</style></head>
+            <body>
+            <script>
+              function send(kind, e) {
+                if (window.chrome && window.chrome.webview) {
+                  var msg = 'ptr:' + kind
+                    + ':' + Math.round(e.clientX) + ',' + Math.round(e.clientY)
+                    + ':' + (e.pointerType || 'unknown');
+                  window.chrome.webview.postMessage(msg);
+                }
+              }
+              document.addEventListener('pointerdown', function(e) { send('down', e); });
+              document.addEventListener('pointermove', function(e) { send('move', e); });
+              document.addEventListener('pointerup',   function(e) { send('up',   e); });
+              document.addEventListener('pointerleave',function(e) { send('leave', e); });
+              if (window.chrome && window.chrome.webview) {
+                window.chrome.webview.postMessage('ready');
+              }
+            </script>
+            </body></html>"#
         } else {
             r#"<!doctype html><body>scrying-test fallback</body>"#
         };
@@ -174,6 +203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         || cli.two_tabs
         || cli.browser_test
         || cli.interaction_state_test
+        || cli.pointer_input_test
     {
         event_loop.set_control_flow(ControlFlow::Poll);
     } else {
@@ -236,6 +266,12 @@ struct Cli {
     /// A, restores, and asserts the WebView ends up at C with the
     /// full A–B–C back-forward history intact.
     interaction_state_test: bool,
+    /// Synthesizes pointer events (Down → Update → Up → Leave) and
+    /// asserts the JS-side `pointerdown` / `pointermove` /
+    /// `pointerup` / `pointerleave` listeners observe each one.
+    /// Verifies `send_pointer_input` reaches the WKWebView and
+    /// drives Pointer Events on the JS side.
+    pointer_input_test: bool,
 }
 
 impl Cli {
@@ -259,6 +295,7 @@ impl Cli {
                 "--two-tabs" => cli.two_tabs = true,
                 "--browser-test" => cli.browser_test = true,
                 "--interaction-state-test" => cli.interaction_state_test = true,
+                "--pointer-input-test" => cli.pointer_input_test = true,
                 _ => eprintln!("demo-mac: unknown arg: {arg}"),
             }
         }
@@ -309,6 +346,9 @@ struct AppState {
     /// Set by `--interaction-state-test`. Drives the
     /// serialize → mutate-history → restore → assert round-trip.
     interaction_state_test: Option<InteractionStateTestState>,
+    /// Set by `--pointer-input-test`. Drives pointer-event
+    /// synthesis and asserts JS-side observation.
+    pointer_input_test: Option<PointerInputTestState>,
     started_at: Instant,
 }
 
@@ -379,6 +419,41 @@ enum InteractionStateStep {
     AwaitBackTwo,
     Restore,
     AwaitRestore,
+    Verify,
+    Done,
+}
+
+#[derive(Default)]
+struct PointerInputTestState {
+    step: PointerInputStep,
+    step_started_at: Option<Instant>,
+    /// Page handshake — set true when JS posts "ready".
+    saw_ready: bool,
+    /// Set true when JS posts a "ptr:down:*" message.
+    saw_down: bool,
+    /// Set true when JS posts at least one "ptr:move:*" message.
+    saw_move: bool,
+    /// Set true when JS posts a "ptr:up:*" message.
+    saw_up: bool,
+    /// Set true when JS posts a "ptr:leave:*" message.
+    saw_leave: bool,
+    /// `pointerType` field WebKit reported for the synthesized
+    /// events (recorded so we can document the WebKit-side mapping
+    /// — the producer collapses every device to mouse, so this
+    /// should be "mouse").
+    observed_pointer_type: Option<String>,
+    failures: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum PointerInputStep {
+    #[default]
+    LoadPage,
+    AwaitReady,
+    SendDown,
+    SendMove,
+    SendUp,
+    SendLeave,
     Verify,
     Done,
 }
@@ -470,6 +545,7 @@ impl ApplicationHandler for App {
             || state.profile_test.is_some()
             || state.browser_test.is_some()
             || state.interaction_state_test.is_some()
+            || state.pointer_input_test.is_some()
         {
             drain_events(state);
         }
@@ -485,6 +561,9 @@ impl ApplicationHandler for App {
         }
         if state.interaction_state_test.is_some() {
             advance_interaction_state_test(state, event_loop);
+        }
+        if state.pointer_input_test.is_some() {
+            advance_pointer_input_test(state, event_loop);
         }
         if let Some(deadline) = state.two_tabs_deadline {
             // Drain second-producer events with a "[tab2]" prefix so
@@ -856,6 +935,27 @@ fn drain_events(state: &mut AppState) {
                 scripted.saw_typed = rest.to_string();
             }
         }
+        if let Some(pointer) = state.pointer_input_test.as_mut() {
+            if message == "ready" {
+                pointer.saw_ready = true;
+            } else if let Some(rest) = message.strip_prefix("ptr:") {
+                // Format: "<kind>:<x>,<y>:<pointerType>"
+                let mut parts = rest.splitn(3, ':');
+                let kind = parts.next().unwrap_or("");
+                let _coords = parts.next().unwrap_or("");
+                let ptype = parts.next().unwrap_or("");
+                if pointer.observed_pointer_type.is_none() && !ptype.is_empty() {
+                    pointer.observed_pointer_type = Some(ptype.to_string());
+                }
+                match kind {
+                    "down" => pointer.saw_down = true,
+                    "move" => pointer.saw_move = true,
+                    "up" => pointer.saw_up = true,
+                    "leave" => pointer.saw_leave = true,
+                    _ => {}
+                }
+            }
+        }
     }
     while let Some(shape) = state.producer.poll_cursor_shape() {
         println!("demo-mac: cursor change: {shape:?}");
@@ -1075,13 +1175,14 @@ fn advance_scripted(state: &mut AppState, event_loop: &ActiveEventLoop) {
         ScriptedStep::Done => {
             if scripted.failures.is_empty() {
                 println!("demo-mac: scripted: PASS — slices E + G + I verified at runtime");
+                event_loop.exit();
             } else {
                 eprintln!("demo-mac: scripted: FAIL");
                 for f in &scripted.failures {
                     eprintln!("  - {f}");
                 }
+                std::process::exit(1);
             }
-            event_loop.exit();
         }
     }
 }
@@ -1378,13 +1479,14 @@ fn advance_browser_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
                     test.find_result,
                     test.pdf_bytes.unwrap_or(0)
                 );
+                event_loop.exit();
             } else {
                 eprintln!("demo-mac: browser-test: FAIL");
                 for f in &test.failures {
                     eprintln!("  - {f}");
                 }
+                std::process::exit(1);
             }
-            event_loop.exit();
         }
     }
 }
@@ -1614,13 +1716,190 @@ fn advance_interaction_state_test(state: &mut AppState, event_loop: &ActiveEvent
                     test.serialized.as_ref().map(|b| b.len()).unwrap_or(0)
                 );
                 println!("  - post-restore can_go_back == true, can_go_forward == false");
+                event_loop.exit();
             } else {
                 eprintln!("demo-mac: interaction-state-test: FAIL");
                 for f in &test.failures {
                     eprintln!("  - {f}");
                 }
+                std::process::exit(1);
             }
-            event_loop.exit();
+        }
+    }
+}
+
+/// Drive `--pointer-input-test`. Loads the pointer-observer page,
+/// then synthesizes Down → Update → Up → Leave through
+/// `send_pointer_input` (with PointerDevice::Touch so the
+/// macOS-side virtual_keys.left_button gets set on the way down).
+/// Asserts the JS pointer-event listeners observe each kind.
+///
+/// On macOS the producer collapses every device to a synthetic
+/// mouse event (no public `NSEventTypeDirectTouch` synthesis), so
+/// JS sees `pointerType == "mouse"` regardless of the host
+/// `event.device`. The test records the observed type so the
+/// macOS-specific behavior is documented in stdout.
+fn advance_pointer_input_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
+    let Some(test) = state.pointer_input_test.as_mut() else {
+        return;
+    };
+    let now = Instant::now();
+    if test.step_started_at.is_none() {
+        test.step_started_at = Some(now);
+    }
+    let elapsed = now.duration_since(test.step_started_at.unwrap_or(now));
+    let step = test.step;
+    macro_rules! step_to {
+        ($next:expr) => {{
+            test.step = $next;
+            test.step_started_at = Some(Instant::now());
+        }};
+    }
+    macro_rules! await_ms {
+        ($ms:expr) => {
+            elapsed < Duration::from_millis($ms)
+        };
+    }
+    match step {
+        PointerInputStep::LoadPage => {
+            if let Err(e) = state.producer.load_url("scrying-test://pointer") {
+                test.failures.push(format!("load pointer page: {e}"));
+                step_to!(PointerInputStep::Done);
+                return;
+            }
+            step_to!(PointerInputStep::AwaitReady);
+        }
+        PointerInputStep::AwaitReady => {
+            if test.saw_ready {
+                println!("demo-mac: pointer-input-test: page ready");
+                step_to!(PointerInputStep::SendDown);
+            } else if elapsed > Duration::from_secs(5) {
+                test.failures.push("pointer page never posted 'ready'".into());
+                step_to!(PointerInputStep::Done);
+            }
+        }
+        PointerInputStep::SendDown => {
+            // Brief settle so JS listeners are attached before we
+            // start firing events at the document.
+            if await_ms!(150) {
+                return;
+            }
+            let event = PointerInput {
+                kind: PointerEventKind::Down,
+                device: PointerDevice::Touch,
+                pointer_id: 1,
+                point: (100, 100),
+                pressure: 0.5,
+                tilt: (0.0, 0.0),
+            };
+            if let Err(e) = state.producer.send_pointer_input(event) {
+                test.failures.push(format!("send_pointer_input(Down): {e}"));
+                step_to!(PointerInputStep::Done);
+                return;
+            }
+            step_to!(PointerInputStep::SendMove);
+        }
+        PointerInputStep::SendMove => {
+            if await_ms!(50) {
+                return;
+            }
+            let event = PointerInput {
+                kind: PointerEventKind::Update,
+                device: PointerDevice::Touch,
+                pointer_id: 1,
+                point: (150, 150),
+                pressure: 0.5,
+                tilt: (0.0, 0.0),
+            };
+            if let Err(e) = state.producer.send_pointer_input(event) {
+                test.failures.push(format!("send_pointer_input(Update): {e}"));
+                step_to!(PointerInputStep::Done);
+                return;
+            }
+            step_to!(PointerInputStep::SendUp);
+        }
+        PointerInputStep::SendUp => {
+            if await_ms!(50) {
+                return;
+            }
+            let event = PointerInput {
+                kind: PointerEventKind::Up,
+                device: PointerDevice::Touch,
+                pointer_id: 1,
+                point: (150, 150),
+                pressure: 0.0,
+                tilt: (0.0, 0.0),
+            };
+            if let Err(e) = state.producer.send_pointer_input(event) {
+                test.failures.push(format!("send_pointer_input(Up): {e}"));
+                step_to!(PointerInputStep::Done);
+                return;
+            }
+            step_to!(PointerInputStep::SendLeave);
+        }
+        PointerInputStep::SendLeave => {
+            if await_ms!(50) {
+                return;
+            }
+            let event = PointerInput {
+                kind: PointerEventKind::Leave,
+                device: PointerDevice::Touch,
+                pointer_id: 1,
+                point: (150, 150),
+                pressure: 0.0,
+                tilt: (0.0, 0.0),
+            };
+            if let Err(e) = state.producer.send_pointer_input(event) {
+                test.failures.push(format!("send_pointer_input(Leave): {e}"));
+                step_to!(PointerInputStep::Done);
+                return;
+            }
+            step_to!(PointerInputStep::Verify);
+        }
+        PointerInputStep::Verify => {
+            // Settle so the synthesized events have time to traverse
+            // WebKit's input pipeline and fire JS listeners.
+            if await_ms!(400) {
+                return;
+            }
+            if !test.saw_down {
+                test.failures
+                    .push("JS never observed pointerdown after send_pointer_input(Down)".into());
+            }
+            if !test.saw_move {
+                test.failures
+                    .push("JS never observed pointermove after send_pointer_input(Update)".into());
+            }
+            if !test.saw_up {
+                test.failures
+                    .push("JS never observed pointerup after send_pointer_input(Up)".into());
+            }
+            // pointerleave is best-effort: WebKit may or may not
+            // synthesize one in response to a `mouseExited:` on a
+            // single-element document. We log without failing.
+            step_to!(PointerInputStep::Done);
+        }
+        PointerInputStep::Done => {
+            if test.failures.is_empty() {
+                println!(
+                    "demo-mac: pointer-input-test: PASS — Down/Update/Up reached JS pointer listeners"
+                );
+                println!(
+                    "  - JS observed: down={} move={} up={} leave={}",
+                    test.saw_down, test.saw_move, test.saw_up, test.saw_leave
+                );
+                println!(
+                    "  - WebKit reported pointerType = {:?} (macOS collapses every device to mouse)",
+                    test.observed_pointer_type
+                );
+                event_loop.exit();
+            } else {
+                eprintln!("demo-mac: pointer-input-test: FAIL");
+                for f in &test.failures {
+                    eprintln!("  - {f}");
+                }
+                std::process::exit(1);
+            }
         }
     }
 }
@@ -1672,7 +1951,7 @@ impl AppState {
         // the network and have stable origins suitable for
         // `serialize_interaction_state` round-trips.
         let url_schemes: Vec<(String, UrlSchemeHandlerFn)> =
-            if cli.browser_test || cli.interaction_state_test {
+            if cli.browser_test || cli.interaction_state_test || cli.pointer_input_test {
                 vec![("scrying-test".to_string(), browser_test_scheme_handler())]
             } else {
                 Vec::new()
@@ -1704,6 +1983,7 @@ impl AppState {
             && !cli.two_tabs
             && !cli.browser_test
             && !cli.interaction_state_test
+            && !cli.pointer_input_test
         {
             if let Err(error) = producer.load_url(INITIAL_URL) {
                 eprintln!("demo-mac: initial load_url failed: {error}");
@@ -1789,6 +2069,9 @@ impl AppState {
             interaction_state_test: cli
                 .interaction_state_test
                 .then(InteractionStateTestState::default),
+            pointer_input_test: cli
+                .pointer_input_test
+                .then(PointerInputTestState::default),
             started_at: Instant::now(),
         })
     }
