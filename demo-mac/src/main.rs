@@ -674,6 +674,16 @@ struct DownloadTestState {
     phase_b_id: Option<DownloadId>,
     /// Result of `cancel_download(unknown_id)`.
     phase_c_unknown_returned_false: bool,
+    /// Set when an `AuthChallenged` event fires with a non-empty
+    /// URL — the page-level auth callback was invoked.
+    page_level_auth_seen: bool,
+    /// Set when an `AuthChallenged` event fires with an empty
+    /// URL — the download-level auth callback was invoked.
+    /// Phase D's `start_download` path is the only flow that
+    /// reaches the download-level callback (HTTP basic-auth
+    /// challenges via `load_url` get caught at the page level
+    /// before promotion).
+    download_level_auth_seen: bool,
     failures: Vec<String>,
 }
 
@@ -1253,6 +1263,13 @@ fn drain_events(state: &mut AppState) {
                 }
                 NavigationEvent::DownloadCancelled { id, .. } => {
                     test.cancelled.insert(*id);
+                }
+                NavigationEvent::AuthChallenged { url, .. } => {
+                    if url.is_empty() {
+                        test.download_level_auth_seen = true;
+                    } else {
+                        test.page_level_auth_seen = true;
+                    }
                 }
                 _ => {}
             }
@@ -2678,8 +2695,17 @@ fn advance_download_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
             if await_ms!(150) {
                 return;
             }
-            if let Err(e) = state.producer.load_url(&test.download_auth_url) {
-                test.failures.push(format!("phase D load: {e}"));
+            // Use `start_download` (programmatic, bypasses
+            // navigation) rather than `load_url` so the auth
+            // challenge fires at the WKDownloadDelegate level
+            // (download-level auth callback) instead of the
+            // NavDelegate level (page-level auth callback). Same
+            // shared `AuthHandlerFn` covers both paths; this run
+            // exercises the download-specific code path. The
+            // discriminator is the AuthChallenged event's `url`:
+            // page-level emits the URL, download-level emits "".
+            if let Err(e) = state.producer.start_download(&test.download_auth_url) {
+                test.failures.push(format!("phase D start_download: {e}"));
                 step_to!(DownloadStep::Done);
                 return;
             }
@@ -2742,6 +2768,12 @@ fn advance_download_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
                             actual.len()
                         );
                     }
+                    if !test.download_level_auth_seen {
+                        test.failures.push(
+                            "phase D: expected download-level auth callback (AuthChallenged with empty url) but never observed one"
+                                .into(),
+                        );
+                    }
                 }
                 Err(e) => {
                     test.failures.push(format!(
@@ -2770,7 +2802,8 @@ fn advance_download_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
                     "  - cancel_download(unknown_id): returned Ok(false) as expected"
                 );
                 println!(
-                    "  - basic-auth download: shared auth handler supplied credentials, download succeeded"
+                    "  - basic-auth download via start_download: shared auth handler supplied credentials, download succeeded (download-level auth callback fired = {})",
+                    test.download_level_auth_seen
                 );
                 event_loop.exit();
             } else {

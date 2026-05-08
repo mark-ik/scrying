@@ -124,8 +124,13 @@ pub struct WkWebViewProducer {
     _scheme_handlers: Vec<Retained<SchemeHandler>>,
     /// Strong reference to the shared `WKDownloadDelegate`. Each
     /// `WKDownload` we receive gets this as its delegate (Apple's
-    /// `setDelegate:` is weak), so the strong ref has to live here.
-    _download_handler: Retained<DownloadHandler>,
+    /// `setDelegate:` is weak), so the strong ref has to live
+    /// here. `pub(super)` because [`super::api`]'s
+    /// `start_download` re-uses it for programmatically-initiated
+    /// downloads (which bypass the navigation→download promotion
+    /// path and therefore need their delegate set explicitly via
+    /// the `startDownloadUsingRequest:` completion handler).
+    pub(super) download_handler_strong: Retained<DownloadHandler>,
     /// Most-recent completion of [`Self::find_in_page`] — `true` if
     /// any match was found, `false` if not. Drained by
     /// [`Self::poll_find_match`].
@@ -440,7 +445,7 @@ impl WkWebViewProducer {
             pending_snapshot: Arc::new(Mutex::new(None)),
             pending_capture: Arc::new(Mutex::new(PendingCaptureSlot::Idle)),
             _scheme_handlers: scheme_handler_retained,
-            _download_handler: download_handler,
+            download_handler_strong: download_handler,
             pending_find: Arc::new(Mutex::new(None)),
             pending_pdf: Arc::new(Mutex::new(None)),
             auth_handler,

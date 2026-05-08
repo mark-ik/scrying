@@ -13,8 +13,9 @@ use objc2_foundation::{
     MainThreadMarker, NSArray, NSData, NSError, NSHTTPCookie, NSKeyedArchiver, NSKeyedUnarchiver,
     NSString, NSURL, NSURLRequest,
 };
+use objc2::runtime::ProtocolObject;
 use objc2_web_kit::{
-    WKFindConfiguration, WKFindResult, WKHTTPCookieStore, WKPDFConfiguration,
+    WKDownload, WKFindConfiguration, WKFindResult, WKHTTPCookieStore, WKPDFConfiguration,
 };
 
 use crate::{
@@ -321,6 +322,69 @@ impl WkWebViewProducer {
         if let Ok(mut h) = self.cursor_handler.lock() {
             *h = None;
         }
+    }
+
+    /// Programmatically start a download from a URL, bypassing the
+    /// usual navigation→download promotion path. Useful for browser
+    /// chrome that wants to expose a "Download Linked File" / "Save
+    /// Image" affordance without navigating the WKWebView.
+    ///
+    /// Auth challenges hit the *download-level* delegate callback
+    /// (`WKDownloadDelegate::download:didReceiveAuthenticationChallenge:`)
+    /// rather than the page-level one — there's no page navigation
+    /// to challenge against. The host's
+    /// [`Self::set_auth_handler`] applies to both paths, so a
+    /// single registered handler covers programmatic and
+    /// promotion-driven downloads identically.
+    ///
+    /// Returns immediately. The download begins asynchronously;
+    /// the eventual `WKDownload` is wired to the same delegate as
+    /// promotion-driven downloads, so `DownloadStarted` /
+    /// `DownloadProgress` / `DownloadFinished` /
+    /// `DownloadCancelled` events fire normally and a fresh
+    /// [`crate::DownloadId`] is allocated when `decideDestination`
+    /// runs.
+    pub fn start_download(&mut self, url: &str) -> Result<(), WryWebSurfaceError> {
+        if MainThreadMarker::new().is_none() {
+            return Err(WryWebSurfaceError::Platform(
+                "start_download must be called on the main thread".into(),
+            ));
+        }
+        let url_ns = NSString::from_str(url);
+        let ns_url = NSURL::URLWithString(&url_ns).ok_or_else(|| {
+            WryWebSurfaceError::Platform(format!("could not parse URL: {url}"))
+        })?;
+        let request = NSURLRequest::requestWithURL(&ns_url);
+
+        // Wrap the `Retained<DownloadHandler>` so the closure can
+        // satisfy `Send + 'static`. The completion handler runs on
+        // the main thread (Apple's WKWebView APIs do), and the
+        // delegate is `MainThreadOnly`, so the cross-thread
+        // assertion is trivially satisfied — the wrapper exists
+        // only to satisfy the conservative trait bounds on
+        // `RcBlock`.
+        struct SendDelegate(Retained<super::download_handler::DownloadHandler>);
+        // SAFETY: see comment above.
+        unsafe impl Send for SendDelegate {}
+        let delegate = SendDelegate(self.download_handler_strong.clone());
+
+        let block = RcBlock::new(move |download: NonNull<WKDownload>| {
+            // SAFETY: WebKit hands us a +0 reference valid for the
+            // duration of the completion-handler call; `setDelegate:`
+            // doesn't outlive the borrow because WebKit's internal
+            // ref-keeping is what matters past this call.
+            let download_ref = unsafe { download.as_ref() };
+            unsafe {
+                download_ref
+                    .setDelegate(Some(ProtocolObject::from_ref(&*delegate.0)));
+            }
+        });
+
+        unsafe {
+            self.webview()
+                .startDownloadUsingRequest_completionHandler(&request, &block);
+        }
+        Ok(())
     }
 
     /// Cancel an in-flight download by [`DownloadId`]. Returns
