@@ -501,6 +501,198 @@ impl WebView2CompositionProducer {
         }
     }
 
+    /// Forward a touch / pen pointer event to the composition WebView2.
+    ///
+    /// Builds an `ICoreWebView2PointerInfo` from `event` and dispatches via
+    /// `ICoreWebView2CompositionController::SendPointerInput`. Pen tilt is
+    /// in radians on the public API; converted to degrees for WebView2.
+    pub fn send_pointer_input(
+        &self,
+        event: crate::PointerInput,
+    ) -> Result<(), WryWebSurfaceError> {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment3;
+        let env3: ICoreWebView2Environment3 = self
+            .environment
+            .cast()
+            .map_err(platform("environment cast to ICoreWebView2Environment3"))?;
+        let info = unsafe { env3.CreateCoreWebView2PointerInfo() }
+            .map_err(platform("CreateCoreWebView2PointerInfo"))?;
+
+        let pointer_kind: u32 = match event.device {
+            crate::PointerDevice::Touch => 2,
+            crate::PointerDevice::Pen => 3,
+            crate::PointerDevice::Mouse => 4,
+        };
+        let pointer_flags = pointer_flags_for(event.kind);
+        let point = POINT {
+            x: event.point.0,
+            y: event.point.1,
+        };
+        let mut perf_count: i64 = 0;
+        unsafe {
+            windows::Win32::System::Performance::QueryPerformanceCounter(&mut perf_count)
+                .map_err(platform("QueryPerformanceCounter"))?;
+        }
+
+        unsafe {
+            info.SetPointerKind(pointer_kind)
+                .map_err(platform("SetPointerKind"))?;
+            info.SetPointerId(event.pointer_id)
+                .map_err(platform("SetPointerId"))?;
+            info.SetFrameId(0).map_err(platform("SetFrameId"))?;
+            info.SetPointerFlags(pointer_flags)
+                .map_err(platform("SetPointerFlags"))?;
+            info.SetPixelLocation(point)
+                .map_err(platform("SetPixelLocation"))?;
+            info.SetPixelLocationRaw(point)
+                .map_err(platform("SetPixelLocationRaw"))?;
+            info.SetHimetricLocation(POINT { x: 0, y: 0 })
+                .map_err(platform("SetHimetricLocation"))?;
+            info.SetHimetricLocationRaw(POINT { x: 0, y: 0 })
+                .map_err(platform("SetHimetricLocationRaw"))?;
+            info.SetPerformanceCount(perf_count as u64)
+                .map_err(platform("SetPerformanceCount"))?;
+            info.SetHistoryCount(1).map_err(platform("SetHistoryCount"))?;
+            info.SetButtonChangeKind(0)
+                .map_err(platform("SetButtonChangeKind"))?;
+
+            match event.device {
+                crate::PointerDevice::Touch => {
+                    // TOUCH_MASK_PRESSURE = 0x4
+                    info.SetTouchMask(0x4).map_err(platform("SetTouchMask"))?;
+                    // Pressure is 0..1024 in the WebView2 API.
+                    let pressure = (event.pressure.clamp(0.0, 1.0) * 1024.0) as u32;
+                    info.SetTouchPressure(pressure)
+                        .map_err(platform("SetTouchPressure"))?;
+                    let contact = RECT {
+                        left: point.x - 1,
+                        top: point.y - 1,
+                        right: point.x + 1,
+                        bottom: point.y + 1,
+                    };
+                    info.SetTouchContact(contact)
+                        .map_err(platform("SetTouchContact"))?;
+                    info.SetTouchContactRaw(contact)
+                        .map_err(platform("SetTouchContactRaw"))?;
+                }
+                crate::PointerDevice::Pen => {
+                    // PEN_MASK_PRESSURE = 0x1, PEN_MASK_TILT_X = 0x4, PEN_MASK_TILT_Y = 0x8
+                    info.SetPenMask(0x1 | 0x4 | 0x8)
+                        .map_err(platform("SetPenMask"))?;
+                    let pressure = (event.pressure.clamp(0.0, 1.0) * 1024.0) as u32;
+                    info.SetPenPressure(pressure)
+                        .map_err(platform("SetPenPressure"))?;
+                    // Tilt in the public API is radians; WebView2 wants
+                    // degrees in -90..90.
+                    let tilt_x_deg = event.tilt.0.to_degrees().clamp(-90.0, 90.0) as i32;
+                    let tilt_y_deg = event.tilt.1.to_degrees().clamp(-90.0, 90.0) as i32;
+                    info.SetPenTiltX(tilt_x_deg)
+                        .map_err(platform("SetPenTiltX"))?;
+                    info.SetPenTiltY(tilt_y_deg)
+                        .map_err(platform("SetPenTiltY"))?;
+                }
+                crate::PointerDevice::Mouse => {
+                    // No extra fields needed; WebView2 ignores touch/pen
+                    // masks for mouse pointers.
+                }
+            }
+        }
+
+        let event_kind = pointer_event_kind(event.kind);
+        unsafe {
+            self.composition_controller
+                .SendPointerInput(event_kind, &info)
+                .map_err(platform("SendPointerInput"))
+        }
+    }
+
+    /// Forward a drag-enter event to the composition WebView2 with an
+    /// `IDataObject` carrying the dragged content. Hosts get the
+    /// `IDataObject` from their `IDropTarget::DragEnter` callback (the OLE
+    /// drag-and-drop pattern); scrying doesn't construct it.
+    ///
+    /// `key_state` is the Win32 `MK_*` modifier-key bitmask.
+    /// `effects` is mutated in place: caller passes the allowed `DROPEFFECT_*`
+    /// bits, WebView2 returns the chosen effect.
+    pub fn drag_enter(
+        &self,
+        data_object: &windows::Win32::System::Com::IDataObject,
+        key_state: u32,
+        point: (i32, i32),
+        effects: &mut u32,
+    ) -> Result<(), WryWebSurfaceError> {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2CompositionController3;
+        let cc3: ICoreWebView2CompositionController3 = self
+            .composition_controller
+            .cast()
+            .map_err(platform("composition_controller cast to ICoreWebView2CompositionController3"))?;
+        let p = POINT {
+            x: point.0,
+            y: point.1,
+        };
+        unsafe {
+            cc3.DragEnter(data_object, key_state, p, effects as *mut u32)
+                .map_err(platform("DragEnter"))
+        }
+    }
+
+    /// Forward a drag-over event. Hosts call this on every
+    /// `IDropTarget::DragOver` callback while the drag is over the webview.
+    pub fn drag_over(
+        &self,
+        key_state: u32,
+        point: (i32, i32),
+        effects: &mut u32,
+    ) -> Result<(), WryWebSurfaceError> {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2CompositionController3;
+        let cc3: ICoreWebView2CompositionController3 = self
+            .composition_controller
+            .cast()
+            .map_err(platform("composition_controller cast to ICoreWebView2CompositionController3"))?;
+        let p = POINT {
+            x: point.0,
+            y: point.1,
+        };
+        unsafe {
+            cc3.DragOver(key_state, p, effects as *mut u32)
+                .map_err(platform("DragOver"))
+        }
+    }
+
+    /// Forward a drag-leave event.
+    pub fn drag_leave(&self) -> Result<(), WryWebSurfaceError> {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2CompositionController3;
+        let cc3: ICoreWebView2CompositionController3 = self
+            .composition_controller
+            .cast()
+            .map_err(platform("composition_controller cast to ICoreWebView2CompositionController3"))?;
+        unsafe { cc3.DragLeave() }.map_err(platform("DragLeave"))
+    }
+
+    /// Forward a drop event. Same `IDataObject` shape as
+    /// [`drag_enter`](Self::drag_enter).
+    pub fn drop_data(
+        &self,
+        data_object: &windows::Win32::System::Com::IDataObject,
+        key_state: u32,
+        point: (i32, i32),
+        effects: &mut u32,
+    ) -> Result<(), WryWebSurfaceError> {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2CompositionController3;
+        let cc3: ICoreWebView2CompositionController3 = self
+            .composition_controller
+            .cast()
+            .map_err(platform("composition_controller cast to ICoreWebView2CompositionController3"))?;
+        let p = POINT {
+            x: point.0,
+            y: point.1,
+        };
+        unsafe {
+            cc3.Drop(data_object, key_state, p, effects as *mut u32)
+                .map_err(platform("Drop"))
+        }
+    }
+
     /// Move keyboard focus into the WebView2.
     pub fn move_focus(&self, reason: FocusReason) -> Result<(), WryWebSurfaceError> {
         let reason = focus_reason(reason);
@@ -1285,6 +1477,13 @@ impl crate::WryWebSurfaceProducer for WebView2CompositionProducer {
     fn poll_cursor_shape(&mut self) -> Option<CursorShape> {
         WebView2CompositionProducer::poll_cursor_shape(self)
     }
+
+    fn send_pointer_input(
+        &mut self,
+        event: crate::PointerInput,
+    ) -> Result<(), WryWebSurfaceError> {
+        WebView2CompositionProducer::send_pointer_input(self, event)
+    }
 }
 
 fn create_environment(user_data_dir: &Path) -> Result<ICoreWebView2Environment, WryWebSurfaceError> {
@@ -1507,6 +1706,57 @@ fn virtual_keys_bits(keys: crate::MouseVirtualKeys) -> u32 {
         bits |= COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_X_BUTTON2.0 as u32;
     }
     bits
+}
+
+fn pointer_event_kind(
+    kind: crate::PointerEventKind,
+) -> webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_POINTER_EVENT_KIND {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_POINTER_EVENT_KIND_ACTIVATE, COREWEBVIEW2_POINTER_EVENT_KIND_DOWN,
+        COREWEBVIEW2_POINTER_EVENT_KIND_ENTER, COREWEBVIEW2_POINTER_EVENT_KIND_LEAVE,
+        COREWEBVIEW2_POINTER_EVENT_KIND_UP, COREWEBVIEW2_POINTER_EVENT_KIND_UPDATE,
+    };
+    match kind {
+        crate::PointerEventKind::Activate => COREWEBVIEW2_POINTER_EVENT_KIND_ACTIVATE,
+        crate::PointerEventKind::Down => COREWEBVIEW2_POINTER_EVENT_KIND_DOWN,
+        crate::PointerEventKind::Enter => COREWEBVIEW2_POINTER_EVENT_KIND_ENTER,
+        crate::PointerEventKind::Leave => COREWEBVIEW2_POINTER_EVENT_KIND_LEAVE,
+        crate::PointerEventKind::Up => COREWEBVIEW2_POINTER_EVENT_KIND_UP,
+        crate::PointerEventKind::Update => COREWEBVIEW2_POINTER_EVENT_KIND_UPDATE,
+        // CaptureChanged falls back to Update; WebView2 doesn't have a
+        // distinct capture-change pointer kind.
+        crate::PointerEventKind::CaptureChanged => COREWEBVIEW2_POINTER_EVENT_KIND_UPDATE,
+    }
+}
+
+/// Derive POINTER_FLAGS bits from a high-level [`PointerEventKind`].
+///
+/// Constants reproduced inline to avoid pulling another `windows` feature
+/// just for these values; they are stable across windows-rs versions.
+fn pointer_flags_for(kind: crate::PointerEventKind) -> u32 {
+    const POINTER_FLAG_INRANGE: u32 = 0x00000002;
+    const POINTER_FLAG_INCONTACT: u32 = 0x00000004;
+    const POINTER_FLAG_PRIMARY: u32 = 0x00002000;
+    const POINTER_FLAG_DOWN: u32 = 0x00010000;
+    const POINTER_FLAG_UPDATE: u32 = 0x00020000;
+    const POINTER_FLAG_UP: u32 = 0x00040000;
+    const POINTER_FLAG_CAPTURECHANGED: u32 = 0x00200000;
+    match kind {
+        crate::PointerEventKind::Down => {
+            POINTER_FLAG_DOWN | POINTER_FLAG_INCONTACT | POINTER_FLAG_INRANGE | POINTER_FLAG_PRIMARY
+        }
+        crate::PointerEventKind::Up => POINTER_FLAG_UP | POINTER_FLAG_PRIMARY,
+        crate::PointerEventKind::Update => {
+            POINTER_FLAG_UPDATE
+                | POINTER_FLAG_INCONTACT
+                | POINTER_FLAG_INRANGE
+                | POINTER_FLAG_PRIMARY
+        }
+        crate::PointerEventKind::Enter => POINTER_FLAG_INRANGE | POINTER_FLAG_PRIMARY,
+        crate::PointerEventKind::Leave => POINTER_FLAG_PRIMARY,
+        crate::PointerEventKind::Activate => POINTER_FLAG_PRIMARY,
+        crate::PointerEventKind::CaptureChanged => POINTER_FLAG_CAPTURECHANGED,
+    }
 }
 
 fn focus_reason(reason: FocusReason) -> COREWEBVIEW2_MOVE_FOCUS_REASON {

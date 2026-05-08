@@ -22,7 +22,7 @@ The shared contract:
 - **Layout** — `resize`, `set_offset`.
 - **Navigation** — `navigate_to_string`, `navigate_to_url`. Both block until `NavigationCompleted`.
 - **History** — `reload`, `stop`, `go_back`, `go_forward`, `can_go_back`, `can_go_forward`.
-- **Input** — `send_mouse_input` (mouse + scroll + leave), `move_focus` (Programmatic / Next / Previous tab order). Pointer (touch / pen) and drag-and-drop are declared on the trait but not yet implemented on Windows; tracked for 0.4.
+- **Input** — `send_mouse_input` (mouse + scroll + leave), `send_pointer_input` (touch / pen with pressure + tilt), `move_focus` (Programmatic / Next / Previous tab order). Drag-and-drop is implemented on the Windows producer's concrete type as `drag_enter` / `drag_over` / `drag_leave` / `drop_data` — the host supplies an `IDataObject` from its OLE drop-target callbacks. The trait-level `send_drag_input` stays platform-abstract; full cross-platform DnD waits for a unified data-carrier abstraction.
 - **Lifecycle events** — `poll_navigation_event` drains a FIFO queue of `Starting` / `SourceChanged` / `Completed` / `TitleChanged` events.
 - **Cursor reporting** — `poll_cursor_shape` returns the next [`CursorShape`] the engine wants the host to display (Pointer over a link, Text in an input, etc.).
 - **JS messaging** — `post_web_message` (Rust → JS via `window.chrome.webview` listeners), `poll_web_message` (JS → Rust via `window.chrome.webview.postMessage`).
