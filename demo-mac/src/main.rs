@@ -19,10 +19,12 @@ use render::WgpuRender;
 use scrying::CaptureStatus;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use scrying::wkwebview_producer::{WkWebViewProducer, WkWebViewProducerConfig};
+use scrying::wkwebview_producer::{
+    FindOptions, UrlSchemeHandlerFn, UrlSchemeResponse, WkWebViewProducer, WkWebViewProducerConfig,
+};
 use scrying::{
     KeyEventKind, KeyModifierFlags, KeyboardInput, MouseEventKind, MouseInput, MouseVirtualKeys,
-    WryWebSurfaceProducer,
+    NavigationEvent, WryWebSurfaceProducer,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -68,6 +70,45 @@ const PROFILE_TEST_HTML: &str = r#"<!doctype html>
 /// `WKWebsiteDataStore`. WebKit treats cookies set on `about:blank`
 /// or `data:` origins as ephemeral, so we need a real-looking URL.
 const PROFILE_TEST_BASE_URL: &str = "https://demo-mac.scrying.local/";
+
+/// `--browser-test` URL scheme handler. Routes by path within the
+/// `scrying-test://` scheme to canned HTML responses that drive the
+/// browser-class state machine. Each response embeds known marker
+/// text so JS-side and host-side assertions can verify what loaded.
+fn browser_test_scheme_handler() -> UrlSchemeHandlerFn {
+    Arc::new(|url: &str| -> UrlSchemeResponse {
+        let body = if url.contains("/history-1") {
+            r#"<!doctype html><body><h1 id="m">history-page-1</h1>
+            <script>
+              if (window.chrome && window.chrome.webview) {
+                window.chrome.webview.postMessage('loaded:history-1');
+              }
+            </script></body>"#
+        } else if url.contains("/history-2") {
+            r#"<!doctype html><body><h1 id="m">history-page-2</h1>
+            <script>
+              if (window.chrome && window.chrome.webview) {
+                window.chrome.webview.postMessage('loaded:history-2');
+              }
+            </script></body>"#
+        } else if url.contains("/find-target") {
+            r#"<!doctype html><body>
+            <p>scrying-find-marker</p>
+            <script>
+              if (window.chrome && window.chrome.webview) {
+                window.chrome.webview.postMessage('loaded:find-target');
+              }
+            </script>
+            </body>"#
+        } else {
+            r#"<!doctype html><body>scrying-test fallback</body>"#
+        };
+        UrlSchemeResponse {
+            mime_type: "text/html".into(),
+            body: body.as_bytes().to_vec(),
+        }
+    })
+}
 
 /// Offline HTML page used by `--scripted`. Contains an input box
 /// (id=`text`) so synthetic key events can change the value, a
@@ -126,7 +167,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `about_to_wait` fires regularly enough to advance their state
     // machines / request redraws. Plain overlay mode can sleep on
     // `Wait`.
-    if cli.probe_snapshot || cli.capture || cli.scripted || cli.profile_test {
+    if cli.probe_snapshot
+        || cli.capture
+        || cli.scripted
+        || cli.profile_test
+        || cli.two_tabs
+        || cli.browser_test
+    {
         event_loop.set_control_flow(ControlFlow::Poll);
     } else {
         event_loop.set_control_flow(ControlFlow::Wait);
@@ -171,6 +218,18 @@ struct Cli {
     /// (priming for the next run). Exits as soon as the JS handshake
     /// completes.
     profile_test: bool,
+    /// Construct two `WkWebViewProducer` instances against the same
+    /// NSView, navigate each to a different URL, drain events from
+    /// both, and exit cleanly. Validates the producer is safe to
+    /// instantiate multiple times in one process — the foundational
+    /// architectural requirement for browser-shape consumers (each
+    /// tab is its own producer).
+    two_tabs: bool,
+    /// Drive items 1, 3, 4, 9 of the browser-class roadmap (history
+    /// controls, settings, custom URL schemes, find / PDF) on a
+    /// timed schedule and assert deterministic effects. Items 2, 5,
+    /// 6, 8 need network or harder triggers and aren't covered.
+    browser_test: bool,
 }
 
 impl Cli {
@@ -191,6 +250,8 @@ impl Cli {
                 }
                 "--resize-test" => cli.resize_test = true,
                 "--profile-test" => cli.profile_test = true,
+                "--two-tabs" => cli.two_tabs = true,
+                "--browser-test" => cli.browser_test = true,
                 _ => eprintln!("demo-mac: unknown arg: {arg}"),
             }
         }
@@ -227,7 +288,53 @@ struct AppState {
     /// Set by `--profile-test`. Loads the cookie test page once and
     /// reports observed cookie state.
     profile_test: Option<ProfileTestState>,
+    /// Set by `--two-tabs`. The second producer instance, navigated
+    /// independently from `producer`. Both share the same NSView
+    /// parent (subviews of the host window) and the same data_dir
+    /// (so they're "tabs in the same browsing session").
+    second_producer: Option<WkWebViewProducer>,
+    /// Two-tabs mode exits at this elapsed time. `None` outside
+    /// `--two-tabs`.
+    two_tabs_deadline: Option<Duration>,
+    /// Set by `--browser-test`. Drives a state machine across items
+    /// 1, 3, 4, 9.
+    browser_test: Option<BrowserTestState>,
     started_at: Instant,
+}
+
+#[derive(Default)]
+struct BrowserTestState {
+    step: BrowserTestStep,
+    step_started_at: Option<Instant>,
+    settings_ok: Option<bool>,
+    find_result: Option<bool>,
+    pdf_bytes: Option<usize>,
+    pdf_error: Option<String>,
+    /// Most recent committed URL observed via SourceChanged. Used
+    /// to verify go_back / go_forward actually navigated.
+    last_committed_url: String,
+    failures: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum BrowserTestStep {
+    #[default]
+    LoadFirst,
+    AwaitFirst,
+    LoadSecond,
+    AwaitSecond,
+    GoBack,
+    AwaitBack,
+    GoForward,
+    AwaitForward,
+    ApplySettings,
+    NavigateForFind,
+    AwaitFindPage,
+    FindInPage,
+    AwaitFindResult,
+    RequestPdf,
+    AwaitPdfResult,
+    Done,
 }
 
 #[derive(Default)]
@@ -312,11 +419,11 @@ impl ApplicationHandler for App {
             return;
         };
         // Drain any messages that arrived since the last wakeup
-        // before advancing test-mode state machines. Without this
-        // pre-drain the profile-test driver can race to "TIMED OUT"
-        // even when the JS handshake messages are sitting in the
-        // FIFO waiting to be observed.
-        if state.scripted.is_some() || state.profile_test.is_some() {
+        // before advancing test-mode state machines.
+        if state.scripted.is_some()
+            || state.profile_test.is_some()
+            || state.browser_test.is_some()
+        {
             drain_events(state);
         }
         if state.scripted.is_some() {
@@ -325,6 +432,26 @@ impl ApplicationHandler for App {
         }
         if state.profile_test.is_some() {
             advance_profile_test(state, event_loop);
+        }
+        if state.browser_test.is_some() {
+            advance_browser_test(state, event_loop);
+        }
+        if let Some(deadline) = state.two_tabs_deadline {
+            // Drain second-producer events with a "[tab2]" prefix so
+            // they're distinguishable from the first producer's
+            // events in stdout.
+            if let Some(second) = state.second_producer.as_mut() {
+                while let Some(event) = second.poll_navigation_event() {
+                    println!("demo-mac: [tab2] nav event: {event:?}");
+                }
+                while let Some(message) = second.poll_web_message() {
+                    println!("demo-mac: [tab2] js->host: {message}");
+                }
+            }
+            if state.started_at.elapsed() >= deadline {
+                println!("demo-mac: --two-tabs deadline reached, exiting");
+                event_loop.exit();
+            }
         }
         // Capture mode: kick off `start_capture_async` after the
         // kickoff delay elapses (so the initial navigation has time
@@ -634,6 +761,18 @@ fn handle_key(state: &mut AppState, event: KeyEvent) {
 fn drain_events(state: &mut AppState) {
     while let Some(event) = state.producer.poll_navigation_event() {
         println!("demo-mac: nav event: {event:?}");
+        // Update browser-test state machine on URL changes so
+        // go_back / go_forward / load_url completions can be
+        // observed.
+        if let Some(test) = state.browser_test.as_mut() {
+            match &event {
+                NavigationEvent::SourceChanged { url }
+                | NavigationEvent::Completed { url, .. } => {
+                    test.last_committed_url = url.clone();
+                }
+                _ => {}
+            }
+        }
     }
     while let Some(message) = state.producer.poll_web_message() {
         println!("demo-mac: js->host: {message}");
@@ -935,6 +1074,266 @@ fn advance_profile_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
     }
 }
 
+/// Drive the `--browser-test` runtime verification of items 1 / 3 /
+/// 4 / 9. Each step either issues a producer call and transitions
+/// to an Await state, or polls for completion / observed effects.
+/// Items 2, 5, 6, 8 aren't covered — they need a real network or
+/// harder-to-trigger conditions.
+fn advance_browser_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
+    let Some(test) = state.browser_test.as_mut() else {
+        return;
+    };
+    let now = Instant::now();
+    if test.step_started_at.is_none() {
+        test.step_started_at = Some(now);
+    }
+    let elapsed = now.duration_since(test.step_started_at.unwrap_or(now));
+    let step = test.step;
+    macro_rules! step_to {
+        ($next:expr) => {{
+            test.step = $next;
+            test.step_started_at = Some(Instant::now());
+        }};
+    }
+    macro_rules! await_ms {
+        ($ms:expr) => {
+            elapsed < Duration::from_millis($ms)
+        };
+    }
+    match step {
+        BrowserTestStep::LoadFirst => {
+            if let Err(e) = state.producer.load_url("scrying-test://history-1") {
+                test.failures.push(format!("load history-1: {e}"));
+                step_to!(BrowserTestStep::Done);
+                return;
+            }
+            step_to!(BrowserTestStep::AwaitFirst);
+        }
+        BrowserTestStep::AwaitFirst => {
+            if test.last_committed_url.contains("history-1") {
+                println!("demo-mac: browser-test: history-1 loaded");
+                step_to!(BrowserTestStep::LoadSecond);
+            } else if elapsed > Duration::from_secs(5) {
+                test.failures.push("history-1 never loaded".into());
+                step_to!(BrowserTestStep::Done);
+            }
+        }
+        BrowserTestStep::LoadSecond => {
+            if let Err(e) = state.producer.load_url("scrying-test://history-2") {
+                test.failures.push(format!("load history-2: {e}"));
+                step_to!(BrowserTestStep::Done);
+                return;
+            }
+            step_to!(BrowserTestStep::AwaitSecond);
+        }
+        BrowserTestStep::AwaitSecond => {
+            if test.last_committed_url.contains("history-2") {
+                println!("demo-mac: browser-test: history-2 loaded");
+                step_to!(BrowserTestStep::GoBack);
+            } else if elapsed > Duration::from_secs(5) {
+                test.failures.push("history-2 never loaded".into());
+                step_to!(BrowserTestStep::Done);
+            }
+        }
+        BrowserTestStep::GoBack => {
+            // Settle so WKWebView's back-forward list catches up
+            // with the just-completed second load. The
+            // `Completed` event fires before WKWebView updates
+            // `canGoBack`, so a small delay avoids a flake.
+            if await_ms!(200) {
+                return;
+            }
+            // Item 1: history controls.
+            if !state.producer.can_go_back() {
+                test.failures
+                    .push("can_go_back returned false after two loads".into());
+                step_to!(BrowserTestStep::ApplySettings);
+                return;
+            }
+            match state.producer.go_back() {
+                Ok(true) => step_to!(BrowserTestStep::AwaitBack),
+                Ok(false) => {
+                    test.failures.push("go_back returned Ok(false)".into());
+                    step_to!(BrowserTestStep::ApplySettings);
+                }
+                Err(e) => {
+                    test.failures.push(format!("go_back: {e}"));
+                    step_to!(BrowserTestStep::ApplySettings);
+                }
+            }
+        }
+        BrowserTestStep::AwaitBack => {
+            if test.last_committed_url.contains("history-1") {
+                println!("demo-mac: browser-test: go_back navigated to history-1");
+                step_to!(BrowserTestStep::GoForward);
+            } else if elapsed > Duration::from_secs(5) {
+                test.failures
+                    .push(format!(
+                        "go_back didn't navigate to history-1 (saw '{}')",
+                        test.last_committed_url
+                    ));
+                step_to!(BrowserTestStep::ApplySettings);
+            }
+        }
+        BrowserTestStep::GoForward => {
+            // Brief settle so WebKit's history stack catches up
+            // with the just-completed go_back navigation. Without
+            // this, `canGoForward` can momentarily return false
+            // even though forward navigation is logically valid.
+            if await_ms!(200) {
+                return;
+            }
+            match state.producer.go_forward() {
+                Ok(true) => step_to!(BrowserTestStep::AwaitForward),
+                Ok(false) => {
+                    test.failures.push("go_forward returned Ok(false)".into());
+                    step_to!(BrowserTestStep::ApplySettings);
+                }
+                Err(e) => {
+                    test.failures.push(format!("go_forward: {e}"));
+                    step_to!(BrowserTestStep::ApplySettings);
+                }
+            }
+        }
+        BrowserTestStep::AwaitForward => {
+            if test.last_committed_url.contains("history-2") {
+                println!("demo-mac: browser-test: go_forward navigated to history-2");
+                step_to!(BrowserTestStep::ApplySettings);
+            } else if elapsed > Duration::from_secs(5) {
+                test.failures.push(format!(
+                    "go_forward didn't navigate to history-2 (saw '{}')",
+                    test.last_committed_url
+                ));
+                step_to!(BrowserTestStep::ApplySettings);
+            }
+        }
+        BrowserTestStep::ApplySettings => {
+            // Item 3: settings.
+            let settings = scrying::WebSurfaceSettings {
+                zoom_factor: Some(1.5),
+                javascript_enabled: Some(true),
+                devtools_enabled: Some(false),
+                user_agent: Some("scrying-demo-test/0.1".into()),
+                ..Default::default()
+            };
+            test.settings_ok = Some(state.producer.apply_settings(&settings).is_ok());
+            if test.settings_ok == Some(true) {
+                println!("demo-mac: browser-test: apply_settings ok");
+            } else {
+                test.failures.push("apply_settings returned Err".into());
+            }
+            step_to!(BrowserTestStep::NavigateForFind);
+        }
+        BrowserTestStep::NavigateForFind => {
+            if let Err(e) = state.producer.load_url("scrying-test://find-target") {
+                test.failures.push(format!("load find-target: {e}"));
+                step_to!(BrowserTestStep::Done);
+                return;
+            }
+            step_to!(BrowserTestStep::AwaitFindPage);
+        }
+        BrowserTestStep::AwaitFindPage => {
+            if test.last_committed_url.contains("find-target") {
+                step_to!(BrowserTestStep::FindInPage);
+            } else if elapsed > Duration::from_secs(5) {
+                test.failures.push("find-target never loaded".into());
+                step_to!(BrowserTestStep::RequestPdf);
+            }
+        }
+        BrowserTestStep::FindInPage => {
+            if await_ms!(150) {
+                return;
+            }
+            // Item 9 part A: find_in_page.
+            let opts = FindOptions::default();
+            if let Err(e) = state.producer.find_in_page("scrying-find-marker", opts) {
+                test.failures.push(format!("find_in_page: {e}"));
+                step_to!(BrowserTestStep::RequestPdf);
+                return;
+            }
+            step_to!(BrowserTestStep::AwaitFindResult);
+        }
+        BrowserTestStep::AwaitFindResult => {
+            if let Some(matched) = state.producer.poll_find_match() {
+                test.find_result = Some(matched);
+                if matched {
+                    println!("demo-mac: browser-test: find_in_page matched");
+                } else {
+                    test.failures
+                        .push("find_in_page returned no match for known marker".into());
+                }
+                step_to!(BrowserTestStep::RequestPdf);
+            } else if elapsed > Duration::from_secs(3) {
+                test.failures.push("find_in_page never completed".into());
+                step_to!(BrowserTestStep::RequestPdf);
+            }
+        }
+        BrowserTestStep::RequestPdf => {
+            if let Err(e) = state.producer.request_pdf() {
+                test.failures.push(format!("request_pdf: {e}"));
+                step_to!(BrowserTestStep::Done);
+                return;
+            }
+            step_to!(BrowserTestStep::AwaitPdfResult);
+        }
+        BrowserTestStep::AwaitPdfResult => {
+            if let Some(result) = state.producer.poll_pdf() {
+                match result {
+                    Ok(bytes) => {
+                        let len = bytes.len();
+                        test.pdf_bytes = Some(len);
+                        if len > 100 {
+                            println!(
+                                "demo-mac: browser-test: PDF rendered ({len} bytes)"
+                            );
+                        } else {
+                            test.failures.push(format!(
+                                "PDF rendered but suspiciously small ({len} bytes)"
+                            ));
+                        }
+                    }
+                    Err(msg) => {
+                        test.pdf_error = Some(msg.clone());
+                        test.failures.push(format!("PDF render failed: {msg}"));
+                    }
+                }
+                step_to!(BrowserTestStep::Done);
+            } else if elapsed > Duration::from_secs(5) {
+                test.failures.push("request_pdf never completed".into());
+                step_to!(BrowserTestStep::Done);
+            }
+        }
+        BrowserTestStep::Done => {
+            if test.failures.is_empty() {
+                println!("demo-mac: browser-test: PASS — items 1, 3, 4, 9 verified at runtime");
+                println!(
+                    "  - history controls (go_back/go_forward observed via SourceChanged events)"
+                );
+                println!("  - settings (apply_settings returned Ok)");
+                println!(
+                    "  - URL schemes (scrying-test:// served {} pages successfully)",
+                    if test.last_committed_url.contains("find-target") {
+                        3
+                    } else {
+                        2
+                    }
+                );
+                println!(
+                    "  - find_in_page → {:?}, request_pdf → {} bytes",
+                    test.find_result,
+                    test.pdf_bytes.unwrap_or(0)
+                );
+            } else {
+                eprintln!("demo-mac: browser-test: FAIL");
+                for f in &test.failures {
+                    eprintln!("  - {f}");
+                }
+            }
+            event_loop.exit();
+        }
+    }
+}
+
 impl AppState {
     fn new(
         event_loop: &ActiveEventLoop,
@@ -977,10 +1376,24 @@ impl AppState {
         };
         let producer_config = WkWebViewProducerConfig::new(webview_size, &data_dir);
 
+        // Browser-test mode registers a custom URL scheme so the
+        // canned test pages don't depend on the network.
+        let url_schemes: Vec<(String, UrlSchemeHandlerFn)> = if cli.browser_test {
+            vec![("scrying-test".to_string(), browser_test_scheme_handler())]
+        } else {
+            Vec::new()
+        };
+
         // SAFETY: ns_view_ptr is the live NSView from winit's window,
         // which outlives the producer (window is owned by AppState
         // via Arc, dropped only when the event loop exits).
-        let producer = unsafe { WkWebViewProducer::new(ns_view_ptr, producer_config)? };
+        let mut producer = unsafe {
+            WkWebViewProducer::new_with_url_schemes(
+                ns_view_ptr,
+                producer_config,
+                url_schemes,
+            )?
+        };
 
         // Scripted mode loads its own offline test page once the
         // event loop is running (in `advance_scripted`); for
@@ -992,13 +1405,43 @@ impl AppState {
         // panics under winit's "no nested event handling" guard).
         // Completion arrives asynchronously via the navigation event
         // FIFO.
-        if !cli.scripted && !cli.profile_test {
+        if !cli.scripted && !cli.profile_test && !cli.two_tabs && !cli.browser_test {
             if let Err(error) = producer.load_url(INITIAL_URL) {
                 eprintln!("demo-mac: initial load_url failed: {error}");
             } else {
                 println!("demo-mac: started loading {INITIAL_URL}");
             }
         }
+
+        // `--two-tabs`: spin up a second producer against the same
+        // NSView and navigate it to a different URL. Validates that
+        // multiple producers can coexist in one process / one window.
+        let second_producer = if cli.two_tabs {
+            // Position tab 1 at top-half and tab 2 at bottom-half so
+            // both are visually distinct in any captured frame.
+            let half_height = inner.height / 2;
+            let _ = producer.resize(PhysicalSize::new(inner.width, half_height));
+            let _ = producer.set_offset(0.0, half_height as f32);
+            let _ = producer.load_url("https://example.com");
+
+            let second_data_dir =
+                std::env::current_dir()?.join("target/demo-mac-multi-tab");
+            let second_config =
+                WkWebViewProducerConfig::new(
+                    PhysicalSize::new(inner.width, half_height),
+                    &second_data_dir,
+                );
+            // SAFETY: ns_view_ptr is the same valid NSView the first
+            // producer was constructed against; both producers will
+            // be dropped before the window vanishes.
+            let second =
+                unsafe { WkWebViewProducer::new(ns_view_ptr, second_config)? };
+            let _ = second.load_url("https://www.iana.org/help/example-domains");
+            println!("demo-mac: --two-tabs: spun up second producer");
+            Some(second)
+        } else {
+            None
+        };
 
         let render = if cli.capture {
             let mut r = pollster::block_on(WgpuRender::new(window.clone()))?;
@@ -1041,6 +1484,9 @@ impl AppState {
             }),
             scripted: cli.scripted.then(ScriptedState::new),
             profile_test: cli.profile_test.then(ProfileTestState::default),
+            second_producer,
+            two_tabs_deadline: cli.two_tabs.then_some(Duration::from_secs(8)),
+            browser_test: cli.browser_test.then(BrowserTestState::default),
             started_at: Instant::now(),
         })
     }
