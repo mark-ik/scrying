@@ -23,8 +23,9 @@ use scrying::wkwebview_producer::{
     FindOptions, UrlSchemeHandlerFn, UrlSchemeResponse, WkWebViewProducer, WkWebViewProducerConfig,
 };
 use scrying::{
-    KeyEventKind, KeyModifierFlags, KeyboardInput, MouseEventKind, MouseInput, MouseVirtualKeys,
-    NavigationEvent, PointerDevice, PointerEventKind, PointerInput, WryWebSurfaceProducer,
+    Cookie, KeyEventKind, KeyModifierFlags, KeyboardInput, MouseEventKind, MouseInput,
+    MouseVirtualKeys, NavigationEvent, PointerDevice, PointerEventKind, PointerInput,
+    WryWebSurfaceProducer,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -215,6 +216,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         || cli.browser_test
         || cli.interaction_state_test
         || cli.pointer_input_test
+        || cli.incognito_test
     {
         event_loop.set_control_flow(ControlFlow::Poll);
     } else {
@@ -283,6 +285,14 @@ struct Cli {
     /// Verifies `send_pointer_input` reaches the WKWebView and
     /// drives Pointer Events on the JS side.
     pointer_input_test: bool,
+    /// Stand up two producers in one process: one with
+    /// `non_persistent = true`, one persistent at a separate
+    /// `data_dir`. Sets a uniquely-named cookie on the incognito
+    /// producer and asserts the persistent producer's cookie store
+    /// does not see it — proves the incognito flag really wires
+    /// `WKWebsiteDataStore::nonPersistentDataStore` and that
+    /// non-persistent stores don't leak into persistent ones.
+    incognito_test: bool,
     /// Force the demo window to remain visible even when the test
     /// mode would normally run headless. Useful for debugging a
     /// failing test by watching the WKWebView in real time.
@@ -303,6 +313,7 @@ impl Cli {
             || self.browser_test
             || self.interaction_state_test
             || self.pointer_input_test
+            || self.incognito_test
     }
 }
 
@@ -328,6 +339,7 @@ impl Cli {
                 "--browser-test" => cli.browser_test = true,
                 "--interaction-state-test" => cli.interaction_state_test = true,
                 "--pointer-input-test" => cli.pointer_input_test = true,
+                "--incognito-test" => cli.incognito_test = true,
                 "--visible" => cli.visible = true,
                 _ => eprintln!("demo-mac: unknown arg: {arg}"),
             }
@@ -382,6 +394,9 @@ struct AppState {
     /// Set by `--pointer-input-test`. Drives pointer-event
     /// synthesis and asserts JS-side observation.
     pointer_input_test: Option<PointerInputTestState>,
+    /// Set by `--incognito-test`. Drives the two-producer
+    /// non_persistent-isolation assertion.
+    incognito_test: Option<IncognitoTestState>,
     started_at: Instant,
 }
 
@@ -452,6 +467,36 @@ enum InteractionStateStep {
     AwaitBackTwo,
     Restore,
     AwaitRestore,
+    Verify,
+    Done,
+}
+
+#[derive(Default)]
+struct IncognitoTestState {
+    step: IncognitoStep,
+    step_started_at: Option<Instant>,
+    /// Cookie name we set on the incognito producer; uniquely
+    /// suffixed per run so stale data in any persistent store
+    /// from a prior run can't false-positive the assertion.
+    cookie_name: String,
+    /// `request_all_cookies` result from the incognito producer.
+    /// Assertion: should contain `cookie_name`.
+    incognito_cookies: Option<Vec<Cookie>>,
+    /// `request_all_cookies` result from the persistent producer.
+    /// Assertion: should NOT contain `cookie_name`.
+    persistent_cookies: Option<Vec<Cookie>>,
+    failures: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum IncognitoStep {
+    #[default]
+    SetCookie,
+    AwaitSet,
+    QueryIncognito,
+    AwaitQueryIncognito,
+    QueryPersistent,
+    AwaitQueryPersistent,
     Verify,
     Done,
 }
@@ -597,6 +642,9 @@ impl ApplicationHandler for App {
         }
         if state.pointer_input_test.is_some() {
             advance_pointer_input_test(state, event_loop);
+        }
+        if state.incognito_test.is_some() {
+            advance_incognito_test(state, event_loop);
         }
         if let Some(deadline) = state.two_tabs_deadline {
             // Drain second-producer events with a "[tab2]" prefix so
@@ -1937,6 +1985,170 @@ fn advance_pointer_input_test(state: &mut AppState, event_loop: &ActiveEventLoop
     }
 }
 
+/// Drive `--incognito-test`. The main producer is incognito
+/// (`non_persistent = true`); the second producer is persistent at
+/// a separate `data_dir`. Sets a uniquely-named cookie on the
+/// incognito producer's `WKHTTPCookieStore`, then queries both
+/// producers' cookie stores and asserts the cookie is visible to
+/// the incognito producer but not to the persistent one.
+fn advance_incognito_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
+    let Some(test) = state.incognito_test.as_mut() else {
+        return;
+    };
+    let now = Instant::now();
+    if test.step_started_at.is_none() {
+        test.step_started_at = Some(now);
+    }
+    let elapsed = now.duration_since(test.step_started_at.unwrap_or(now));
+    let step = test.step;
+    macro_rules! step_to {
+        ($next:expr) => {{
+            test.step = $next;
+            test.step_started_at = Some(Instant::now());
+        }};
+    }
+    macro_rules! await_ms {
+        ($ms:expr) => {
+            elapsed < Duration::from_millis($ms)
+        };
+    }
+    match step {
+        IncognitoStep::SetCookie => {
+            let cookie = Cookie {
+                name: test.cookie_name.clone(),
+                value: "phase-a".into(),
+                domain: "example.com".into(),
+                path: "/".into(),
+                expires_at: None,
+                is_secure: false,
+                is_http_only: false,
+            };
+            if let Err(e) = state.producer.set_cookie(&cookie) {
+                test.failures
+                    .push(format!("set_cookie on incognito producer: {e}"));
+                step_to!(IncognitoStep::Done);
+                return;
+            }
+            println!(
+                "demo-mac: incognito-test: set_cookie '{}' on incognito producer",
+                test.cookie_name
+            );
+            step_to!(IncognitoStep::AwaitSet);
+        }
+        IncognitoStep::AwaitSet => {
+            // `setCookie:completionHandler:` is fire-and-forget on
+            // our side; give Apple's cookie store a beat to commit
+            // before we query.
+            if await_ms!(250) {
+                return;
+            }
+            step_to!(IncognitoStep::QueryIncognito);
+        }
+        IncognitoStep::QueryIncognito => {
+            if let Err(e) = state.producer.request_all_cookies() {
+                test.failures.push(format!("request_all_cookies on incognito: {e}"));
+                step_to!(IncognitoStep::Done);
+                return;
+            }
+            step_to!(IncognitoStep::AwaitQueryIncognito);
+        }
+        IncognitoStep::AwaitQueryIncognito => {
+            if let Some(cookies) = state.producer.poll_cookies() {
+                println!(
+                    "demo-mac: incognito-test: incognito store reports {} cookie(s)",
+                    cookies.len()
+                );
+                test.incognito_cookies = Some(cookies);
+                step_to!(IncognitoStep::QueryPersistent);
+            } else if elapsed > Duration::from_secs(3) {
+                test.failures
+                    .push("incognito producer's poll_cookies never returned".into());
+                step_to!(IncognitoStep::Done);
+            }
+        }
+        IncognitoStep::QueryPersistent => {
+            let Some(second) = state.second_producer.as_mut() else {
+                test.failures
+                    .push("second_producer was None for incognito-test".into());
+                step_to!(IncognitoStep::Done);
+                return;
+            };
+            if let Err(e) = second.request_all_cookies() {
+                test.failures
+                    .push(format!("request_all_cookies on persistent: {e}"));
+                step_to!(IncognitoStep::Done);
+                return;
+            }
+            step_to!(IncognitoStep::AwaitQueryPersistent);
+        }
+        IncognitoStep::AwaitQueryPersistent => {
+            let Some(second) = state.second_producer.as_mut() else {
+                test.failures
+                    .push("second_producer was None mid-test".into());
+                step_to!(IncognitoStep::Done);
+                return;
+            };
+            if let Some(cookies) = second.poll_cookies() {
+                println!(
+                    "demo-mac: incognito-test: persistent store reports {} cookie(s)",
+                    cookies.len()
+                );
+                test.persistent_cookies = Some(cookies);
+                step_to!(IncognitoStep::Verify);
+            } else if elapsed > Duration::from_secs(3) {
+                test.failures
+                    .push("persistent producer's poll_cookies never returned".into());
+                step_to!(IncognitoStep::Done);
+            }
+        }
+        IncognitoStep::Verify => {
+            let in_incognito = test
+                .incognito_cookies
+                .as_ref()
+                .map(|cs| cs.iter().any(|c| c.name == test.cookie_name))
+                .unwrap_or(false);
+            let in_persistent = test
+                .persistent_cookies
+                .as_ref()
+                .map(|cs| cs.iter().any(|c| c.name == test.cookie_name))
+                .unwrap_or(false);
+            if !in_incognito {
+                test.failures.push(format!(
+                    "cookie '{}' missing from incognito producer's own store (set_cookie didn't take effect)",
+                    test.cookie_name
+                ));
+            }
+            if in_persistent {
+                test.failures.push(format!(
+                    "cookie '{}' leaked into the persistent comparison producer's store — incognito isolation is broken",
+                    test.cookie_name
+                ));
+            }
+            step_to!(IncognitoStep::Done);
+        }
+        IncognitoStep::Done => {
+            if test.failures.is_empty() {
+                println!(
+                    "demo-mac: incognito-test: PASS — non_persistent stores stay isolated from persistent ones"
+                );
+                println!(
+                    "  - set_cookie on incognito producer was visible to its own request_all_cookies"
+                );
+                println!(
+                    "  - same cookie was absent from a separate persistent producer's store"
+                );
+                event_loop.exit();
+            } else {
+                eprintln!("demo-mac: incognito-test: FAIL");
+                for f in &test.failures {
+                    eprintln!("  - {f}");
+                }
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
 impl AppState {
     fn new(
         event_loop: &ActiveEventLoop,
@@ -1981,10 +2193,18 @@ impl AppState {
         // store without bleeding into the regular demo profile.
         let data_dir = if cli.profile_test {
             std::env::current_dir()?.join("target/demo-mac-profile-test")
+        } else if cli.incognito_test {
+            // Hint path is ignored when `non_persistent` wins, but we
+            // pass a unique one anyway so the bookkeeping in the
+            // producer is unambiguous if we ever flip the flag off.
+            std::env::current_dir()?.join("target/demo-mac-incognito")
         } else {
             std::env::current_dir()?.join("target/demo-mac-profile")
         };
-        let producer_config = WkWebViewProducerConfig::new(webview_size, &data_dir);
+        let mut producer_config = WkWebViewProducerConfig::new(webview_size, &data_dir);
+        if cli.incognito_test {
+            producer_config = producer_config.non_persistent();
+        }
 
         // Browser-test and interaction-state-test modes register a
         // custom URL scheme so the canned test pages don't depend on
@@ -2024,6 +2244,7 @@ impl AppState {
             && !cli.browser_test
             && !cli.interaction_state_test
             && !cli.pointer_input_test
+            && !cli.incognito_test
         {
             if let Err(error) = producer.load_url(INITIAL_URL) {
                 eprintln!("demo-mac: initial load_url failed: {error}");
@@ -2032,10 +2253,27 @@ impl AppState {
             }
         }
 
-        // `--two-tabs`: spin up a second producer against the same
-        // NSView and navigate it to a different URL. Validates that
-        // multiple producers can coexist in one process / one window.
-        let second_producer = if cli.two_tabs {
+        // `--incognito-test`: spin up a *persistent* second producer
+        // alongside the (incognito) main producer. The test asserts
+        // a cookie set on the main producer never reaches the
+        // persistent producer's cookie store. The PID-suffixed
+        // data_dir guarantees a fresh per-run WKWebsiteDataStore so
+        // stale cookies from prior runs can't false-positive.
+        let second_producer = if cli.incognito_test {
+            let pid = std::process::id();
+            let persistent_data_dir = std::env::current_dir()?
+                .join(format!("target/demo-mac-incognito-persistent-{pid}"));
+            let second_config = WkWebViewProducerConfig::new(
+                PhysicalSize::new(inner.width, inner.height),
+                &persistent_data_dir,
+            );
+            // SAFETY: ns_view_ptr is the same valid NSView the first
+            // producer was constructed against; both producers will
+            // be dropped before the window vanishes.
+            let second = unsafe { WkWebViewProducer::new(ns_view_ptr, second_config)? };
+            println!("demo-mac: --incognito-test: spun up persistent comparison producer");
+            Some(second)
+        } else if cli.two_tabs {
             // Position tab 1 at top-half and tab 2 at bottom-half so
             // both are visually distinct in any captured frame.
             let half_height = inner.height / 2;
@@ -2112,6 +2350,10 @@ impl AppState {
             pointer_input_test: cli
                 .pointer_input_test
                 .then(PointerInputTestState::default),
+            incognito_test: cli.incognito_test.then(|| IncognitoTestState {
+                cookie_name: format!("scrying-incognito-{}", std::process::id()),
+                ..IncognitoTestState::default()
+            }),
             started_at: Instant::now(),
         })
     }
