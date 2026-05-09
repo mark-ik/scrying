@@ -131,9 +131,10 @@ where `texture_from_raw` now takes
 - **Slice A — WKWebView lifecycle.** `WkWebViewProducer::new` retains
   the parent `NSView`, builds a default `WKWebViewConfiguration`,
   creates the `WKWebView` with an NSRect derived from
-  `config.offset` (points) and `config.size` (physical pixels →
-  points via the parent window's `backingScaleFactor`), wires a
-  navigation delegate, and adds the WebView as a subview.
+  `config.offset` and `config.size` (both physical pixels → both
+  divided by the parent window's `backingScaleFactor` to get
+  AppKit points), wires a navigation delegate, and adds the
+  WebView as a subview.
   `navigate_to_string` waits on `WKNavigationDelegate.didFinishNavigation:`
   while pumping the main run loop in 16 ms slices; `resize` /
   `set_offset` reshape the live view; `Drop` removes from superview

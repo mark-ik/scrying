@@ -226,23 +226,47 @@ pub(super) struct CaptureState {
 
 /// Build the [`SCStreamConfiguration`] used by both
 /// [`super::WkWebViewProducer::start_capture`] and live resizes.
-/// Single source of truth for pixel format / cursor / queue depth /
-/// source-rect-cropping so `updateConfiguration:` keeps the non-size
-/// parameters consistent with the original `start_capture`.
+/// Single source of truth for pixel format / cursor / queue depth.
 ///
-/// `source_rect`, when `Some`, is the rect within the captured
-/// window — in points, top-left origin — that SCK should sample
-/// from. Without this, an `initWithDesktopIndependentWindow`
-/// filter captures the *entire* host window: every pixel of host
-/// chrome around the WKWebView, plus (for a host that re-renders
-/// the captured texture into the same window) recursively
-/// captured frames.
+/// `_source_rect_unused`, when `Some`, *was* an attempt to crop
+/// to the WKWebView's window-region via
+/// `SCStreamConfiguration::setSourceRect:`. Apple documents this
+/// value as ignored when the filter targets a single window
+/// (which `initWithDesktopIndependentWindow:` does):
 ///
-/// Compute via [`webview_window_rect`] and pass through
-/// `start_capture` / `start_capture_async` / `resize_internal`.
+/// > "The system doesn't reference this value when you capture a
+/// > single window."
+/// > <https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/3919829-sourcerect>
+///
+/// So the parameter is plumbed but the call to `setSourceRect:`
+/// is *not* made — it'd be a no-op masquerading as a crop. We
+/// keep the rect computation in [`webview_window_rect`] because
+/// downstream consumers can use it (it's the rect they'd want to
+/// crop client-side), and because a future fix here will need
+/// the same math. **Known limitation**: the imported texture is
+/// the full host window; consumers compositing the texture must
+/// crop to the webview's rect themselves.
+///
+/// Three paths to a real crop, in increasing structural cost:
+/// 1. Display-style filter (`initWithDisplay:includingWindows:`)
+///    + `sourceRect` in screen coords — `sourceRect` is honored
+///    for display captures. Trade-off: any popover or floating
+///    window over the webview's screen region appears in the
+///    capture.
+/// 2. A Metal blit on every captured frame inside
+///    `try_acquire_frame`: source IOSurface-backed texture →
+///    cropped destination texture sized to the webview's rect.
+///    ~1 ms/frame on Apple silicon. Doesn't change the
+///    integration model.
+/// 3. A dedicated borderless `NSWindow` whose content view is the
+///    WKWebView (instead of subview-of-parent), parent-attached
+///    to the host's window. SCK then captures that single
+///    webview-sized window via `initWithDesktopIndependentWindow:`
+///    cleanly. Cleanest long-term but changes the producer's
+///    constructor contract.
 pub(super) fn make_stream_configuration(
     size: PhysicalSize<u32>,
-    source_rect: Option<objc2_core_foundation::CGRect>,
+    _source_rect_unused: Option<objc2_core_foundation::CGRect>,
 ) -> Retained<SCStreamConfiguration> {
     unsafe {
         let cfg = SCStreamConfiguration::new();
@@ -256,21 +280,24 @@ pub(super) fn make_stream_configuration(
         // Keep the most recent frame; older frames in flight are
         // OK to drop.
         cfg.setQueueDepth(3);
-        if let Some(rect) = source_rect {
-            cfg.setSourceRect(rect);
-        }
         cfg
     }
 }
 
 /// Compute the WKWebView's rect within its host window, in
-/// **points** with **top-left origin** — the coordinate system
-/// SCK's `setSourceRect:` expects for window-bound streams.
+/// **points** with **top-left origin**.
+///
+/// Today's [`make_stream_configuration`] doesn't use this for a
+/// real SCK source-rect crop (Apple ignores `sourceRect` for
+/// single-window filters — see that function's doc), but the
+/// computation is correct and useful for any of the three
+/// real-fix paths it documents (and for consumers cropping the
+/// captured texture themselves).
 ///
 /// AppKit's `convertRect_toView(.., None)` lifts the webview's
 /// `bounds` into window coords (bottom-left origin). We then flip
 /// Y against the window's content-view height so the rect aligns
-/// with SCK's top-left convention.
+/// with SCK's / Core Graphics' top-left convention.
 pub(super) fn webview_window_rect(
     webview: &objc2_web_kit::WKWebView,
     window: &objc2_app_kit::NSWindow,
