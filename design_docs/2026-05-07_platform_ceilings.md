@@ -713,7 +713,15 @@ limitations.
   silicon. The imported texture's dimensions match the
   webview's pixel rect — no host chrome, no recursive capture
   even when the consumer composites the texture back into the
-  same window.
+  same window. The crop's Y origin lives in window-frame
+  top-left coords (chrome height is added on top of the
+  content-view-relative Y flip) so the title-bar region of the
+  captured texture is excluded; `try_acquire_frame` rejects
+  in-flight pre-resize samples whose IOSurface dimensions
+  differ from the current host-window pixel size, so SCK's
+  push-model "deliver one or two more samples after
+  `updateConfiguration:` then go quiet" doesn't leave a
+  stale-stretched frame on screen across a resize.
 
 **Outstanding for follow-up slices:**
 

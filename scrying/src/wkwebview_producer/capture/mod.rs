@@ -259,26 +259,35 @@ pub(super) fn make_stream_configuration(
         // without a format swizzle pass.
         cfg.setPixelFormat(kCVPixelFormatType_32BGRA);
         cfg.setShowsCursor(false);
-        // Keep the most recent frame; older frames in flight are
-        // OK to drop.
-        cfg.setQueueDepth(3);
+        // Our consumer only ever keeps the latest sample (the
+        // `LatestSample` Mutex overwrites on each callback), so
+        // we can afford a shallow queue. Smaller depth = less
+        // pipeline latency between WebKit render and demo present.
+        cfg.setQueueDepth(2);
         cfg
     }
 }
 
-/// Compute the host window's pixel dimensions (points × backing
-/// scale). The SCK stream is configured to this size so the
-/// captured IOSurface preserves the full window at native
-/// resolution — `try_acquire_frame` then blits the WKWebView's
-/// pixel rect out of it.
+/// Compute the host window's pixel dimensions (window-frame
+/// points × backing scale). The SCK stream is configured to this
+/// size so the captured IOSurface preserves the full window at
+/// native resolution; `try_acquire_frame` then blits the
+/// WKWebView's pixel rect out of it.
+///
+/// Uses `window.frame()` (full frame including the title bar) —
+/// **not** `contentView().frame()`. SCK's
+/// `initWithDesktopIndependentWindow:` filter captures the entire
+/// window including its chrome; if we configured SCK to a
+/// content-view-only size, SCK would scale the chrome+content
+/// pair down to fit, putting the WKWebView's pixels at unexpected
+/// coordinates (and bleeding the title bar into the imported
+/// texture). At full frame size SCK doesn't scale, and our crop
+/// can pin the webview's region precisely.
 pub(super) fn host_window_pixel_size(
     window: &objc2_app_kit::NSWindow,
 ) -> PhysicalSize<u32> {
     let scale = window.backingScaleFactor().max(1.0);
-    let frame = window
-        .contentView()
-        .map(|cv| cv.frame())
-        .unwrap_or_else(|| window.frame());
+    let frame = window.frame();
     PhysicalSize::new(
         ((frame.size.width * scale).round() as u32).max(1),
         ((frame.size.height * scale).round() as u32).max(1),
@@ -286,19 +295,22 @@ pub(super) fn host_window_pixel_size(
 }
 
 /// Compute the WKWebView's rect within its host window, in
-/// **points** with **top-left origin**.
+/// **points** with **top-left origin** measured from the
+/// window's frame top edge (i.e. *including* the chrome/title-bar
+/// region above the content view).
 ///
-/// Today's [`make_stream_configuration`] doesn't use this for a
-/// real SCK source-rect crop (Apple ignores `sourceRect` for
-/// single-window filters — see that function's doc), but the
-/// computation is correct and useful for any of the three
-/// real-fix paths it documents (and for consumers cropping the
-/// captured texture themselves).
+/// This matches the coordinate space of the SCK-captured texture:
+/// `initWithDesktopIndependentWindow:` captures the entire
+/// window — title bar plus content — so a crop into the captured
+/// texture must measure Y from the top of the title bar, not the
+/// top of the content view.
 ///
 /// AppKit's `convertRect_toView(.., None)` lifts the webview's
-/// `bounds` into window coords (bottom-left origin). We then flip
-/// Y against the window's content-view height so the rect aligns
-/// with SCK's / Core Graphics' top-left convention.
+/// `bounds` into window coords (bottom-left origin, content-view
+/// relative). We flip Y against the content-view height to reach
+/// content-view-top-left, then add the chrome height
+/// (`window.frame().height - contentView.frame().height`) to
+/// reach window-frame-top-left.
 pub(super) fn webview_window_rect(
     webview: &objc2_web_kit::WKWebView,
     window: &objc2_app_kit::NSWindow,
@@ -306,14 +318,19 @@ pub(super) fn webview_window_rect(
     let local_bounds = webview.bounds();
     let window_pt_rect =
         webview.convertRect_toView(local_bounds, None);
+    let frame_height = window.frame().size.height;
     let content_height = window
         .contentView()
         .map(|cv| cv.frame().size.height)
-        .unwrap_or_else(|| window.frame().size.height);
+        .unwrap_or(frame_height);
+    let chrome_height = (frame_height - content_height).max(0.0);
+    let y_in_content_top =
+        content_height - window_pt_rect.origin.y - window_pt_rect.size.height;
+    let y_in_frame_top = y_in_content_top + chrome_height;
     objc2_core_foundation::CGRect {
         origin: objc2_core_foundation::CGPoint {
             x: window_pt_rect.origin.x,
-            y: content_height - window_pt_rect.origin.y - window_pt_rect.size.height,
+            y: y_in_frame_top,
         },
         size: objc2_core_foundation::CGSize {
             width: window_pt_rect.size.width,

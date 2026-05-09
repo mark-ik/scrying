@@ -412,6 +412,28 @@ impl WkWebViewProducer {
         let source_width = CVPixelBufferGetWidth(pixel_buffer);
         let source_height = CVPixelBufferGetHeight(pixel_buffer);
 
+        // Reject stale samples whose IOSurface was sized for a
+        // pre-resize window. After a resize we push a new
+        // `SCStreamConfiguration` via `updateConfiguration:`, but
+        // SCK can still flush one or two in-flight samples at the
+        // *previous* dimensions. Importing those would render the
+        // old layout stretched over the new right-half rect — a
+        // visible artifact that lingers because a static page
+        // rarely re-triggers SCK delivery. Treat the mismatched
+        // sample as "no frame yet"; the next post-resize sample
+        // arrives at the matching dims.
+        let host_window_for_dims = self.webview.window().ok_or_else(|| {
+            WryWebSurfaceError::Platform(
+                "WKWebView's host window vanished mid-capture".into(),
+            )
+        })?;
+        let expected_dims = super::host_window_pixel_size(&host_window_for_dims);
+        if source_width as u32 != expected_dims.width
+            || source_height as u32 != expected_dims.height
+        {
+            return Ok(None);
+        }
+
         // Wrap the IOSurface as a transient source MTLTexture.
         // We don't hand this out — it's the full host-window
         // capture; we blit a sub-rect of it into a webview-sized
@@ -442,11 +464,7 @@ impl WkWebViewProducer {
         // `SCStreamConfiguration::width/height` to match (no
         // scaling), so the source rect is just the webview's
         // window-coords rect × backing scale.
-        let host_window = self.webview.window().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
-                "WKWebView's host window vanished mid-capture".into(),
-            )
-        })?;
+        let host_window = host_window_for_dims;
         let webview_rect_pts =
             super::webview_window_rect(&self.webview, &host_window);
         let scale = host_window.backingScaleFactor().max(1.0);

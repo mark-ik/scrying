@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use scrying::{
-    HostWgpuContext, ImportOptions, NativeFrame, TextureImporter, WgpuTextureImporter,
-    WryWebSurfaceFrame,
+    HostWgpuContext, ImportOptions, ImportedTexture, NativeFrame, TextureImporter,
+    WgpuTextureImporter, WryWebSurfaceFrame,
 };
 use scrying::WkWebViewProducer;
 use winit::window::Window;
@@ -20,16 +20,20 @@ struct VsOut {
 
 @vertex
 fn vs(@builtin(vertex_index) vid: u32) -> VsOut {
-    // Full-screen triangle. Three vertices, output covers the whole
-    // viewport so a single triangle fills the screen.
+    // Full-screen triangle covers the whole NDC viewport. The
+    // fragment shader discards the left half so the WKWebView
+    // subview shows through unobstructed there; the right half
+    // displays the imported texture at native aspect (UV maps the
+    // texture's full 0..1 range onto NDC x in [0..1]).
     let x = f32((vid & 1u) << 2u) - 1.0;
     let y = f32((vid & 2u) << 1u) - 1.0;
     var out: VsOut;
     out.pos = vec4<f32>(x, y, 0.0, 1.0);
-    // Sample-coords: 0..1 with Y flipped because Metal textures from
-    // ScreenCaptureKit follow the IOSurface (top-left) origin while
-    // wgpu's NDC is bottom-left.
-    out.uv = vec2<f32>((x + 1.0) * 0.5, 1.0 - (y + 1.0) * 0.5);
+    // UV.x = NDC x: negative on the left half (discarded), 0..1
+    // across the right half. UV.y is Y-flipped because IOSurface /
+    // SCK textures use a top-left origin while wgpu NDC is
+    // bottom-left.
+    out.uv = vec2<f32>(x, 1.0 - (y + 1.0) * 0.5);
     return out;
 }
 
@@ -38,16 +42,10 @@ fn vs(@builtin(vertex_index) vid: u32) -> VsOut {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    let tex = textureSample(src_tex, src_sam, in.uv);
-    // Apply a subtle right-half tint so the user can visually
-    // distinguish the wgpu-imported render from the directly-composited
-    // WKWebView subview occupying the left half. If the tint shows on
-    // the right, the import path is alive.
-    if (in.uv.x > 0.5) {
-        return vec4<f32>(tex.rgb * vec3<f32>(1.1, 0.9, 0.9), tex.a);
-    } else {
-        return tex;
+    if (in.uv.x < 0.0) {
+        discard;
     }
+    return textureSample(src_tex, src_sam, in.uv);
 }
 "#;
 
@@ -73,6 +71,11 @@ pub struct WgpuRender {
     /// so the dump indices remain monotonic even when `dump_every`
     /// is changed live.
     pub dumps_written: u64,
+    /// Most recent imported texture. SCK delivers samples on its
+    /// own cadence; on frames where `try_acquire_frame` has no new
+    /// sample ready we re-render the previous one rather than
+    /// clearing — otherwise the right half blanks on every miss.
+    last_imported: Option<ImportedTexture>,
 }
 
 impl WgpuRender {
@@ -209,6 +212,7 @@ impl WgpuRender {
             frames_drawn: 0,
             dump_every: None,
             dumps_written: 0,
+            last_imported: None,
         })
     }
 
@@ -311,6 +315,11 @@ impl WgpuRender {
         self.surface_config.width = width.max(1);
         self.surface_config.height = height.max(1);
         self.surface.configure(&self.device, &self.surface_config);
+        // Drop the cached pre-resize texture: its pixel dimensions
+        // are stale and stretching them over the new right-half
+        // shows a briefly distorted page until SCK delivers a new
+        // sample at the new window size.
+        self.last_imported = None;
     }
 
     pub fn render(
@@ -318,7 +327,7 @@ impl WgpuRender {
         producer: &mut WkWebViewProducer,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let frame_result = producer.try_acquire_frame();
-        let imported_texture = match frame_result {
+        let new_imported = match frame_result {
             Ok(Some(WryWebSurfaceFrame::Native(NativeFrame::MetalTextureRef(frame)))) => {
                 let native = NativeFrame::MetalTextureRef(frame);
                 match self.importer.import_frame(&native, &ImportOptions::default()) {
@@ -331,6 +340,20 @@ impl WgpuRender {
             }
             Ok(_) | Err(_) => None,
         };
+
+        // Optional readback of the *fresh* import only — re-dumping a
+        // cached frame would just produce duplicate PNGs.
+        if let Some(new) = new_imported.as_ref()
+            && let Some(every) = self.dump_every
+            && every > 0
+            && self.frames_drawn.is_multiple_of(every)
+            && let Err(e) = self.dump_imported_texture(&new.texture)
+        {
+            eprintln!("demo-mac: dump_imported_texture failed: {e}");
+        }
+        if new_imported.is_some() {
+            self.last_imported = new_imported;
+        }
 
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -352,16 +375,7 @@ impl WgpuRender {
                 label: Some("demo-mac-encoder"),
             });
 
-        if let Some(imported) = imported_texture {
-            // Optional readback for end-to-end pixel-faithfulness
-            // verification. Decoupled from the render pass so the
-            // map/poll synchrony doesn't stall the surface present.
-            if let Some(every) = self.dump_every
-                && every > 0 && self.frames_drawn.is_multiple_of(every)
-                    && let Err(e) = self.dump_imported_texture(&imported.texture) {
-                        eprintln!("demo-mac: dump_imported_texture failed: {e}");
-                    }
-
+        if let Some(imported) = self.last_imported.as_ref() {
             let imported_view = imported
                 .texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
