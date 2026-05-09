@@ -847,13 +847,21 @@ checklist deliberately omits.
   `WKPreferences` toggles, plus AppKit's Look-Up / Services
   menu integration on text selections. Mostly free on macOS;
   just needs API surface.
-- WebRTC capture lifecycle observability — once permission is
-  granted, the page can `getUserMedia` repeatedly without the
-  host knowing. WebKit fires no public-API "camera in use"
-  callback. Browser chrome wants this for the red-dot
-  indicator; would need to rely on the permission-grant event
-  paired with a JS user-script that polls
-  `navigator.mediaDevices`.
+- ✅ WebRTC capture lifecycle observability — JS user-script
+  injected at `AtDocumentStart` monkey-patches
+  `navigator.mediaDevices.getUserMedia`, increments per-kind
+  track counters on each successful capture, and decrements them
+  via `track.ended` listeners. Posts `audio:N,video:M` strings to
+  a dedicated `scryingMediaCapture` `WKScriptMessageHandler`
+  which parses and emits
+  [`crate::NavigationEvent::MediaCaptureStateChanged { audio_active_tracks, video_active_tracks }`]
+  onto the producer's nav-event queue. Counts (not booleans) so
+  hosts can distinguish "1 mic" from "2 mics" if they want; a
+  red-dot indicator is just `>0`. Caveats: pages that replace
+  `navigator.mediaDevices` or `getUserMedia` *before* the
+  user-script runs escape the wrap (rare in practice; document-
+  start injection wins the race against most page code), and
+  counters reset to zero per top-level navigation.
 - Pre-composition extraction — capture the WebView's
   `CALayer.contents` directly via `CARenderer` / `IOSurface`,
   bypassing the WindowServer composite. Would also kill the

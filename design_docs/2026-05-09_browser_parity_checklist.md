@@ -95,7 +95,7 @@ yet.
 | Auth challenges (events + host-driven disposition) | ✅ | ✅ | ? | Option A (events) + Option B (`set_auth_handler`) both shipped |
 | Auth during downloads (mid-stream / post-promotion) | ⏳ | ? | ? | Edge case; current shape adequate for most consumers |
 | Permission handlers (camera / mic / orientation) | ✅ | ✅ | ? | `set_permission_handler` returns `Allow` / `Deny` / `Prompt` |
-| WebRTC capture lifecycle observability | ⏳ | ⏳ | ⏳ | Page can `getUserMedia` repeatedly post-grant without host knowing — needed for "red-dot" indicator |
+| WebRTC capture lifecycle observability | ✅ | ⏳ | ⏳ | JS user-script monkey-patches `navigator.mediaDevices.getUserMedia`, tracks `track.ended`; emits `NavigationEvent::MediaCaptureStateChanged { audio_active_tracks, video_active_tracks }`. Counters reset per top-level navigation |
 | Title-changed notifications | ✅ | ✅ | ? | KVO on `WKWebView::title` |
 | Downloads pipeline (id-correlated, host destination, cancel, resume) | ✅ | ✅ | ? | `DownloadId`, `set_download_handler`, `cancel_download`, `resume_download` |
 | Content blocking (`WKContentRuleList` / AdBlock-shape) | ✅ | ⏳ | ⏳ | `compile_and_apply_content_rule_list(id, json)` compiles via `WKContentRuleListStore::defaultStore` and attaches to the UCC on main-thread completion; `clear_all_content_rule_lists` detaches all |

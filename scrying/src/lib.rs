@@ -321,6 +321,26 @@ pub enum NavigationEvent {
         destination_path: std::path::PathBuf,
         resume_data: Option<Vec<u8>>,
     },
+    /// The page's WebRTC capture state changed — at least one
+    /// `getUserMedia` track started or ended since the last
+    /// emission. `audio_active_tracks` / `video_active_tracks` are
+    /// counts (not booleans) so a host that wants a "red-dot
+    /// indicator" can show it whenever `>0`, while a host that
+    /// wants to itemize active streams can still distinguish
+    /// "1 mic" from "2 mics."
+    ///
+    /// Apple's `WKWebView` exposes no public-API hook for tracking
+    /// active capture; this event is delivered via a JS user-script
+    /// that monkey-patches `navigator.mediaDevices.getUserMedia` and
+    /// listens for `track.ended`. Pages that replace `getUserMedia`
+    /// before our script installs (or `navigator.mediaDevices`
+    /// itself) fall outside the wrap and will not emit this event;
+    /// for those edge cases the host should fall back to
+    /// inspecting [`PermissionRequest`] grants.
+    MediaCaptureStateChanged {
+        audio_active_tracks: u32,
+        video_active_tracks: u32,
+    },
     /// The user right-clicked inside the page. The producer
     /// suppresses WebKit's default context menu and emits this
     /// event so a browser-class consumer can show its own — usually
