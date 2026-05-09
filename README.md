@@ -2,8 +2,6 @@
 
 Capability-driven system-webview frame adapter — scry into WebView2/WKWebView/WebKitGTK and surface frames the host renderer can consume.
 
-The name comes from *scrying* — gazing into a reflective surface for visions. The webview is the surface; the captured frame is the vision; this crate is the lens.
-
 This repo was extracted from [`wgpu-graft`](https://github.com/mark-ik/wgpu-graft) on 2026-05-05 so that system-webview frame production has its own place to evolve. `wgpu-graft` is now the Servo testbed (Servo embedding demos + GL-FBO interop). `scrying` owns its native-frame import path in-tree as the [`scrying::native_frame`](scrying/src/native_frame/) module, structurally derived from Slint's [Servo embedding example](https://github.com/slint-ui/slint/tree/master/examples/servo) (see [NOTICE](NOTICE)).
 
 ## Workspace
