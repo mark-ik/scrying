@@ -82,17 +82,33 @@ impl WryWebSurfaceCapabilities {
     pub fn probe(host: Option<&HostWgpuContext>) -> Self {
         match SystemWebviewBackend::detect() {
             SystemWebviewBackend::WebView2 => probe_webview2(host),
-            SystemWebviewBackend::WkWebView => Self {
-                backend: SystemWebviewBackend::WkWebView,
-                preferred_mode: WebSurfaceMode::NativeChildOverlay,
-                imported_texture: CapabilityStatus::Unsupported(
-                    crate::native_frame::UnsupportedReason::NativeImportNotYetImplemented,
-                ),
-                native_child_overlay: CapabilityStatus::Supported,
-                cpu_snapshot: CapabilityStatus::Supported,
-                supported_frames: Vec::new(),
-                reason: "WKWebView snapshot capture is useful as a fallback, but no Metal texture producer is wired.",
-            },
+            SystemWebviewBackend::WkWebView => {
+                let imported_texture = match host.map(|h| h.backend) {
+                    Some(InteropBackend::Metal) => CapabilityStatus::Supported,
+                    Some(_) => CapabilityStatus::Unsupported(
+                        crate::native_frame::UnsupportedReason::HostBackendMismatch,
+                    ),
+                    None => CapabilityStatus::Unsupported(
+                        crate::native_frame::UnsupportedReason::HostBackendUnavailable,
+                    ),
+                };
+                Self {
+                    backend: SystemWebviewBackend::WkWebView,
+                    // ImportedTexture only when the host's wgpu
+                    // device is Metal — that's the only case
+                    // ScreenCaptureKit's IOSurface→MTLTexture path
+                    // can hand us a wgpu-importable handle.
+                    preferred_mode: match imported_texture {
+                        CapabilityStatus::Supported => WebSurfaceMode::ImportedTexture,
+                        _ => WebSurfaceMode::NativeChildOverlay,
+                    },
+                    imported_texture,
+                    native_child_overlay: CapabilityStatus::Supported,
+                    cpu_snapshot: CapabilityStatus::Supported,
+                    supported_frames: vec![NativeFrameKind::MetalTextureRef],
+                    reason: "WKWebView producer: ScreenCaptureKit → IOSurface → MTLTexture path is wired (requires Screen Recording permission and a Metal-backed host wgpu device); falls back to NativeChildOverlay if the host isn't on Metal, and CpuSnapshot via takeSnapshot: is always available.",
+                }
+            }
             SystemWebviewBackend::WebKitGtk => Self {
                 backend: SystemWebviewBackend::WebKitGtk,
                 preferred_mode: WebSurfaceMode::NativeChildOverlay,
