@@ -15,7 +15,8 @@ use objc2_foundation::{
 };
 use objc2::runtime::ProtocolObject;
 use objc2_web_kit::{
-    WKDownload, WKFindConfiguration, WKFindResult, WKHTTPCookieStore, WKPDFConfiguration,
+    WKContentRuleList, WKContentRuleListStore, WKDownload, WKFindConfiguration, WKFindResult,
+    WKHTTPCookieStore, WKPDFConfiguration,
 };
 
 use crate::{
@@ -723,6 +724,108 @@ impl WkWebViewProducer {
             )
         })?;
         *slot = Some(handler);
+        Ok(())
+    }
+
+    /// Compile a `WKContentRuleList` JSON rule list and attach it
+    /// to the producer's `WKUserContentController`. Fire-and-forget:
+    /// compile happens asynchronously on a WebKit-private queue,
+    /// then the completion handler attaches the resulting list to
+    /// the UCC on the main thread. Errors are logged to stderr —
+    /// for a typical browser-class consumer, content blocking
+    /// failing to load is non-fatal (rules are best-effort), and
+    /// surfacing per-compile success / failure would clutter the
+    /// API surface.
+    ///
+    /// `identifier` is a stable name for the rule list; Apple's
+    /// store caches the *compiled* output on disk under it, so
+    /// calling this method again with the same identifier and
+    /// (likely) the same JSON is fast — WebKit re-loads the
+    /// pre-compiled blob rather than re-parsing.
+    ///
+    /// `encoded_json` is the AdBlock-shape rule list (an array of
+    /// `{"trigger": ..., "action": ...}` objects). See Apple's
+    /// `WKContentRuleList` documentation for the schema. Invalid
+    /// JSON or unsupported actions surface as a logged error and
+    /// no list attachment.
+    ///
+    /// To replace an applied rule list, compile under the same
+    /// identifier with new JSON; to remove all attached lists, use
+    /// [`Self::clear_all_content_rule_lists`].
+    pub fn compile_and_apply_content_rule_list(
+        &mut self,
+        identifier: &str,
+        encoded_json: &str,
+    ) -> Result<(), WryWebSurfaceError> {
+        let mtm = MainThreadMarker::new().ok_or_else(|| {
+            WryWebSurfaceError::Platform(
+                "compile_and_apply_content_rule_list must be called on the main thread"
+                    .into(),
+            )
+        })?;
+        let store = unsafe { WKContentRuleListStore::defaultStore(mtm) }.ok_or_else(
+            || WryWebSurfaceError::Platform(
+                "WKContentRuleListStore::defaultStore returned nil".into(),
+            ),
+        )?;
+        let identifier_owned = identifier.to_string();
+        let identifier_ns = NSString::from_str(identifier);
+        let json_ns = NSString::from_str(encoded_json);
+        let ucc = unsafe { self.webview().configuration().userContentController() };
+        let block = RcBlock::new(
+            move |list: *mut WKContentRuleList, err: *mut NSError| {
+                if !err.is_null() {
+                    let msg = unsafe { (*err).localizedDescription() }.to_string();
+                    eprintln!(
+                        "scrying: WKContentRuleList compile failed for {identifier_owned:?}: {msg}"
+                    );
+                    return;
+                }
+                let Some(list_ptr) = std::ptr::NonNull::new(list) else {
+                    eprintln!(
+                        "scrying: WKContentRuleList compile returned nil with no error for {identifier_owned:?}"
+                    );
+                    return;
+                };
+                // SAFETY: WebKit hands us a +0 borrow; retain so
+                // the WKContentRuleList outlives this completion
+                // (the UCC will hold its own retain through
+                // `addContentRuleList`, but we don't strictly own
+                // a strong ref otherwise).
+                let Some(retained) = (unsafe { Retained::retain(list_ptr.as_ptr()) })
+                else {
+                    eprintln!(
+                        "scrying: Retained::retain on WKContentRuleList returned None for {identifier_owned:?}"
+                    );
+                    return;
+                };
+                unsafe { ucc.addContentRuleList(&retained) };
+            },
+        );
+        unsafe {
+            store.compileContentRuleListForIdentifier_encodedContentRuleList_completionHandler(
+                Some(&identifier_ns),
+                Some(&json_ns),
+                Some(&block),
+            );
+        }
+        Ok(())
+    }
+
+    /// Detach every `WKContentRuleList` previously compiled and
+    /// attached via [`Self::compile_and_apply_content_rule_list`].
+    /// Synchronous — the WKUserContentController call returns
+    /// immediately. Apple's content-rule-list *store* keeps the
+    /// compiled blobs on disk regardless; this only undoes the
+    /// per-WKWebView attachment.
+    pub fn clear_all_content_rule_lists(&mut self) -> Result<(), WryWebSurfaceError> {
+        if MainThreadMarker::new().is_none() {
+            return Err(WryWebSurfaceError::Platform(
+                "clear_all_content_rule_lists must be called on the main thread".into(),
+            ));
+        }
+        let ucc = unsafe { self.webview().configuration().userContentController() };
+        unsafe { ucc.removeAllContentRuleLists() };
         Ok(())
     }
 

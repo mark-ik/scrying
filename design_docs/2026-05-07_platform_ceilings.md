@@ -793,11 +793,20 @@ checklist deliberately omits.
   but interactive `NSPrintOperation` (page-range UI, printer
   selection, preview) hasn't. `WKWebView::printOperationWithPrintInfo:`
   is the entry point.
-- Content blocking — `WKContentRuleList` accepts JSON rule
-  lists (AdBlock-shape: trigger / action pairs). Compile at
-  startup via `WKContentRuleListStore::compileContentRuleList`;
-  attach to the configuration's `WKUserContentController`. No
-  SPI; works on macOS 10.13+.
+- ✅ Content blocking —
+  `WkWebViewProducer::compile_and_apply_content_rule_list(identifier,
+  encoded_json)` compiles AdBlock-shape JSON rule lists via
+  `WKContentRuleListStore::defaultStore` and, on the main-thread
+  completion, attaches the resulting `WKContentRuleList` to the
+  configuration's `WKUserContentController`. Fire-and-forget —
+  compile failures (invalid JSON, unsupported actions) log to
+  stderr rather than surfacing through the API since rules are
+  best-effort and a silent skip is the right semantic. Apple's
+  store caches the compiled blob on disk under the identifier,
+  so re-compilation with the same id-and-json pair is fast.
+  `clear_all_content_rule_lists` detaches every applied list
+  (per-identifier removal is YAGNI for now). No SPI; works on
+  macOS 10.13+.
 - ✅ Cookie / storage observation —
   `WkWebViewProducer::set_cookie_change_handler` /
   `clear_cookie_change_handler` register a `Box<dyn Fn() + Send +
