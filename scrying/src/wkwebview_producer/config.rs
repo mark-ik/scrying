@@ -58,6 +58,20 @@ pub struct WkWebViewProducerConfig {
     /// pick at producer-construction time;
     /// `WkWebViewProducer::set_color_pipeline` flips it live.
     pub color_pipeline: ColorPipeline,
+    /// Override the page's `spellcheck` attribute on
+    /// `<input>` / `<textarea>` / `[contenteditable]` elements.
+    /// `None` leaves the page's own default in place; `Some(true)`
+    /// forces spell-checking on, `Some(false)` forces it off.
+    ///
+    /// This is a *best-effort* knob: WKWebView has no public-API
+    /// engine-level spellcheck toggle. The producer injects a
+    /// document-start user-script that walks editable elements
+    /// and sets `spellcheck="true|false"`, plus a
+    /// `MutationObserver` to catch nodes added later. Pages that
+    /// dynamically rewrite the attribute themselves can win the
+    /// last-write race; pages that respect the attribute (the
+    /// vast majority) honor the host's choice.
+    pub spellcheck_override: Option<bool>,
 }
 
 impl WkWebViewProducerConfig {
@@ -73,6 +87,7 @@ impl WkWebViewProducerConfig {
             download_dir,
             non_persistent: false,
             color_pipeline: ColorPipeline::Srgb,
+            spellcheck_override: None,
         }
     }
 

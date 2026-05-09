@@ -921,16 +921,31 @@ checklist deliberately omits.
   is wired for macOS 13.3+, but the Safari → Develop menu →
   attach flow isn't documented anywhere; downstream consumers
   hit it cold. Doc-only slice.
-- Autofill / Keychain — credential save / suggest plumbing.
-  Mostly system-driven via `NSSecureTextField` autofill and
-  Safari Keychain on macOS, but the host typically wants
-  opt-in (per-profile), and there's no public-API hook.
-  Probably ships as "configurable: yes / no" with no finer
-  control.
-- Spellcheck / autocorrect controls — page-side
-  `WKPreferences` toggles, plus AppKit's Look-Up / Services
-  menu integration on text selections. Mostly free on macOS;
-  just needs API surface.
+- ✅ Autofill / Keychain integration — system-driven on macOS,
+  no producer-level code required. Apple's Keychain plus
+  AppKit's `NSSecureTextField` handle credential save /
+  suggest transparently for `<input type="password">` and
+  `autocomplete`-tagged fields whenever the WKWebView is
+  hosted in a focused, frontmost window. Per-profile
+  credential isolation falls out of the existing
+  `WKWebsiteDataStore` selection driven by
+  [`WkWebViewProducerConfig::data_dir`] /
+  `non_persistent`: a non-persistent (incognito) producer
+  doesn't touch the persistent Keychain entries; persistent
+  producers at distinct `data_dir`s get their own per-profile
+  storage namespaces.
+- ✅ Spellcheck / autocorrect controls — best-effort knob via
+  [`WkWebViewProducerConfig::spellcheck_override`]
+  (`Option<bool>`). When `Some(b)`, the producer injects a
+  document-start user-script that walks
+  `<input>` / `<textarea>` / `[contenteditable]` elements
+  and sets `spellcheck="true|false"` accordingly, plus a
+  `MutationObserver` on `document.documentElement` to catch
+  later-added nodes. WKWebView has no public-API engine-level
+  spellcheck toggle, so a JS-attribute override is the best
+  scrying can do without falling back to `_WK*` SPI; pages
+  that respect the standard `spellcheck` attribute (the
+  vast majority) honor it.
 - ✅ WebRTC capture lifecycle observability — JS user-script
   injected at `AtDocumentStart` monkey-patches
   `navigator.mediaDevices.getUserMedia`, increments per-kind

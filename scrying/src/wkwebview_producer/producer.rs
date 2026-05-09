@@ -390,6 +390,54 @@ impl WkWebViewProducer {
                 false,
             );
             user_content_controller.addUserScript(&drop_script);
+            // Best-effort spell-check override (no public API on
+            // WKWebView for engine-level toggle). Skipped when
+            // `spellcheck_override` is `None` so we don't churn
+            // page state for no reason; otherwise injects a
+            // document-start script that walks editables now and
+            // a `MutationObserver` to catch later-added nodes.
+            if let Some(value) = config.spellcheck_override {
+                let value_literal = if value { "true" } else { "false" };
+                let source = format!(
+                    r#"(function() {{
+    if (window.__scryingSpellcheckInstalled) return;
+    window.__scryingSpellcheckInstalled = true;
+    var v = '{value_literal}';
+    function apply(el) {{
+        if (el && el.setAttribute) {{
+            try {{ el.setAttribute('spellcheck', v); }} catch (_) {{}}
+        }}
+    }}
+    function applyAll(root) {{
+        if (!root || !root.querySelectorAll) return;
+        root.querySelectorAll('input, textarea, [contenteditable]').forEach(apply);
+    }}
+    applyAll(document);
+    var observer = new MutationObserver(function(muts) {{
+        muts.forEach(function(m) {{
+            m.addedNodes.forEach(function(n) {{
+                if (n.nodeType === 1) {{
+                    apply(n);
+                    applyAll(n);
+                }}
+            }});
+        }});
+    }});
+    observer.observe(document.documentElement || document.body, {{
+        childList: true, subtree: true,
+    }});
+}})();"#
+                );
+                let source_ns = NSString::from_str(&source);
+                let spellcheck_script =
+                    WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                        WKUserScript::alloc(mtm),
+                        &source_ns,
+                        WKUserScriptInjectionTime::AtDocumentStart,
+                        false,
+                    );
+                user_content_controller.addUserScript(&spellcheck_script);
+            }
         }
 
         let webview: Retained<WKWebView> = unsafe {

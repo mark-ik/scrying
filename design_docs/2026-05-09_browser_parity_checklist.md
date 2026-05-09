@@ -100,8 +100,8 @@ yet.
 | Title-changed notifications | ✅ | ✅ | ? | KVO on `WKWebView::title` |
 | Downloads pipeline (id-correlated, host destination, cancel, resume) | ✅ | ✅ | ? | `DownloadId`, `set_download_handler`, `cancel_download`, `resume_download` |
 | Content blocking (`WKContentRuleList` / AdBlock-shape) | ✅ | ⏳ | ⏳ | `compile_and_apply_content_rule_list(id, json)` compiles via `WKContentRuleListStore::defaultStore` and attaches to the UCC on main-thread completion; `clear_all_content_rule_lists` detaches all |
-| Spellcheck / autocorrect controls | ⏳ | ? | ? | `WKPreferences` toggles + AppKit Look-Up / Services menu integration |
-| Autofill / Keychain integration | ⏳ | ⏳ | ⏳ | System-driven on macOS via `NSSecureTextField` + Safari Keychain; host typically wants per-profile opt-in |
+| Spellcheck / autocorrect controls | ✅ | ? | ? | `WkWebViewProducerConfig::spellcheck_override: Option<bool>` injects a document-start user-script that forces `spellcheck="true"\|"false"` on `<input>` / `<textarea>` / `[contenteditable]` plus a `MutationObserver` for added nodes. Best-effort — WKWebView has no public engine-level toggle |
+| Autofill / Keychain integration | ✅ | ⏳ | ⏳ | System-driven on macOS — Apple's Keychain + AppKit's `NSSecureTextField` handle credential save / suggest transparently for `<input type="password">` and `autocomplete`-tagged fields when the WKWebView is in an active focused window. No producer-level code; documented in design notes. Per-profile credential isolation rides the `WKWebsiteDataStore` chosen via [`WkWebViewProducerConfig::data_dir`] / `non_persistent` |
 | DevTools / Web Inspector remote attach | 📐 | ? | ? | `setInspectable(true)` wired (macOS 13.3+); the "Safari → Develop → attach" flow needs documentation, not code |
 
 ---
