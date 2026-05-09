@@ -1223,14 +1223,51 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::Resized(new_size) => {
-                let physical = if state.capture_kickoff_at.is_some() {
-                    // Capture mode: WebView gets the left half.
+                // The startup code in `App::resumed` wires three
+                // distinct webview layouts depending on flags:
+                //   - capture mode (`--capture`): left half only
+                //     (the wgpu render fills the right half)
+                //   - two-tabs mode (`--two-tabs`): tab 1 in the
+                //     bottom half, tab 2 in the top half (the
+                //     producer's parent NSView is flipped, so
+                //     y=H/2 puts the webview's top edge at the
+                //     screen midpoint)
+                //   - default: webview fills the window
+                // The resize handler has to keep all three
+                // consistent — without this branch tab 2 (which
+                // is *not* `state.producer`) never grows, leaving
+                // the bare NSWindow background visible in the
+                // top-right when the user widens the window.
+                let two_tabs_layout = state.two_tabs_test.is_some();
+                let main_size = if state.capture_kickoff_at.is_some() {
                     PhysicalSize::new(new_size.width / 2, new_size.height)
+                } else if two_tabs_layout {
+                    PhysicalSize::new(new_size.width, new_size.height / 2)
                 } else {
                     PhysicalSize::new(new_size.width, new_size.height)
                 };
-                if let Err(error) = state.producer.resize(physical) {
+                if let Err(error) = state.producer.resize(main_size) {
                     eprintln!("demo-mac: producer resize failed: {error}");
+                }
+                if two_tabs_layout {
+                    let half_h = new_size.height / 2;
+                    if let Err(error) =
+                        state.producer.set_offset(0.0, half_h as f32)
+                    {
+                        eprintln!(
+                            "demo-mac: producer set_offset failed: {error}"
+                        );
+                    }
+                    if let Some(second) = state.second_producer.as_mut() {
+                        if let Err(error) = second.resize(PhysicalSize::new(
+                            new_size.width,
+                            half_h,
+                        )) {
+                            eprintln!(
+                                "demo-mac: second producer resize failed: {error}"
+                            );
+                        }
+                    }
                 }
                 if let Some(render) = state.render.as_mut() {
                     render.resize(new_size.width, new_size.height);
@@ -3881,7 +3918,12 @@ impl AppState {
                 ..ProfileTestState::default()
             }),
             second_producer,
-            two_tabs_deadline: cli.two_tabs.then_some(Duration::from_secs(8)),
+            // Skip the auto-exit timer in --visible mode so the
+            // developer can resize / interact / screenshot without
+            // racing an 8-second clock. Tests still run; they just
+            // don't close the window.
+            two_tabs_deadline: (cli.two_tabs && !cli.visible)
+                .then_some(Duration::from_secs(8)),
             two_tabs_test: cli.two_tabs.then(TwoTabsTestState::default),
             browser_test: cli.browser_test.then(BrowserTestState::default),
             interaction_state_test: cli
