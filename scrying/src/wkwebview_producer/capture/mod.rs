@@ -226,11 +226,23 @@ pub(super) struct CaptureState {
 
 /// Build the [`SCStreamConfiguration`] used by both
 /// [`super::WkWebViewProducer::start_capture`] and live resizes.
-/// Single source of truth for pixel format / cursor / queue depth so
-/// `updateConfiguration:` keeps the non-size parameters consistent
-/// with the original `start_capture`.
+/// Single source of truth for pixel format / cursor / queue depth /
+/// source-rect-cropping so `updateConfiguration:` keeps the non-size
+/// parameters consistent with the original `start_capture`.
+///
+/// `source_rect`, when `Some`, is the rect within the captured
+/// window — in points, top-left origin — that SCK should sample
+/// from. Without this, an `initWithDesktopIndependentWindow`
+/// filter captures the *entire* host window: every pixel of host
+/// chrome around the WKWebView, plus (for a host that re-renders
+/// the captured texture into the same window) recursively
+/// captured frames.
+///
+/// Compute via [`webview_window_rect`] and pass through
+/// `start_capture` / `start_capture_async` / `resize_internal`.
 pub(super) fn make_stream_configuration(
     size: PhysicalSize<u32>,
+    source_rect: Option<objc2_core_foundation::CGRect>,
 ) -> Retained<SCStreamConfiguration> {
     unsafe {
         let cfg = SCStreamConfiguration::new();
@@ -244,7 +256,41 @@ pub(super) fn make_stream_configuration(
         // Keep the most recent frame; older frames in flight are
         // OK to drop.
         cfg.setQueueDepth(3);
+        if let Some(rect) = source_rect {
+            cfg.setSourceRect(rect);
+        }
         cfg
+    }
+}
+
+/// Compute the WKWebView's rect within its host window, in
+/// **points** with **top-left origin** — the coordinate system
+/// SCK's `setSourceRect:` expects for window-bound streams.
+///
+/// AppKit's `convertRect_toView(.., None)` lifts the webview's
+/// `bounds` into window coords (bottom-left origin). We then flip
+/// Y against the window's content-view height so the rect aligns
+/// with SCK's top-left convention.
+pub(super) fn webview_window_rect(
+    webview: &objc2_web_kit::WKWebView,
+    window: &objc2_app_kit::NSWindow,
+) -> objc2_core_foundation::CGRect {
+    let local_bounds = webview.bounds();
+    let window_pt_rect =
+        webview.convertRect_toView(local_bounds, None);
+    let content_height = window
+        .contentView()
+        .map(|cv| cv.frame().size.height)
+        .unwrap_or_else(|| window.frame().size.height);
+    objc2_core_foundation::CGRect {
+        origin: objc2_core_foundation::CGPoint {
+            x: window_pt_rect.origin.x,
+            y: content_height - window_pt_rect.origin.y - window_pt_rect.size.height,
+        },
+        size: objc2_core_foundation::CGSize {
+            width: window_pt_rect.size.width,
+            height: window_pt_rect.size.height,
+        },
     }
 }
 

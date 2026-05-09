@@ -485,6 +485,10 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
         let ns_origin = NSPoint::new(f64::from(x) / scale, f64::from(y) / scale);
         self.webview().setFrameOrigin(ns_origin);
         self.config.offset = (x, y);
+        // Webview moved → SCK source rect now points at the wrong
+        // window region. Push a fresh configuration so the next
+        // captured frame samples the new webview position.
+        self.update_capture_for_layout_change();
         Ok(())
     }
 }

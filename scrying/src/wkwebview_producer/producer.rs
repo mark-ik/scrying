@@ -496,7 +496,6 @@ impl WkWebViewProducer {
         &mut self,
         size: PhysicalSize<u32>,
     ) -> Result<(), WryWebSurfaceError> {
-        use super::capture::make_stream_configuration;
         let scale = self.current_backing_scale();
         let ns_size = NSSize::new(
             f64::from(size.width) / scale,
@@ -504,15 +503,35 @@ impl WkWebViewProducer {
         );
         self.webview.setFrameSize(ns_size);
         self.config.size = size;
-        if let Some(capture) = self.capture.as_ref() {
-            let new_cfg = make_stream_configuration(size);
-            unsafe {
-                capture
-                    .stream
-                    .updateConfiguration_completionHandler(&new_cfg, None);
-            }
-        }
+        self.update_capture_for_layout_change();
         Ok(())
+    }
+
+    /// Push a fresh `SCStreamConfiguration` (with up-to-date
+    /// width/height + source rect) to the live SCK stream after
+    /// the WKWebView's frame changes — either size (`resize`) or
+    /// origin (`set_offset`). No-op when capture isn't running.
+    ///
+    /// Without this, an `initWithDesktopIndependentWindow` filter
+    /// keeps streaming the entire host window: surrounding host
+    /// chrome leaks into the imported texture, and consumers that
+    /// composite the captured texture back into the same window
+    /// recursively capture themselves.
+    pub(super) fn update_capture_for_layout_change(&self) {
+        use super::capture::{make_stream_configuration, webview_window_rect};
+        let Some(capture) = self.capture.as_ref() else {
+            return;
+        };
+        let source_rect = self
+            .webview
+            .window()
+            .map(|w| webview_window_rect(&self.webview, &w));
+        let new_cfg = make_stream_configuration(self.config.size, source_rect);
+        unsafe {
+            capture
+                .stream
+                .updateConfiguration_completionHandler(&new_cfg, None);
+        }
     }
 
     /// Read `NSCursor.currentSystemCursor` and, if the shape differs

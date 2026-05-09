@@ -100,6 +100,12 @@ impl WkWebViewProducer {
         }
         let target_id = target_window_number as u32;
         let target_size = self.config.size;
+        // Compute the source rect on the main thread (now), so the
+        // background block's `make_stream_configuration` call gets
+        // the right region. WKWebView / NSWindow are
+        // MainThreadOnly — we can't reach them from the dispatch
+        // queue the SCK completion fires on.
+        let source_rect = super::webview_window_rect(&self.webview, &host_window);
 
         *self
             .pending_capture
@@ -180,7 +186,8 @@ impl WkWebViewProducer {
                         &target_window,
                     )
                 };
-                let stream_config = make_stream_configuration(target_size);
+                let stream_config =
+                    make_stream_configuration(target_size, Some(source_rect));
                 let stream_error = Arc::new(Mutex::new(None::<String>));
                 let error_delegate = StreamErrorDelegate::new(Arc::clone(&stream_error));
                 let stream = unsafe {

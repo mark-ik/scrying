@@ -111,6 +111,17 @@ impl WkWebViewProducer {
 
         let target_window = self.resolve_target_window(timeout)?;
         let target_size = self.config.size;
+        // Compute the WKWebView's rect within the host window
+        // (points, top-left origin) so SCK only samples webview
+        // pixels — not surrounding host chrome, and not the
+        // recursively-rendered captured texture if the host
+        // composites it back into the same window.
+        let host_window = self.webview.window().ok_or_else(|| {
+            WryWebSurfaceError::Platform(
+                "WKWebView is not in a window — start_capture requires the producer's parent NSView to be embedded in an NSWindow".into(),
+            )
+        })?;
+        let source_rect = super::webview_window_rect(&self.webview, &host_window);
 
         let filter = unsafe {
             SCContentFilter::initWithDesktopIndependentWindow(
@@ -119,7 +130,7 @@ impl WkWebViewProducer {
             )
         };
 
-        let stream_config = make_stream_configuration(target_size);
+        let stream_config = make_stream_configuration(target_size, Some(source_rect));
 
         let stream_error = Arc::new(Mutex::new(None::<String>));
         let error_delegate = StreamErrorDelegate::new(Arc::clone(&stream_error));
