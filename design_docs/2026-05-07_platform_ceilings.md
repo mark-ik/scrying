@@ -702,24 +702,21 @@ limitations.
   assertion); `--two-tabs` asserts each producer's nav events
   stay in its own queue (no cross-talk). Both run in the
   headless suite — `scripts/test-mac.sh` is now 8 modes / 8 PASS.
+- ✅ SCK source-rect crop via per-frame Metal blit —
+  `initWithDesktopIndependentWindow:` captures the entire host
+  window (Apple ignores `sourceRect` for single-window filters);
+  the producer now captures at full window resolution and
+  blit-crops to the WKWebView's pixel rect inside
+  `try_acquire_frame` before handing the texture out.
+  `CaptureState` carries an `MTLCommandQueue` allocated on the
+  host's wgpu Metal device; per-frame cost is ~1 ms on Apple
+  silicon. The imported texture's dimensions match the
+  webview's pixel rect — no host chrome, no recursive capture
+  even when the consumer composites the texture back into the
+  same window.
 
 **Outstanding for follow-up slices:**
 
-- **SCK source-rect crop**: the producer's
-  `initWithDesktopIndependentWindow:` filter captures the
-  *entire* host window. Apple's `setSourceRect:` is documented as
-  ignored for single-window filters
-  ([sourceRect docs](https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/3919829-sourcerect)),
-  so the imported texture leaks host chrome around the WKWebView
-  (and recursively captures itself if the host composites the
-  texture back into the same window — visible in `--capture`'s
-  right-half preview). Three candidate fixes documented inline
-  on `make_stream_configuration`: display-style filter +
-  screen-coords sourceRect; per-frame Metal blit in
-  `try_acquire_frame`; or a dedicated borderless `NSWindow`
-  whose content view is the WKWebView. The Metal-blit path is
-  the lowest-disruption option (~1 ms/frame, no integration-model
-  change) and is the recommended next push.
 - Authentication during downloads — wired through the shared
   page handler, but the download-only-specific challenge path
   (e.g. mid-download, post-promotion auth) only fires for
