@@ -694,6 +694,58 @@ impl WkWebViewProducer {
         Ok(())
     }
 
+    /// Register a callback that fires whenever *anything* mutates
+    /// the producer's cookie store: page-side `document.cookie`
+    /// writes, `Set-Cookie` response headers, host calls to
+    /// [`Self::set_cookie`] / [`Self::delete_cookie`].
+    ///
+    /// Apple's `WKHTTPCookieStoreObserver::cookiesDidChangeInCookieStore:`
+    /// protocol delivers no delta — the callback is a "go re-fetch"
+    /// pulse. Pair with [`Self::request_all_cookies`] /
+    /// [`Self::poll_cookies`] to observe the new state.
+    ///
+    /// Replaces any prior handler. Fires on the main thread.
+    /// Browser-shape consumers use this to keep their own
+    /// chrome / status indicators in sync with auth-flow cookie
+    /// writes without polling.
+    pub fn set_cookie_change_handler(
+        &mut self,
+        handler: super::cookie_observer::CookieChangeHandlerFn,
+    ) -> Result<(), WryWebSurfaceError> {
+        if MainThreadMarker::new().is_none() {
+            return Err(WryWebSurfaceError::Platform(
+                "set_cookie_change_handler must be called on the main thread".into(),
+            ));
+        }
+        let mut slot = self.cookie_change_handler.lock().map_err(|_| {
+            WryWebSurfaceError::Platform(
+                "cookie_change_handler lock poisoned".into(),
+            )
+        })?;
+        *slot = Some(handler);
+        Ok(())
+    }
+
+    /// Clear the cookie-change callback. The
+    /// `WKHTTPCookieStoreObserver` registration stays in place
+    /// (cheap to keep around for the producer's lifetime); this
+    /// just unsets the closure so subsequent
+    /// `cookiesDidChangeInCookieStore:` callbacks are no-ops.
+    pub fn clear_cookie_change_handler(&mut self) -> Result<(), WryWebSurfaceError> {
+        if MainThreadMarker::new().is_none() {
+            return Err(WryWebSurfaceError::Platform(
+                "clear_cookie_change_handler must be called on the main thread".into(),
+            ));
+        }
+        let mut slot = self.cookie_change_handler.lock().map_err(|_| {
+            WryWebSurfaceError::Platform(
+                "cookie_change_handler lock poisoned".into(),
+            )
+        })?;
+        *slot = None;
+        Ok(())
+    }
+
     /// Serialize the WebView's interaction state — back-forward
     /// list, scroll position, form data, etc. — into an opaque
     /// blob. Round-trip via [`Self::restore_interaction_state`]

@@ -188,6 +188,19 @@ pub struct WkWebViewProducer {
     /// consumers can keep using `poll_cursor_shape`; the two
     /// surfaces fire on the same change.
     pub(super) cursor_handler: Arc<Mutex<Option<CursorHandlerFn>>>,
+    /// Optional host-driven cookie-change handler. Shared with
+    /// `CookieStoreObserver` via its ivars; the observer is always
+    /// registered on the producer's `WKHTTPCookieStore` for the
+    /// producer's lifetime, and the closure (when set) fires on
+    /// every `cookiesDidChangeInCookieStore:` callback.
+    pub(super) cookie_change_handler:
+        Arc<Mutex<Option<super::cookie_observer::CookieChangeHandlerFn>>>,
+    /// Strong ref to the always-registered cookie-store observer.
+    /// Held here so it outlives the producer's `Drop` removal of
+    /// itself from the `WKHTTPCookieStore`. The observer's ivars
+    /// are the same `Arc<Mutex<Option<...>>>` as
+    /// [`Self::cookie_change_handler`].
+    pub(super) cookie_observer: Retained<super::cookie_observer::CookieStoreObserver>,
 }
 
 pub(super) type PendingPdfSlot = Arc<Mutex<Option<Result<Vec<u8>, String>>>>;
@@ -404,6 +417,26 @@ impl WkWebViewProducer {
             parent_view.addSubview(&webview);
         }
 
+        // Cookie-store observer: registered for the producer's
+        // lifetime so the `WKHTTPCookieStoreObserver` callback is
+        // wired before any navigation happens. The closure slot
+        // (initially empty) is what gates whether anything fires;
+        // hosts plug in via `set_cookie_change_handler`.
+        let cookie_change_handler: Arc<
+            Mutex<Option<super::cookie_observer::CookieChangeHandlerFn>>,
+        > = Arc::new(Mutex::new(None));
+        let cookie_observer = super::cookie_observer::CookieStoreObserver::new(
+            mtm,
+            Arc::clone(&cookie_change_handler),
+        );
+        unsafe {
+            let store = webview
+                .configuration()
+                .websiteDataStore()
+                .httpCookieStore();
+            store.addObserver(ProtocolObject::from_ref(&*cookie_observer));
+        }
+
         // DPI observer: fires when the host window moves between
         // displays with different backing-scale factors. The block
         // sets a flag the producer polls before its next resize /
@@ -475,6 +508,8 @@ impl WkWebViewProducer {
             download_id_allocator,
             download_host_handler,
             cursor_handler,
+            cookie_change_handler,
+            cookie_observer,
         })
     }
 
@@ -642,6 +677,11 @@ impl Drop for WkWebViewProducer {
             let ucc = config.userContentController();
             let bridge_name = NSString::from_str(HOST_BRIDGE_HANDLER_NAME);
             ucc.removeScriptMessageHandlerForName(&bridge_name);
+            // Detach the cookie-store observer before tearing down
+            // the webview so the data store doesn't outlive its
+            // observer registration.
+            let store = config.websiteDataStore().httpCookieStore();
+            store.removeObserver(ProtocolObject::from_ref(&*self.cookie_observer));
             self.webview.removeFromSuperview();
         }
 

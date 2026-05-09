@@ -798,11 +798,19 @@ checklist deliberately omits.
   startup via `WKContentRuleListStore::compileContentRuleList`;
   attach to the configuration's `WKUserContentController`. No
   SPI; works on macOS 10.13+.
-- Cookie / storage *observation* — `WKHTTPCookieStoreObserver`
-  protocol surfaces "cookies changed" callbacks that the
-  current cookie API doesn't expose. Useful for browser chrome
-  that wants to react to auth-flow cookie writes without
-  polling.
+- ✅ Cookie / storage observation —
+  `WkWebViewProducer::set_cookie_change_handler` /
+  `clear_cookie_change_handler` register a `Box<dyn Fn() + Send +
+  Sync>` invoked on every `WKHTTPCookieStoreObserver::cookiesDidChangeInCookieStore:`
+  callback (page-side `document.cookie` writes, `Set-Cookie`
+  response headers, host calls to `set_cookie` /
+  `delete_cookie`). Apple's protocol delivers no delta — the
+  callback is a "go re-fetch" pulse — so consumers pair with
+  `request_all_cookies` / `poll_cookies` to observe the new
+  state. The observer is registered on the producer's
+  `WKHTTPCookieStore` for the producer's lifetime; the closure
+  slot is what gates whether anything fires, which keeps the
+  set / clear path lock-only and avoids re-registration churn.
 - Color management / HDR — capture path is locked at
   `BGRA8Unorm` sRGB. Wide-gamut content (Display P3) and HDR
   video frames are tone-mapped to sRGB before SCK delivers

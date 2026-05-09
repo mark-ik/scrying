@@ -24,7 +24,8 @@ pub mod wkwebview_producer;
 
 #[cfg(target_os = "macos")]
 pub use wkwebview_producer::{
-    CaptureMetrics, CaptureStatus, WkWebViewProducer, WkWebViewProducerConfig,
+    CaptureMetrics, CaptureStatus, CookieChangeHandlerFn, WkWebViewProducer,
+    WkWebViewProducerConfig,
 };
 
 #[cfg(target_os = "linux")]

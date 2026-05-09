@@ -75,6 +75,7 @@
 mod api;
 mod capture;
 mod config;
+mod cookie_observer;
 mod cookies;
 mod download_handler;
 mod helpers;
@@ -90,6 +91,7 @@ mod ui_delegate;
 
 pub use api::FindOptions;
 pub use capture::{CaptureMetrics, CaptureStatus};
+pub use cookie_observer::CookieChangeHandlerFn;
 pub use config::WkWebViewProducerConfig;
 pub use download_handler::DownloadHandlerFn;
 pub use nav_delegate::AuthHandlerFn;

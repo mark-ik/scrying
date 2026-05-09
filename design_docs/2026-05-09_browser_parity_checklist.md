@@ -83,7 +83,7 @@ yet.
 | Incognito / non-persistent profile | ✅ | ✅ | ? | `WkWebViewProducerConfig::non_persistent` |
 | Multi-instance verification (cross-talk isolation) | ✅ | ✅ | ? | Two producers, one window, independent event queues |
 | Cookie store (read / write / delete) | ✅ | ✅ | ? | Wraps `WKHTTPCookieStore` on the producer's data store |
-| Cookie / storage *change events* | ⏳ | ⏳ | ⏳ | `WKHTTPCookieStoreObserver` for "cookies changed" callbacks |
+| Cookie / storage *change events* | ✅ | ⏳ | ⏳ | `set_cookie_change_handler` registers a closure invoked on every `cookiesDidChangeInCookieStore:` callback (page-side `document.cookie` writes, `Set-Cookie` headers, host writes); pair with `request_all_cookies` / `poll_cookies` to read the new state |
 
 ## Browser-shape UX
 
