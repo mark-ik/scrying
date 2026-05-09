@@ -91,7 +91,7 @@ yet.
 | --- | --- | --- | --- | --- |
 | Find-in-page (with options) | ✅ | ? | ? | `find_in_page` + `poll_find_match`, async via completion blocks |
 | Page-to-PDF rendering | ✅ | ? | ? | `request_pdf` + `poll_pdf` |
-| Print / `Cmd+P` (interactive) | ⏳ | ⏳ | ⏳ | macOS via `WKWebView::printOperationWithPrintInfo:` + `NSPrintOperation` |
+| Print / `Cmd+P` (interactive) | ✅ | ⏳ | ⏳ | `print()` runs the standard `NSPrintOperation` modally with `NSPrintInfo::sharedPrintInfo`; returns `true` on print, `false` on cancel |
 | Auth challenges (events + host-driven disposition) | ✅ | ✅ | ? | Option A (events) + Option B (`set_auth_handler`) both shipped |
 | Auth during downloads (mid-stream / post-promotion) | ⏳ | ? | ? | Edge case; current shape adequate for most consumers |
 | Permission handlers (camera / mic / orientation) | ✅ | ✅ | ? | `set_permission_handler` returns `Allow` / `Deny` / `Prompt` |

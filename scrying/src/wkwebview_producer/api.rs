@@ -812,6 +812,35 @@ impl WkWebViewProducer {
         Ok(())
     }
 
+    /// Present the standard macOS print panel for this WebView's
+    /// document and run the user's chosen print operation. Blocks
+    /// the calling thread (which must be the main thread) until
+    /// the user clicks Print or Cancel; returns `true` on actual
+    /// print, `false` on cancel.
+    ///
+    /// This is the interactive `Cmd+P` equivalent — distinct from
+    /// the headless [`Self::request_pdf`] / [`Self::poll_pdf`]
+    /// path, which renders to a PDF blob without UI. Browser-shape
+    /// consumers usually want both: `print` for the user-facing
+    /// menu item, `request_pdf` for "Save as PDF" via a host-
+    /// rendered file dialog.
+    ///
+    /// Uses `NSPrintInfo::sharedPrintInfo` for the default settings
+    /// (paper size, margins). Hosts that need a customized
+    /// `NSPrintInfo` can shadow this method by calling
+    /// `webview.printOperationWithPrintInfo:` directly via the
+    /// objc2-web-kit binding.
+    pub fn print(&mut self) -> Result<bool, WryWebSurfaceError> {
+        if MainThreadMarker::new().is_none() {
+            return Err(WryWebSurfaceError::Platform(
+                "print must be called on the main thread".into(),
+            ));
+        }
+        let info = objc2_app_kit::NSPrintInfo::sharedPrintInfo();
+        let op = unsafe { self.webview().printOperationWithPrintInfo(&info) };
+        Ok(op.runOperation())
+    }
+
     /// Detach every `WKContentRuleList` previously compiled and
     /// attached via [`Self::compile_and_apply_content_rule_list`].
     /// Synchronous — the WKUserContentController call returns

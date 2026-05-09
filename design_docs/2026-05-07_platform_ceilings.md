@@ -789,10 +789,16 @@ checklist deliberately omits.
   `performDragOperation:`. (Drag-and-drop *out* — initiating
   a drag *from* page content — remains `_WK*` SPI on macOS and
   is staying punted.)
-- Print / `Cmd+P` — page-to-PDF rendering shipped in item 9,
-  but interactive `NSPrintOperation` (page-range UI, printer
-  selection, preview) hasn't. `WKWebView::printOperationWithPrintInfo:`
-  is the entry point.
+- ✅ Print / `Cmd+P` —
+  `WkWebViewProducer::print()` fetches the standard
+  `NSPrintInfo::sharedPrintInfo`, asks the WebView for an
+  `NSPrintOperation` via `printOperationWithPrintInfo:`, and runs
+  it modally with `runOperation()`. Returns `true` on actual
+  print, `false` on cancel. Distinct from the headless
+  `request_pdf` path (which is non-interactive). Hosts wanting a
+  customized `NSPrintInfo` (page range, paper size) can route
+  around this method by calling `printOperationWithPrintInfo:`
+  through the objc2-web-kit binding directly.
 - ✅ Content blocking —
   `WkWebViewProducer::compile_and_apply_content_rule_list(identifier,
   encoded_json)` compiles AdBlock-shape JSON rule lists via
