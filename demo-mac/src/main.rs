@@ -461,6 +461,18 @@ struct Cli {
     /// means "no dumps." Use `--dump-every 30` to dump twice per
     /// second at 60 FPS.
     dump_every: u64,
+    /// In capture mode, override the SCK pipeline's color
+    /// configuration. Accepts `srgb` (default), `p3`
+    /// (`ColorPipeline::DisplayP3`, 8-bit BGRA + Display P3
+    /// gamut), or `hdr` (`ColorPipeline::Hdr16f`, 16-bit float
+    /// RGBA + extended-linear-DisplayP3). Visual difference vs
+    /// `srgb` requires a P3 / HDR-capable display *and* the
+    /// demo's wgpu surface configured for the matching format
+    /// (the demo's surface is currently `Bgra8Unorm`, so HDR
+    /// over-bright values clamp at present; use cadence-probe
+    /// metrics + the `--dump-every` PNG dumps to verify the
+    /// pipeline is alive end-to-end).
+    color_pipeline: scrying::ColorPipeline,
     /// In capture mode, programmatically resize the window mid-run
     /// to exercise slice N's `SCStream::updateConfiguration:` path.
     /// The window cycles 1024→1280→1024 over the run.
@@ -565,6 +577,22 @@ impl Cli {
                         eprintln!("demo-mac: --dump-every needs a positive integer, got '{value}'");
                         0
                     });
+                }
+                "--color-pipeline" => {
+                    let value = iter.next().unwrap_or_default();
+                    cli.color_pipeline = match value.as_str() {
+                        "srgb" => scrying::ColorPipeline::Srgb,
+                        "p3" | "displayp3" | "display-p3" => {
+                            scrying::ColorPipeline::DisplayP3
+                        }
+                        "hdr" | "hdr16f" => scrying::ColorPipeline::Hdr16f,
+                        other => {
+                            eprintln!(
+                                "demo-mac: --color-pipeline expects srgb|p3|hdr, got '{other}' — keeping default (srgb)"
+                            );
+                            scrying::ColorPipeline::Srgb
+                        }
+                    };
                 }
                 "--resize-test" => cli.resize_test = true,
                 "--profile-test" => cli.profile_test = true,
@@ -3694,6 +3722,7 @@ impl AppState {
             std::env::current_dir()?.join("target/demo-mac-profile")
         };
         let mut producer_config = WkWebViewProducerConfig::new(webview_size, &data_dir);
+        producer_config.color_pipeline = cli.color_pipeline;
         if cli.incognito_test {
             producer_config = producer_config.non_persistent();
         }
