@@ -71,11 +71,21 @@ pub(super) fn backing_scale_for(parent_view: &NSView) -> objc2_core_foundation::
 }
 
 pub(super) fn ns_rect_from_pixels(
-    offset_points: (f32, f32),
+    offset_pixels: (f32, f32),
     size_pixels: PhysicalSize<u32>,
     backing_scale: objc2_core_foundation::CGFloat,
 ) -> NSRect {
-    let origin = NSPoint::new(f64::from(offset_points.0), f64::from(offset_points.1));
+    // Both offset and size are documented as physical pixels (the
+    // unit the trait's `set_offset` / `resize` use). AppKit wants
+    // points, so divide by `backing_scale`. Pre-fix: only `size`
+    // was divided, while the offset was passed through as-if it
+    // were already points — so `with_offset(200, …)` and
+    // `set_offset(200, …)` (the latter divides) landed at
+    // different positions on Retina.
+    let origin = NSPoint::new(
+        f64::from(offset_pixels.0) / backing_scale,
+        f64::from(offset_pixels.1) / backing_scale,
+    );
     let size = NSSize::new(
         f64::from(size_pixels.width) / backing_scale,
         f64::from(size_pixels.height) / backing_scale,

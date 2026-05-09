@@ -13,7 +13,9 @@ pub struct WkWebViewProducerConfig {
     /// physical pixels.
     pub size: PhysicalSize<u32>,
     /// Offset of the WKWebView relative to the parent NSView, in
-    /// device-independent points (matches AppKit's coordinate system).
+    /// **physical pixels** (matches the trait's `set_offset`
+    /// contract and matches `size`'s units). The producer divides
+    /// by `backing_scale` to convert to AppKit points internally.
     pub offset: (f32, f32),
     /// Directory used as `WKWebsiteDataStore`'s persistent storage.
     /// Hashed into a deterministic UUID and resolved via
