@@ -48,7 +48,10 @@ use super::nav_delegate::{AuthHandlerFn, NavDelegate, NavState};
 /// both fire on the same change so consumers can use either.
 pub type CursorHandlerFn = Box<dyn Fn(crate::CursorShape) + Send + Sync + 'static>;
 use super::scheme_handler::{SchemeHandler, UrlSchemeHandlerFn};
-use super::script_message::{ScriptMessageHandler, HOST_BRIDGE_HANDLER_NAME, HOST_BRIDGE_USER_SCRIPT};
+use super::script_message::{
+    ContextMenuMessageHandler, ScriptMessageHandler, CONTEXT_MENU_HANDLER_NAME,
+    CONTEXT_MENU_USER_SCRIPT, HOST_BRIDGE_HANDLER_NAME, HOST_BRIDGE_USER_SCRIPT,
+};
 use super::title_observer::TitleObserver;
 use super::ui_delegate::{PermissionHandlerFn, UiDelegate};
 
@@ -304,35 +307,50 @@ impl WkWebViewProducer {
             scheme_handler_retained.push(delegate);
         }
 
-        // Install the `window.chrome.webview` bridge before any frame
-        // loads — both the user script and the `WKScriptMessageHandler`
+        // Install the `window.chrome.webview` bridge plus the
+        // context-menu intercept user script before any frame loads
+        // — both user scripts and their `WKScriptMessageHandler`s
         // need to be on the configuration's `WKUserContentController`
         // when the WKWebView is initialized.
+        let nav_state = Arc::new(Mutex::new(NavState::default()));
         let web_messages: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
         let script_message_handler =
             ScriptMessageHandler::new(mtm, Arc::clone(&web_messages));
+        let context_menu_handler =
+            ContextMenuMessageHandler::new(mtm, Arc::clone(&nav_state));
         let bridge_handler_name = NSString::from_str(HOST_BRIDGE_HANDLER_NAME);
         let bridge_user_script_source = NSString::from_str(HOST_BRIDGE_USER_SCRIPT);
+        let context_menu_handler_name = NSString::from_str(CONTEXT_MENU_HANDLER_NAME);
+        let context_menu_user_script_source = NSString::from_str(CONTEXT_MENU_USER_SCRIPT);
         let user_content_controller = unsafe { webview_config.userContentController() };
         unsafe {
             user_content_controller.addScriptMessageHandler_name(
                 ProtocolObject::from_ref(&*script_message_handler),
                 &bridge_handler_name,
             );
-            let user_script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+            user_content_controller.addScriptMessageHandler_name(
+                ProtocolObject::from_ref(&*context_menu_handler),
+                &context_menu_handler_name,
+            );
+            let bridge_script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
                 WKUserScript::alloc(mtm),
                 &bridge_user_script_source,
                 WKUserScriptInjectionTime::AtDocumentStart,
                 false,
             );
-            user_content_controller.addUserScript(&user_script);
+            user_content_controller.addUserScript(&bridge_script);
+            let context_menu_script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                WKUserScript::alloc(mtm),
+                &context_menu_user_script_source,
+                WKUserScriptInjectionTime::AtDocumentStart,
+                false,
+            );
+            user_content_controller.addUserScript(&context_menu_script);
         }
 
         let webview: Retained<WKWebView> = unsafe {
             WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &webview_config)
         };
-
-        let nav_state = Arc::new(Mutex::new(NavState::default()));
         let download_registry: Arc<Mutex<DownloadRegistry>> =
             Arc::new(Mutex::new(DownloadRegistry::default()));
         let download_id_allocator = Arc::new(DownloadIdAllocator::new());

@@ -1049,25 +1049,26 @@ impl ApplicationHandler for App {
         if state.download_test.is_some() {
             advance_download_test(state, event_loop);
         }
-        if let Some(deadline) = state.two_tabs_deadline {
-            // Drain second-producer events into the test state's
-            // tab-2 url accumulator so the deadline-time
-            // assertion can verify each tab's events stayed in
-            // its own producer's queue (no cross-talk between
-            // independent producers in one process).
-            if let Some(second) = state.second_producer.as_mut() {
-                while let Some(event) = second.poll_navigation_event() {
-                    println!("demo-mac: [tab2] nav event: {event:?}");
-                    if let Some(test) = state.two_tabs_test.as_mut() {
-                        if let Some(url) = nav_event_url(&event) {
-                            test.tab2_urls.push(url);
-                        }
+        // Drain second-producer events on every tick so a
+        // visible (`--visible`) run sees tab 2's nav / context-menu
+        // / JS-bridge messages even after we suppress the auto-exit
+        // deadline. The headless test path also depends on this
+        // drain to feed the cross-talk assertion's tab-2 url
+        // accumulator.
+        if let Some(second) = state.second_producer.as_mut() {
+            while let Some(event) = second.poll_navigation_event() {
+                println!("demo-mac: [tab2] nav event: {event:?}");
+                if let Some(test) = state.two_tabs_test.as_mut() {
+                    if let Some(url) = nav_event_url(&event) {
+                        test.tab2_urls.push(url);
                     }
                 }
-                while let Some(message) = second.poll_web_message() {
-                    println!("demo-mac: [tab2] js->host: {message}");
-                }
             }
+            while let Some(message) = second.poll_web_message() {
+                println!("demo-mac: [tab2] js->host: {message}");
+            }
+        }
+        if let Some(deadline) = state.two_tabs_deadline {
             if state.started_at.elapsed() >= deadline {
                 if state.two_tabs_test.is_some() {
                     finalize_two_tabs_test(state, event_loop);

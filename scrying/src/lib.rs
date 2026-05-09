@@ -320,6 +320,31 @@ pub enum NavigationEvent {
         destination_path: std::path::PathBuf,
         resume_data: Option<Vec<u8>>,
     },
+    /// The user right-clicked inside the page. The producer
+    /// suppresses WebKit's default context menu and emits this
+    /// event so a browser-class consumer can show its own — usually
+    /// a host-rendered `NSMenu` with items like "Open link in new
+    /// tab" or "Save image as...". Apple's
+    /// `webView:contextMenuConfigurationForElement:` is iOS-only,
+    /// so on macOS the producer goes through a JS user-script
+    /// (`contextmenu` capture-phase listener +
+    /// `event.preventDefault()`) and a dedicated
+    /// `WKScriptMessageHandler` to deliver this event.
+    ///
+    /// Coordinates are in CSS pixels relative to the WebView's
+    /// viewport (matching `MouseEvent.clientX` /
+    /// `MouseEvent.clientY`). `link_url` and `image_url` walk the
+    /// click target's ancestor chain to recover the closest
+    /// enclosing `<a href>` / `<img src>`; both are `None` when no
+    /// such ancestor exists (e.g. a right-click on plain body
+    /// text).
+    ContextMenuRequested {
+        page_url: String,
+        x: f64,
+        y: f64,
+        link_url: Option<String>,
+        image_url: Option<String>,
+    },
 }
 
 /// Opaque per-producer identifier for a download. Issued when

@@ -737,6 +737,24 @@ limitations.
   needs an architecture change like consumer-side crop (skip the
   per-frame Metal blit pass).
 
+- ✅ Context-menu interception via JS user-script —
+  `WKUIDelegate` exposes
+  `webView:contextMenuConfigurationForElement:completionHandler:`
+  on iOS only; macOS has no public-API context-menu hook.
+  Rather than reach for `_WK*` SPI, the producer now injects a
+  capture-phase `contextmenu` user-script via
+  `WKUserContentController` that walks the click target's
+  ancestor chain to recover the closest enclosing `<a href>` /
+  `<img src>`, calls `event.preventDefault()` to suppress
+  WebKit's default `NSMenu`, and posts a NUL-delimited 5-field
+  payload to a dedicated `WKScriptMessageHandler`
+  (`scryingContextMenu`). The handler parses the payload and
+  pushes a [`crate::NavigationEvent::ContextMenuRequested`]
+  event with `page_url` / `x` / `y` (CSS pixels relative to
+  the WebView viewport) / `link_url` / `image_url`. Verified in
+  `--two-tabs --visible` that each producer's right-clicks
+  route to its own nav-event queue (no cross-talk).
+
 **Outstanding for follow-up slices:**
 
 - Authentication during downloads — wired through the shared
@@ -745,8 +763,6 @@ limitations.
   programmatic `start_download` flows in practice. Real
   Apple-internal scenarios are rare; current shape is enough
   for browser-class consumers.
-- Context-menu interception —
-  `WKUIDelegate::webView:contextMenuConfigurationForElement:`.
 - Throttling control — suspending / resuming page activity for
   hidden tabs needs SPI (`_setSuspended:`) and is risky.
 
