@@ -39,42 +39,6 @@ use winit::window::{Window, WindowAttributes};
 
 const INITIAL_URL: &str = "https://example.com";
 
-/// Inline HTML loaded by `--profile-test`. Reads the existing cookie
-/// for the page's origin (set by [`PROFILE_TEST_BASE_URL`]) and posts
-/// the result back to the host. Then sets a fresh `demo_token`
-/// cookie so the next run can observe it.
-const PROFILE_TEST_HTML: &str = r#"<!doctype html>
-<html><body>
-<script>
-(function() {
-  function post(msg) {
-    if (window.chrome && window.chrome.webview) {
-      window.chrome.webview.postMessage(msg);
-    }
-  }
-  // 1. Report what's in the cookie jar at load time. First run with
-  //    a fresh data_dir: empty. Second run with the persisted data
-  //    store: should contain the value set by run 1.
-  post('cookie-on-load:' + (document.cookie || ''));
-
-  // 2. Set / refresh a token so subsequent runs (if launched within
-  //    the cookie's max-age) observe persistence.
-  var token = 'val_' + Date.now();
-  document.cookie =
-    'demo_token=' + token + '; max-age=3600; path=/; SameSite=Lax';
-  post('cookie-set:' + token);
-  post('cookie-after-set:' + (document.cookie || ''));
-  post('done');
-})();
-</script>
-</body></html>"#;
-
-/// Stable origin for the profile-test page. Required so
-/// `document.cookie` is namespaced and persisted to the per-profile
-/// `WKWebsiteDataStore`. WebKit treats cookies set on `about:blank`
-/// or `data:` origins as ephemeral, so we need a real-looking URL.
-const PROFILE_TEST_BASE_URL: &str = "https://demo-mac.scrying.local/";
-
 /// Body served by the `--download-test` HTTP server. 256 KiB of a
 /// known repeating pattern. Bumped from 64 KiB so phase E's slow
 /// streaming path (8 KiB chunks at 200 ms apart → ~6.4 s total
@@ -682,6 +646,10 @@ struct AppState {
     download_test: Option<DownloadTestState>,
     /// Set by `--capture-test`. Counts SCK frames + asserts size.
     capture_test: Option<CaptureTestState>,
+    /// Set when `--two-tabs` is invoked. Per-tab URL log used at
+    /// deadline to assert each producer's nav events stayed in
+    /// its own queue (no cross-talk).
+    two_tabs_test: Option<TwoTabsTestState>,
     /// Webview / capture region size we actually configured
     /// (`--capture` mode uses left half of the window). Used by
     /// `--capture-test` to assert the SCK frame dims match.
@@ -758,6 +726,27 @@ enum InteractionStateStep {
     AwaitRestore,
     Verify,
     Done,
+}
+
+#[derive(Default)]
+struct TwoTabsTestState {
+    tab1_urls: Vec<String>,
+    tab2_urls: Vec<String>,
+}
+
+/// Helper that pulls the URL out of any `NavigationEvent` variant
+/// that carries one. Used by both `--two-tabs` cross-talk
+/// accumulation and any other test that wants per-event URL
+/// observation.
+fn nav_event_url(event: &NavigationEvent) -> Option<String> {
+    match event {
+        NavigationEvent::Starting { url }
+        | NavigationEvent::SourceChanged { url }
+        | NavigationEvent::Completed { url, .. }
+        | NavigationEvent::NewWindowRequested { url }
+        | NavigationEvent::AuthChallenged { url, .. } => Some(url.clone()),
+        _ => None,
+    }
 }
 
 #[derive(Default)]
@@ -921,10 +910,30 @@ enum PointerInputStep {
 
 #[derive(Default)]
 struct ProfileTestState {
-    started: bool,
-    saw_on_load: Option<String>,
-    saw_set: Option<String>,
-    saw_done: bool,
+    step: ProfileStep,
+    step_started_at: Option<Instant>,
+    /// Cookie name we set on producer #1 — uniquely suffixed so a
+    /// stray entry from a prior run can't satisfy the assertion.
+    cookie_name: String,
+    /// Cookies observed on producer #1.
+    producer1_cookies: Option<Vec<Cookie>>,
+    /// Cookies observed on producer #2 (the persistence
+    /// counterpart at the same `data_dir`).
+    producer2_cookies: Option<Vec<Cookie>>,
+    failures: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum ProfileStep {
+    #[default]
+    SetCookie,
+    AwaitSet,
+    QueryProducer1,
+    AwaitQuery1,
+    QueryProducer2,
+    AwaitQuery2,
+    Verify,
+    Done,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1014,6 +1023,7 @@ impl ApplicationHandler for App {
             || state.interaction_state_test.is_some()
             || state.pointer_input_test.is_some()
             || state.download_test.is_some()
+            || state.two_tabs_test.is_some()
         {
             drain_events(state);
         }
@@ -1040,20 +1050,31 @@ impl ApplicationHandler for App {
             advance_download_test(state, event_loop);
         }
         if let Some(deadline) = state.two_tabs_deadline {
-            // Drain second-producer events with a "[tab2]" prefix so
-            // they're distinguishable from the first producer's
-            // events in stdout.
+            // Drain second-producer events into the test state's
+            // tab-2 url accumulator so the deadline-time
+            // assertion can verify each tab's events stayed in
+            // its own producer's queue (no cross-talk between
+            // independent producers in one process).
             if let Some(second) = state.second_producer.as_mut() {
                 while let Some(event) = second.poll_navigation_event() {
                     println!("demo-mac: [tab2] nav event: {event:?}");
+                    if let Some(test) = state.two_tabs_test.as_mut() {
+                        if let Some(url) = nav_event_url(&event) {
+                            test.tab2_urls.push(url);
+                        }
+                    }
                 }
                 while let Some(message) = second.poll_web_message() {
                     println!("demo-mac: [tab2] js->host: {message}");
                 }
             }
             if state.started_at.elapsed() >= deadline {
-                println!("demo-mac: --two-tabs deadline reached, exiting");
-                event_loop.exit();
+                if state.two_tabs_test.is_some() {
+                    finalize_two_tabs_test(state, event_loop);
+                } else {
+                    println!("demo-mac: --two-tabs deadline reached, exiting");
+                    event_loop.exit();
+                }
             }
         }
         // Capture mode: kick off `start_capture_async` after the
@@ -1440,6 +1461,11 @@ fn drain_events(state: &mut AppState) {
         {
             test.last_completed_url = url.clone();
         }
+        if let Some(test) = state.two_tabs_test.as_mut()
+            && let Some(url) = nav_event_url(&event)
+        {
+            test.tab1_urls.push(url);
+        }
         if let Some(test) = state.download_test.as_mut() {
             match &event {
                 NavigationEvent::DownloadStarted {
@@ -1480,15 +1506,6 @@ fn drain_events(state: &mut AppState) {
     }
     while let Some(message) = state.producer.poll_web_message() {
         println!("demo-mac: js->host: {message}");
-        if let Some(profile) = state.profile_test.as_mut() {
-            if let Some(rest) = message.strip_prefix("cookie-on-load:") {
-                profile.saw_on_load = Some(rest.to_string());
-            } else if let Some(rest) = message.strip_prefix("cookie-set:") {
-                profile.saw_set = Some(rest.to_string());
-            } else if message == "done" {
-                profile.saw_done = true;
-            }
-        }
         if let Some(scripted) = state.scripted.as_mut() {
             if message == "ready" {
                 scripted.saw_ready = true;
@@ -1779,43 +1796,167 @@ fn advance_scripted(state: &mut AppState, event_loop: &ActiveEventLoop) {
 /// Drive the `--profile-test` cookie-persistence run. Loads the test
 /// page on first tick, waits for the JS handshake, and exits with a
 /// summary that lets a test runner verify across-process persistence.
+/// Drive `--profile-test`. Two producers persistent at the SAME
+/// `data_dir`. Setting a cookie on producer #1 should be visible
+/// to producer #2 because `WKWebsiteDataStore::dataStoreForIdentifier:`
+/// returns the same underlying store for the same identifier
+/// (the producer hashes `config.data_dir` into a stable UUID).
+/// This is the "persistent stores are shared" complement to
+/// `--incognito-test`'s "non-persistent stores are isolated"
+/// assertion.
 fn advance_profile_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
-    let Some(profile) = state.profile_test.as_mut() else {
+    let Some(test) = state.profile_test.as_mut() else {
         return;
     };
-    if !profile.started {
-        profile.started = true;
-        if let Err(error) = state
-            .producer
-            .load_html_with_base_url(PROFILE_TEST_HTML, PROFILE_TEST_BASE_URL)
-        {
-            eprintln!("demo-mac: profile-test load_html failed: {error}");
-            event_loop.exit();
-            return;
-        }
-        println!(
-            "demo-mac: profile-test: page loaded with origin {PROFILE_TEST_BASE_URL}"
-        );
-        return;
+    let now = Instant::now();
+    if test.step_started_at.is_none() {
+        test.step_started_at = Some(now);
     }
-    if profile.saw_done {
-        let on_load = profile.saw_on_load.as_deref().unwrap_or("");
-        let set = profile.saw_set.as_deref().unwrap_or("");
-        if on_load.is_empty() {
-            println!(
-                "demo-mac: profile-test: PRIMED — no prior cookie observed, set demo_token={set}"
-            );
-        } else {
-            println!(
-                "demo-mac: profile-test: PERSISTED — cookies on load = '{on_load}'; refreshed to demo_token={set}"
-            );
-        }
-        event_loop.exit();
-        return;
+    let elapsed = now.duration_since(test.step_started_at.unwrap_or(now));
+    let step = test.step;
+    macro_rules! step_to {
+        ($next:expr) => {{
+            test.step = $next;
+            test.step_started_at = Some(Instant::now());
+        }};
     }
-    if state.started_at.elapsed() > std::time::Duration::from_secs(10) {
-        eprintln!("demo-mac: profile-test: TIMED OUT — JS handshake never completed");
-        event_loop.exit();
+    macro_rules! await_ms {
+        ($ms:expr) => {
+            elapsed < Duration::from_millis($ms)
+        };
+    }
+    match step {
+        ProfileStep::SetCookie => {
+            let cookie = Cookie {
+                name: test.cookie_name.clone(),
+                value: "shared-store".into(),
+                domain: "example.com".into(),
+                path: "/".into(),
+                expires_at: None,
+                is_secure: false,
+                is_http_only: false,
+            };
+            if let Err(e) = state.producer.set_cookie(&cookie) {
+                test.failures
+                    .push(format!("set_cookie on producer #1: {e}"));
+                step_to!(ProfileStep::Done);
+                return;
+            }
+            println!(
+                "demo-mac: profile-test: set_cookie '{}' on producer #1",
+                test.cookie_name
+            );
+            step_to!(ProfileStep::AwaitSet);
+        }
+        ProfileStep::AwaitSet => {
+            if await_ms!(250) {
+                return;
+            }
+            step_to!(ProfileStep::QueryProducer1);
+        }
+        ProfileStep::QueryProducer1 => {
+            if let Err(e) = state.producer.request_all_cookies() {
+                test.failures
+                    .push(format!("request_all_cookies on producer #1: {e}"));
+                step_to!(ProfileStep::Done);
+                return;
+            }
+            step_to!(ProfileStep::AwaitQuery1);
+        }
+        ProfileStep::AwaitQuery1 => {
+            if let Some(cookies) = state.producer.poll_cookies() {
+                println!(
+                    "demo-mac: profile-test: producer #1 store reports {} cookie(s)",
+                    cookies.len()
+                );
+                test.producer1_cookies = Some(cookies);
+                step_to!(ProfileStep::QueryProducer2);
+            } else if elapsed > Duration::from_secs(3) {
+                test.failures
+                    .push("producer #1's poll_cookies never returned".into());
+                step_to!(ProfileStep::Done);
+            }
+        }
+        ProfileStep::QueryProducer2 => {
+            let Some(second) = state.second_producer.as_mut() else {
+                test.failures
+                    .push("second_producer was None for profile-test".into());
+                step_to!(ProfileStep::Done);
+                return;
+            };
+            if let Err(e) = second.request_all_cookies() {
+                test.failures
+                    .push(format!("request_all_cookies on producer #2: {e}"));
+                step_to!(ProfileStep::Done);
+                return;
+            }
+            step_to!(ProfileStep::AwaitQuery2);
+        }
+        ProfileStep::AwaitQuery2 => {
+            let Some(second) = state.second_producer.as_mut() else {
+                test.failures
+                    .push("second_producer was None mid-test".into());
+                step_to!(ProfileStep::Done);
+                return;
+            };
+            if let Some(cookies) = second.poll_cookies() {
+                println!(
+                    "demo-mac: profile-test: producer #2 store reports {} cookie(s)",
+                    cookies.len()
+                );
+                test.producer2_cookies = Some(cookies);
+                step_to!(ProfileStep::Verify);
+            } else if elapsed > Duration::from_secs(3) {
+                test.failures
+                    .push("producer #2's poll_cookies never returned".into());
+                step_to!(ProfileStep::Done);
+            }
+        }
+        ProfileStep::Verify => {
+            let in_p1 = test
+                .producer1_cookies
+                .as_ref()
+                .map(|cs| cs.iter().any(|c| c.name == test.cookie_name))
+                .unwrap_or(false);
+            let in_p2 = test
+                .producer2_cookies
+                .as_ref()
+                .map(|cs| cs.iter().any(|c| c.name == test.cookie_name))
+                .unwrap_or(false);
+            if !in_p1 {
+                test.failures.push(format!(
+                    "cookie '{}' missing from producer #1's own store after set_cookie",
+                    test.cookie_name
+                ));
+            }
+            if !in_p2 {
+                test.failures.push(format!(
+                    "cookie '{}' missing from producer #2's store — persistent stores at the same data_dir aren't sharing as expected",
+                    test.cookie_name
+                ));
+            }
+            step_to!(ProfileStep::Done);
+        }
+        ProfileStep::Done => {
+            if test.failures.is_empty() {
+                println!(
+                    "demo-mac: profile-test: PASS — persistent stores at the same data_dir share cookies"
+                );
+                println!(
+                    "  - set_cookie on producer #1 was visible to its own request_all_cookies"
+                );
+                println!(
+                    "  - same cookie was visible to a separate persistent producer at the same data_dir"
+                );
+                event_loop.exit();
+            } else {
+                eprintln!("demo-mac: profile-test: FAIL");
+                for f in &test.failures {
+                    eprintln!("  - {f}");
+                }
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -2674,6 +2815,57 @@ fn advance_incognito_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
     }
 }
 
+/// Run the PASS / FAIL summary for `--two-tabs` and exit. Asserts
+/// each producer's nav-event queue saw only URLs intended for
+/// its own tab — proving multiple producers in one process keep
+/// independent event streams (browser-class item 7).
+fn finalize_two_tabs_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
+    let Some(test) = state.two_tabs_test.take() else {
+        return;
+    };
+    let mut failures = Vec::<String>::new();
+    let tab1_history1 = test.tab1_urls.iter().any(|u| u.contains("history-1"));
+    let tab1_history2 = test.tab1_urls.iter().any(|u| u.contains("history-2"));
+    let tab2_history2 = test.tab2_urls.iter().any(|u| u.contains("history-2"));
+    let tab2_history1 = test.tab2_urls.iter().any(|u| u.contains("history-1"));
+
+    if !tab1_history1 {
+        failures.push(
+            "tab 1 never observed any nav event for scrying-test://history-1".into(),
+        );
+    }
+    if !tab2_history2 {
+        failures.push(
+            "tab 2 never observed any nav event for scrying-test://history-2".into(),
+        );
+    }
+    if tab1_history2 {
+        failures.push(
+            "tab 1 saw a nav event for scrying-test://history-2 — cross-talk between independent producers".into(),
+        );
+    }
+    if tab2_history1 {
+        failures.push(
+            "tab 2 saw a nav event for scrying-test://history-1 — cross-talk between independent producers".into(),
+        );
+    }
+
+    if failures.is_empty() {
+        println!(
+            "demo-mac: two-tabs: PASS — multi-instance independence verified ({} tab-1 urls, {} tab-2 urls, no cross-talk)",
+            test.tab1_urls.len(),
+            test.tab2_urls.len(),
+        );
+        event_loop.exit();
+    } else {
+        eprintln!("demo-mac: two-tabs: FAIL");
+        for f in &failures {
+            eprintln!("  - {f}");
+        }
+        std::process::exit(1);
+    }
+}
+
 /// Drain frames in `--capture-test` mode. Called only when
 /// `capture_status` reports `Live`. Each call pulls one frame via
 /// `try_acquire_frame`, records its `(width, height)` for later
@@ -3443,7 +3635,12 @@ impl AppState {
         // so multiple back-to-back runs share a stable persistent
         // store without bleeding into the regular demo profile.
         let data_dir = if cli.profile_test {
-            std::env::current_dir()?.join("target/demo-mac-profile-test")
+            // PID-suffixed so each test run gets a fresh shared
+            // store — prior-run cookies can't false-positive the
+            // "cookie X is in producer #2's store" assertion.
+            let pid = std::process::id();
+            std::env::current_dir()?
+                .join(format!("target/demo-mac-profile-test-{pid}"))
         } else if cli.incognito_test {
             // Hint path is ignored when `non_persistent` wins, but we
             // pass a unique one anyway so the bookkeeping in the
@@ -3482,6 +3679,7 @@ impl AppState {
                 || cli.interaction_state_test
                 || cli.pointer_input_test
                 || cli.download_test
+                || cli.two_tabs
             {
                 vec![("scrying-test".to_string(), browser_test_scheme_handler())]
             } else {
@@ -3545,27 +3743,56 @@ impl AppState {
             let second = unsafe { WkWebViewProducer::new(ns_view_ptr, second_config)? };
             println!("demo-mac: --incognito-test: spun up persistent comparison producer");
             Some(second)
+        } else if cli.profile_test {
+            // Persistent counterpart at the SAME data_dir as the
+            // main producer. Setting a cookie on the main producer
+            // should be visible to this one — that's the
+            // "shared persistent store" property profile-test
+            // asserts.
+            let second_config =
+                WkWebViewProducerConfig::new(webview_size, &data_dir);
+            // SAFETY: same NSView the first producer was built
+            // against; both drop before the window vanishes.
+            let second =
+                unsafe { WkWebViewProducer::new(ns_view_ptr, second_config)? };
+            println!(
+                "demo-mac: --profile-test: spun up persistent counterpart at same data_dir"
+            );
+            Some(second)
         } else if cli.two_tabs {
             // Position tab 1 at top-half and tab 2 at bottom-half so
             // both are visually distinct in any captured frame.
             let half_height = inner.height / 2;
             let _ = producer.resize(PhysicalSize::new(inner.width, half_height));
             let _ = producer.set_offset(0.0, half_height as f32);
-            let _ = producer.load_url("https://example.com");
+            // Use the scrying-test:// custom scheme rather than
+            // network URLs so the cross-talk assertion runs
+            // hermetically: tab 1 loads /history-1, tab 2 loads
+            // /history-2, and the test verifies each producer's
+            // nav-event queue saw only its own URL.
+            let _ = producer.load_url("scrying-test://history-1");
 
             let second_data_dir =
                 std::env::current_dir()?.join("target/demo-mac-multi-tab");
-            let second_config =
-                WkWebViewProducerConfig::new(
-                    PhysicalSize::new(inner.width, half_height),
-                    &second_data_dir,
-                );
+            let second_config = WkWebViewProducerConfig::new(
+                PhysicalSize::new(inner.width, half_height),
+                &second_data_dir,
+            );
+            let second_url_schemes: Vec<(String, UrlSchemeHandlerFn)> = vec![(
+                "scrying-test".to_string(),
+                browser_test_scheme_handler(),
+            )];
             // SAFETY: ns_view_ptr is the same valid NSView the first
             // producer was constructed against; both producers will
             // be dropped before the window vanishes.
-            let second =
-                unsafe { WkWebViewProducer::new(ns_view_ptr, second_config)? };
-            let _ = second.load_url("https://www.iana.org/help/example-domains");
+            let second = unsafe {
+                WkWebViewProducer::new_with_url_schemes(
+                    ns_view_ptr,
+                    second_config,
+                    second_url_schemes,
+                )?
+            };
+            let _ = second.load_url("scrying-test://history-2");
             println!("demo-mac: --two-tabs: spun up second producer");
             Some(second)
         } else {
@@ -3654,9 +3881,13 @@ impl AppState {
                 request_at: Duration::from_secs(3),
             }),
             scripted: scripted_state,
-            profile_test: cli.profile_test.then(ProfileTestState::default),
+            profile_test: cli.profile_test.then(|| ProfileTestState {
+                cookie_name: format!("scrying-profile-{}", std::process::id()),
+                ..ProfileTestState::default()
+            }),
             second_producer,
             two_tabs_deadline: cli.two_tabs.then_some(Duration::from_secs(8)),
+            two_tabs_test: cli.two_tabs.then(TwoTabsTestState::default),
             browser_test: cli.browser_test.then(BrowserTestState::default),
             interaction_state_test: cli
                 .interaction_state_test

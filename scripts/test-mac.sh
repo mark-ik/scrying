@@ -38,6 +38,8 @@ MODES=(
     --pointer-input-test
     --incognito-test
     --download-test
+    --profile-test
+    --two-tabs
 )
 
 # Build once so each `cargo run` invocation skips compile overhead.
