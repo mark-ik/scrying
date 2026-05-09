@@ -66,6 +66,17 @@ const PROGRESS_MIN_BYTES: u64 = 1_048_576; // 1 MiB
 pub(super) struct DownloadEntry {
     pub(super) id: DownloadId,
     pub(super) destination_path: PathBuf,
+    /// `Content-Length` from the response that initiated this
+    /// download. `None` when the server didn't announce one
+    /// (chunked / streamed responses). Captured here at
+    /// `decideDestination` time so the final `DownloadProgress`
+    /// event emitted in `downloadDidFinish:` can report it
+    /// faithfully — pre-fix the field used `last_progress_bytes`
+    /// as a stand-in, which gave wrong numbers for throttled
+    /// downloads (the final on-disk byte count exceeded the
+    /// last-throttled `bytes_written`, so consumers saw
+    /// `bytes_written > total_bytes_expected`).
+    pub(super) total_bytes_expected: Option<u64>,
     /// Strong ref so `cancel_download(id)` can call
     /// `WKDownload::cancel(_:)` later. WebKit also holds an
     /// internal reference for the duration of the transfer; the
@@ -253,6 +264,7 @@ define_class!(
                     DownloadEntry {
                         id,
                         destination_path: destination.clone(),
+                        total_bytes_expected,
                         wk_download: download_strong,
                         last_progress_emit: Instant::now(),
                         last_progress_bytes: 0,
@@ -573,7 +585,12 @@ fn destination_path_for_handoff(ivars: &DownloadHandlerIvars, id: DownloadId) ->
 /// Pull an entry out of the registry by pointer key. Returns
 /// `(id, destination_path, total_bytes_expected)` so the caller
 /// can construct a final `DownloadProgress` + `DownloadFinished`
-/// pair without needing to hold the lock during the emit.
+/// pair without needing to hold the lock during the emit. The
+/// `total_bytes_expected` here is the response's announced
+/// `Content-Length` (captured at `decideDestination` time), not a
+/// bytes-written running total — so the final `DownloadProgress`
+/// event reports the same upper bound consumers saw on
+/// `DownloadStarted`.
 fn lookup_and_remove(
     registry: &Arc<Mutex<DownloadRegistry>>,
     pointer_key: usize,
@@ -582,12 +599,7 @@ fn lookup_and_remove(
     let id = *registry.by_pointer.get(&pointer_key)?;
     registry.by_pointer.remove(&pointer_key);
     let entry = registry.by_id.remove(&id)?;
-    let total_bytes = if entry.last_progress_bytes > 0 {
-        Some(entry.last_progress_bytes)
-    } else {
-        None
-    };
-    Some((entry.id, entry.destination_path, total_bytes))
+    Some((entry.id, entry.destination_path, entry.total_bytes_expected))
 }
 
 /// Pick a path under `dir` that doesn't already exist. If

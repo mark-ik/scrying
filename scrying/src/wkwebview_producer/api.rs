@@ -491,6 +491,13 @@ impl WkWebViewProducer {
                     super::download_handler::DownloadEntry {
                         id: bundle.id,
                         destination_path: bundle.destination_path.clone(),
+                        // Resume's 206 Partial Content response
+                        // reports remaining bytes, not full size.
+                        // Resumed transfers don't have a clean
+                        // upper bound exposed up-front; consumers
+                        // see file-size-on-completion via the
+                        // final progress event.
+                        total_bytes_expected: None,
                         wk_download: download_strong,
                         last_progress_emit: std::time::Instant::now(),
                         last_progress_bytes: 0,
