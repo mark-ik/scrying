@@ -755,7 +755,11 @@ limitations.
   `--two-tabs --visible` that each producer's right-clicks
   route to its own nav-event queue (no cross-talk).
 
-**Outstanding for follow-up slices:**
+**Outstanding for follow-up slices.** This list is mirrored as a
+flat cross-platform checklist in
+[`2026-05-09_browser_parity_checklist.md`](2026-05-09_browser_parity_checklist.md);
+the entries below keep the macOS-specific impl notes the
+checklist deliberately omits.
 
 - Authentication during downloads — wired through the shared
   page handler, but the download-only-specific challenge path
@@ -764,7 +768,80 @@ limitations.
   Apple-internal scenarios are rare; current shape is enough
   for browser-class consumers.
 - Throttling control — suspending / resuming page activity for
-  hidden tabs needs SPI (`_setSuspended:`) and is risky.
+  hidden tabs needs SPI (`_setSuspended:`) and is risky. The
+  lighter alternative — Page Visibility sync, see below — is
+  the public-API path and probably sufficient for most
+  consumers.
+- ✅ Page Visibility / occlusion sync —
+  `WryWebSurfaceProducer::set_visible(bool)` cascades through
+  `NSView::setHidden:`. WebKit observes the
+  `viewDidHide` / `viewDidUnhide` chain and pushes
+  `visibilitychange` events page-side so `document.hidden` /
+  `document.visibilityState` flip. RAF callbacks throttle to
+  ~1 Hz, background-tab autoplay / video-decoding throttles per
+  the engine's policy, `setInterval` callbacks may coalesce. No
+  `_WK*` SPI involved. Distinct from the heavier
+  `_setSuspended:` SPI-only path (which fully pauses execution
+  and stays out of scope).
+- Drag-and-drop in — file / URL drops *onto* the page work
+  through the public `NSDraggingDestination` protocol on the
+  parent NSView; route a synthesized drag event to WebKit via
+  `performDragOperation:`. (Drag-and-drop *out* — initiating
+  a drag *from* page content — remains `_WK*` SPI on macOS and
+  is staying punted.)
+- Print / `Cmd+P` — page-to-PDF rendering shipped in item 9,
+  but interactive `NSPrintOperation` (page-range UI, printer
+  selection, preview) hasn't. `WKWebView::printOperationWithPrintInfo:`
+  is the entry point.
+- Content blocking — `WKContentRuleList` accepts JSON rule
+  lists (AdBlock-shape: trigger / action pairs). Compile at
+  startup via `WKContentRuleListStore::compileContentRuleList`;
+  attach to the configuration's `WKUserContentController`. No
+  SPI; works on macOS 10.13+.
+- Cookie / storage *observation* — `WKHTTPCookieStoreObserver`
+  protocol surfaces "cookies changed" callbacks that the
+  current cookie API doesn't expose. Useful for browser chrome
+  that wants to react to auth-flow cookie writes without
+  polling.
+- Color management / HDR — capture path is locked at
+  `BGRA8Unorm` sRGB. Wide-gamut content (Display P3) and HDR
+  video frames are tone-mapped to sRGB before SCK delivers
+  them. Future: configurable
+  `SCStreamConfiguration::colorSpaceName` /
+  `SCStreamConfiguration::pixelFormat` selection; consumer-
+  side gamma handling.
+- DevTools / Web Inspector remote attach — `setInspectable(true)`
+  is wired for macOS 13.3+, but the Safari → Develop menu →
+  attach flow isn't documented anywhere; downstream consumers
+  hit it cold. Doc-only slice.
+- Autofill / Keychain — credential save / suggest plumbing.
+  Mostly system-driven via `NSSecureTextField` autofill and
+  Safari Keychain on macOS, but the host typically wants
+  opt-in (per-profile), and there's no public-API hook.
+  Probably ships as "configurable: yes / no" with no finer
+  control.
+- Spellcheck / autocorrect controls — page-side
+  `WKPreferences` toggles, plus AppKit's Look-Up / Services
+  menu integration on text selections. Mostly free on macOS;
+  just needs API surface.
+- WebRTC capture lifecycle observability — once permission is
+  granted, the page can `getUserMedia` repeatedly without the
+  host knowing. WebKit fires no public-API "camera in use"
+  callback. Browser chrome wants this for the red-dot
+  indicator; would need to rely on the permission-grant event
+  paired with a JS user-script that polls
+  `navigator.mediaDevices`.
+- Pre-composition extraction — capture the WebView's
+  `CALayer.contents` directly via `CARenderer` / `IOSurface`,
+  bypassing the WindowServer composite. Would also kill the
+  "SCK goes quiet on a static page" cadence dependency that
+  motivated the dim-match guard. Unclear whether reachable
+  without `_WK*` SPI; spike needed.
+- Sub-iframe / sub-frame capture — per-iframe textures rather
+  than a single composited window grab. WebKit's
+  `WKWebView` is a single composition root; per-frame access
+  is `_WK*` SPI today. Likely a long-term Linux-WPE-first
+  story (WPE exposes per-view buffers natively).
 
 **Reference implementations.** [`tauri-apps/wry`](https://github.com/tauri-apps/wry)
 is a useful reference even though scrying doesn't depend on it. Its

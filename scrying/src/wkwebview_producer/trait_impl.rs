@@ -195,6 +195,22 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
         unsafe { self.webview().canGoForward() }
     }
 
+    fn set_visible(&mut self, visible: bool) -> Result<(), WryWebSurfaceError> {
+        if MainThreadMarker::new().is_none() {
+            return Err(WryWebSurfaceError::Platform(
+                "set_visible must be called on the main thread".into(),
+            ));
+        }
+        // `NSView::setHidden:` cascades to the page-side Page
+        // Visibility API: WebKit observes the
+        // `viewDidHide` / `viewDidUnhide` chain (or its KVO
+        // equivalent on `isHidden`) and pushes `visibilitychange`
+        // events with `document.hidden` flipped accordingly. No
+        // `_WK*` SPI involved.
+        self.webview().setHidden(!visible);
+        Ok(())
+    }
+
     fn apply_settings(
         &mut self,
         settings: &WebSurfaceSettings,

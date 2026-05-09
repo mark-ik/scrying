@@ -926,12 +926,49 @@ pub trait WryWebSurfaceProducer {
         false
     }
 
-    /// Open the developer-tools UI for this webview. On Windows this is
-    /// the WebView2 DevTools window; on macOS Safari Web Inspector; on
-    /// Linux WebKit Web Inspector.
+    /// Open the developer-tools UI for this webview.
+    ///
+    /// - **Windows**: opens the WebView2 DevTools window.
+    /// - **macOS**: macOS WebKit doesn't expose a way to *open* the
+    ///   inspector programmatically — Apple's public API only flips
+    ///   the *attachable* bit (`setInspectable:`, macOS 13.3+, wired
+    ///   via [`WebSurfaceSettings::devtools_enabled`]). The host or
+    ///   user must then attach Safari's Web Inspector manually:
+    ///   `Safari → Develop → <hostname> → <webview-page>` (Safari
+    ///   must be running and Develop menu enabled in
+    ///   `Safari → Settings → Advanced → Show features for web
+    ///   developers`). Calling this on macOS returns `Unsupported`;
+    ///   set `devtools_enabled = Some(true)` via `apply_settings`
+    ///   first to make the WebView discoverable.
+    /// - **Linux**: opens the WebKit Web Inspector.
     fn open_devtools_window(&mut self) -> Result<(), WryWebSurfaceError> {
         Err(WryWebSurfaceError::Unsupported(
             "WryWebSurfaceProducer::open_devtools_window is not implemented for this platform",
+        ))
+    }
+
+    /// Toggle the WebView's *page visibility* — what the page sees
+    /// via the W3C Page Visibility API (`document.hidden`,
+    /// `document.visibilityState`, the `visibilitychange` event).
+    ///
+    /// Browser-shape consumers call this when a tab becomes / stops
+    /// being the active one in their tab UI. `false` causes:
+    ///
+    /// - `document.hidden = true`, `visibilityState = "hidden"`
+    /// - `requestAnimationFrame` callbacks throttle to at most ~1 Hz
+    /// - Background-tab autoplay / video-decoding throttles per
+    ///   the engine's policy
+    /// - Setinterval / setTimeout callbacks may coalesce
+    ///
+    /// This is the *light* throttle: the page still runs, just
+    /// slower. It's distinct from the heavier
+    /// `_setSuspended:` SPI-only path which fully pauses execution
+    /// and is unsupported here. Most tabs-in-one-process consumers
+    /// only need the light path.
+    fn set_visible(&mut self, visible: bool) -> Result<(), WryWebSurfaceError> {
+        let _ = visible;
+        Err(WryWebSurfaceError::Unsupported(
+            "WryWebSurfaceProducer::set_visible is not implemented for this platform",
         ))
     }
 
