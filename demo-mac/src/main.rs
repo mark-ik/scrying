@@ -2524,12 +2524,21 @@ fn advance_incognito_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
         IncognitoStep::SetCookie => {
             let cookie = Cookie {
                 name: test.cookie_name.clone(),
+                // Set HttpOnly so the read path also exercises
+                // the round-trip — pre-fix `set_cookie` silently
+                // dropped the flag (Apple's property-dict
+                // initializer doesn't accept HttpOnly), so the
+                // observed cookie's `is_http_only` came back
+                // false even when we set it true. The cookies
+                // module now routes HttpOnly cookies through
+                // `cookiesWithResponseHeaderFields:forURL:` so
+                // the flag survives.
                 value: "phase-a".into(),
                 domain: "example.com".into(),
                 path: "/".into(),
                 expires_at: None,
                 is_secure: false,
-                is_http_only: false,
+                is_http_only: true,
             };
             if let Err(e) = state.producer.set_cookie(&cookie) {
                 test.failures
@@ -2610,11 +2619,13 @@ fn advance_incognito_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
             }
         }
         IncognitoStep::Verify => {
-            let in_incognito = test
+            let observed = test
                 .incognito_cookies
                 .as_ref()
-                .map(|cs| cs.iter().any(|c| c.name == test.cookie_name))
-                .unwrap_or(false);
+                .and_then(|cs| cs.iter().find(|c| c.name == test.cookie_name));
+            let in_incognito = observed.is_some();
+            let http_only_round_tripped =
+                observed.map(|c| c.is_http_only).unwrap_or(false);
             let in_persistent = test
                 .persistent_cookies
                 .as_ref()
@@ -2623,6 +2634,12 @@ fn advance_incognito_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
             if !in_incognito {
                 test.failures.push(format!(
                     "cookie '{}' missing from incognito producer's own store (set_cookie didn't take effect)",
+                    test.cookie_name
+                ));
+            }
+            if in_incognito && !http_only_round_tripped {
+                test.failures.push(format!(
+                    "cookie '{}' was set with is_http_only=true but observed back as is_http_only=false — round-trip regression in cookies module",
                     test.cookie_name
                 ));
             }
