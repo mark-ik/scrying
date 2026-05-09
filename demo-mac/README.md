@@ -172,32 +172,31 @@ cargo run -p demo-mac -- --capture-test
 
 ### `--profile-test`
 
-Loads an inline page with a stable `https://demo-mac.scrying.local/`
-origin (via the producer's
-[`load_html_with_base_url`](../scrying/src/wkwebview_producer.rs)),
-reads `document.cookie`, then sets a fresh `demo_token=val_<timestamp>`
-cookie. Run twice in a row with the same `data_dir`
-(`target/demo-mac-profile-test`): the second run observes the
-cookie set by the first, proving slice L's per-profile
-`WKWebsiteDataStore` is keyed deterministically by the path-derived
-UUID and persists across producer instances.
+Persistent-store complement to [`--incognito-test`](#--incognito-test):
+asserts that two persistent producers at the **same** `data_dir`
+share their cookie store. Stands up a primary + a secondary
+producer at a PID-suffixed `target/demo-mac-profile-test-<pid>/`
+path, sets a uniquely-named cookie on producer #1 via the
+`set_cookie` API, then queries both producers' stores via
+`request_all_cookies` and asserts the cookie shows up in both.
+Proves `WKWebsiteDataStore::dataStoreForIdentifier:` returns the
+same backing store for the same path-derived UUID across
+producer instances. Self-contained — no manual two-run flow.
 
-```sh
-# First run: PRIMED (no prior cookie)
-cargo run -p demo-mac -- --profile-test
-# Second run: PERSISTED (sees the value the first run set)
-cargo run -p demo-mac -- --profile-test
-```
+### `--two-tabs`
 
-Note: macOS keeps the data store inside the app container keyed by
-UUID — `rm -rf target/demo-mac-profile-test` does **not** reset the
-store. Use a different `data_dir` to truly start cold, or call
-`WKWebsiteDataStore::removeDataStoreForIdentifier:` (not currently
-exposed).
+Multi-instance independence assertion (browser-class item 7):
+two producers in one process, both subviews of the host
+window, navigating independently to distinct
+`scrying-test://` URLs. Drains nav events from each
+producer's queue and asserts tab #1 saw history-1 events
+(and not history-2), and vice versa — proving multiple
+producers in one process keep independent event streams with
+no cross-talk.
 
 ## Interactive keys
 
-Outside test modes, the following keys work:
+Outside test modes, the following hot-keys work:
 
 - `S`: request a CPU snapshot. The completion handler writes
   `demo-mac-snapshot.png` when ready.
@@ -205,8 +204,12 @@ Outside test modes, the following keys work:
   (`window.chrome.webview.addEventListener('message', ...)`
   recipients see it).
 
-Any other typed character / mouse / scroll event is forwarded to the
-WebView via the producer's input methods.
+All other input (typing, clicks, scrolls) goes to the WKWebView
+via AppKit's natural responder chain — the demo doesn't
+double-dispatch through `send_mouse_input` / `send_keyboard_input`
+in overlay mode (that path is gated to `--capture` mode, where
+the WKWebView is rendering into a captured texture and is
+therefore not directly clickable).
 
 ## Architecture
 

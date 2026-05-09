@@ -661,9 +661,65 @@ limitations.
   along the way: `try_acquire_frame` now treats status-only
   `CMSampleBuffer`s (every `SCFrameStatus` except `Complete`)
   as "no frame ready" rather than a fatal error.
+- ✅ Capability-probe parity for macOS —
+  `WryWebSurfaceCapabilities::probe` now mirrors the Windows
+  shape: a Metal-backed host wgpu device gets
+  `imported_texture: Supported`,
+  `preferred_mode: ImportedTexture`, and
+  `supported_frames: [MetalTextureRef]`. Hosts that drive
+  fallback selection from `probe` (rather than constructing a
+  producer to read its runtime capabilities) now discover the
+  SCK / Metal path on macOS.
+- ✅ Offset units standardized — `WkWebViewProducerConfig::offset`
+  is now physical pixels (matches the trait's `set_offset`
+  contract and `config.size`'s units). Pre-fix `with_offset(200, …)`
+  and `set_offset(200, …)` landed at different positions on
+  Retina; both now resolve to the same point.
+- ✅ Final `DownloadProgress` carries the response's announced
+  `Content-Length` — `DownloadEntry` captures `total_bytes_expected`
+  at `decideDestination` time rather than reusing
+  `last_progress_bytes`, so throttled downloads no longer emit
+  `bytes_written > total_bytes_expected` on the final tick.
+- ✅ Scroll-wheel events carry location + modifier flags —
+  `synthesize_scroll_wheel_event` now sets the CGEvent's
+  location (webview rect → screen-global, top-left origin) and
+  `CGEventFlags` (Shift / Control) before the round-trip
+  through `NSEvent::eventWithCGEvent:`. WebKit attributes the
+  scroll to the right WKWebView and honors cmd-scroll /
+  shift-scroll modifier behavior.
+- ✅ `is_http_only` round-trip through `set_cookie` —
+  `NSHTTPCookie::cookieWithProperties:` doesn't expose HttpOnly
+  as a settable property (Apple's documented set of property
+  keys excludes it). `set_cookie` now routes HttpOnly cookies
+  through `cookiesWithResponseHeaderFields:forURL:` with a
+  synthesized `Set-Cookie` header; non-HttpOnly cookies keep the
+  faster property-dict path. Verified by the `is_http_only=true`
+  assertion in `--incognito-test`.
+- ✅ Multi-instance + persistent-store coverage —
+  `--profile-test` is now a one-process self-assertion (two
+  persistent producers at the same `data_dir`, set on #1 → see
+  on #2; complement to `--incognito-test`'s isolation
+  assertion); `--two-tabs` asserts each producer's nav events
+  stay in its own queue (no cross-talk). Both run in the
+  headless suite — `scripts/test-mac.sh` is now 8 modes / 8 PASS.
 
 **Outstanding for follow-up slices:**
 
+- **SCK source-rect crop**: the producer's
+  `initWithDesktopIndependentWindow:` filter captures the
+  *entire* host window. Apple's `setSourceRect:` is documented as
+  ignored for single-window filters
+  ([sourceRect docs](https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/3919829-sourcerect)),
+  so the imported texture leaks host chrome around the WKWebView
+  (and recursively captures itself if the host composites the
+  texture back into the same window — visible in `--capture`'s
+  right-half preview). Three candidate fixes documented inline
+  on `make_stream_configuration`: display-style filter +
+  screen-coords sourceRect; per-frame Metal blit in
+  `try_acquire_frame`; or a dedicated borderless `NSWindow`
+  whose content view is the WKWebView. The Metal-blit path is
+  the lowest-disruption option (~1 ms/frame, no integration-model
+  change) and is the recommended next push.
 - Authentication during downloads — wired through the shared
   page handler, but the download-only-specific challenge path
   (e.g. mid-download, post-promotion auth) only fires for

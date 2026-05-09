@@ -34,8 +34,9 @@ cargo run -p demo-mac -- --download-test             # downloads pipeline (HTTP 
 cargo run -p demo-mac -- --probe-snapshot            # CPU snapshot via takeSnapshot:
 cargo run -p demo-mac -- --capture --dump-every 30   # SCK pipeline + per-N-frame readback
 cargo run -p demo-mac -- --capture-test              # SCK assertion smoke test (needs Screen Recording perm)
-cargo run -p demo-mac -- --profile-test              # per-profile WKWebsiteDataStore persistence
-# All assertion-style runs at once (headless, exit 1 on any FAIL)
+cargo run -p demo-mac -- --profile-test              # persistent-store-shared-across-producers assertion
+cargo run -p demo-mac -- --two-tabs                  # multi-instance independence (no cross-talk between producers)
+# All assertion-style runs at once (headless, 8 modes, exit 1 on any FAIL)
 bash scripts/test-mac.sh
 ```
 
