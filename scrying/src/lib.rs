@@ -324,6 +324,37 @@ pub enum NavigationEvent {
         destination_path: std::path::PathBuf,
         resume_data: Option<Vec<u8>>,
     },
+    /// External content was dropped on the page (file from
+    /// Finder, URL from another browser, image from a different
+    /// app, etc.). Fires *in addition to* the page's own
+    /// `dragenter` / `drop` JS events and any default WKWebView
+    /// behavior — the user-script that drives this event runs
+    /// at the capture phase but does *not* call
+    /// `event.preventDefault()`, so the page still gets to
+    /// handle the drop normally. Browser-class consumers use
+    /// the event for analytics, status indicators, or "I want
+    /// to route this URL drop to the active tab" decisions.
+    ///
+    /// Drops originating from inside the page itself (e.g.
+    /// dragging a list item to reorder, or any drag whose
+    /// source has no external content) are filtered out
+    /// page-side and don't fire this event — the heuristic is
+    /// "the `DataTransfer` carries at least one
+    /// `files` entry, an image MIME, or a `text/uri-list`."
+    ///
+    /// `x` / `y` are CSS pixels relative to the WebView's
+    /// viewport (matching `MouseEvent.clientX/Y`). `file_count`
+    /// is the number of OS files in `dataTransfer.files`.
+    /// `primary_url` is the first URL parsed from
+    /// `dataTransfer.getData("text/uri-list")` (or
+    /// `text/plain` if no uri-list is present); `None` when
+    /// the drop carries no URL string.
+    DropDetected {
+        x: f64,
+        y: f64,
+        file_count: u32,
+        primary_url: Option<String>,
+    },
     /// The page's WebRTC capture state changed — at least one
     /// `getUserMedia` track started or ended since the last
     /// emission. `audio_active_tracks` / `video_active_tracks` are

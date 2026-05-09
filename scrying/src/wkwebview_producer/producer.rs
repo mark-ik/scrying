@@ -49,9 +49,10 @@ use super::nav_delegate::{AuthHandlerFn, NavDelegate, NavState};
 pub type CursorHandlerFn = Box<dyn Fn(crate::CursorShape) + Send + Sync + 'static>;
 use super::scheme_handler::{SchemeHandler, UrlSchemeHandlerFn};
 use super::script_message::{
-    ContextMenuMessageHandler, MediaCaptureMessageHandler, ScriptMessageHandler,
-    CONTEXT_MENU_HANDLER_NAME, CONTEXT_MENU_USER_SCRIPT, HOST_BRIDGE_HANDLER_NAME,
-    HOST_BRIDGE_USER_SCRIPT, MEDIA_CAPTURE_HANDLER_NAME, MEDIA_CAPTURE_USER_SCRIPT,
+    ContextMenuMessageHandler, DropMessageHandler, MediaCaptureMessageHandler,
+    ScriptMessageHandler, CONTEXT_MENU_HANDLER_NAME, CONTEXT_MENU_USER_SCRIPT,
+    DROP_HANDLER_NAME, DROP_USER_SCRIPT, HOST_BRIDGE_HANDLER_NAME, HOST_BRIDGE_USER_SCRIPT,
+    MEDIA_CAPTURE_HANDLER_NAME, MEDIA_CAPTURE_USER_SCRIPT,
 };
 use super::title_observer::TitleObserver;
 use super::ui_delegate::{PermissionHandlerFn, UiDelegate};
@@ -334,12 +335,15 @@ impl WkWebViewProducer {
             ContextMenuMessageHandler::new(mtm, Arc::clone(&nav_state));
         let media_capture_handler =
             MediaCaptureMessageHandler::new(mtm, Arc::clone(&nav_state));
+        let drop_handler = DropMessageHandler::new(mtm, Arc::clone(&nav_state));
         let bridge_handler_name = NSString::from_str(HOST_BRIDGE_HANDLER_NAME);
         let bridge_user_script_source = NSString::from_str(HOST_BRIDGE_USER_SCRIPT);
         let context_menu_handler_name = NSString::from_str(CONTEXT_MENU_HANDLER_NAME);
         let context_menu_user_script_source = NSString::from_str(CONTEXT_MENU_USER_SCRIPT);
         let media_capture_handler_name = NSString::from_str(MEDIA_CAPTURE_HANDLER_NAME);
         let media_capture_user_script_source = NSString::from_str(MEDIA_CAPTURE_USER_SCRIPT);
+        let drop_handler_name = NSString::from_str(DROP_HANDLER_NAME);
+        let drop_user_script_source = NSString::from_str(DROP_USER_SCRIPT);
         let user_content_controller = unsafe { webview_config.userContentController() };
         unsafe {
             user_content_controller.addScriptMessageHandler_name(
@@ -353,6 +357,10 @@ impl WkWebViewProducer {
             user_content_controller.addScriptMessageHandler_name(
                 ProtocolObject::from_ref(&*media_capture_handler),
                 &media_capture_handler_name,
+            );
+            user_content_controller.addScriptMessageHandler_name(
+                ProtocolObject::from_ref(&*drop_handler),
+                &drop_handler_name,
             );
             let bridge_script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
                 WKUserScript::alloc(mtm),
@@ -375,6 +383,13 @@ impl WkWebViewProducer {
                 false,
             );
             user_content_controller.addUserScript(&media_capture_script);
+            let drop_script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                WKUserScript::alloc(mtm),
+                &drop_user_script_source,
+                WKUserScriptInjectionTime::AtDocumentStart,
+                false,
+            );
+            user_content_controller.addUserScript(&drop_script);
         }
 
         let webview: Retained<WKWebView> = unsafe {

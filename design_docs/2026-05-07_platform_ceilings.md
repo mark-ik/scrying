@@ -800,12 +800,23 @@ checklist deliberately omits.
   `_WK*` SPI involved. Distinct from the heavier
   `_setSuspended:` SPI-only path (which fully pauses execution
   and stays out of scope).
-- Drag-and-drop in — file / URL drops *onto* the page work
-  through the public `NSDraggingDestination` protocol on the
-  parent NSView; route a synthesized drag event to WebKit via
-  `performDragOperation:`. (Drag-and-drop *out* — initiating
-  a drag *from* page content — remains `_WK*` SPI on macOS and
-  is staying punted.)
+- ✅ Drag-and-drop in (observability) — capture-phase
+  `drop` user-script filters out intra-page drags (heuristic:
+  drop must carry at least one of `dataTransfer.files`,
+  `text/uri-list`, or an `image/*` MIME) and posts a
+  NUL-delimited 4-field payload to a dedicated
+  `scryingDrop` `WKScriptMessageHandler`. The handler emits
+  [`crate::NavigationEvent::DropDetected { x, y, file_count,
+  primary_url }`] onto the producer's nav-event queue. Pure
+  observability: the user-script does *not* call
+  `event.preventDefault()`, so the page's own JS `drop` event
+  fires alongside, and WebKit's default behavior (file →
+  navigate, drop on `<input type=file>`, etc.) runs as usual.
+  Browser-class consumers use the event for analytics, status
+  indicators, or "I want to route this URL drop to the active
+  tab" decisions made *in addition to* whatever the page does.
+  (Drag-and-drop *out* — initiating a drag *from* page content
+  — remains `_WK*` SPI on macOS and stays punted.)
 - ✅ Print / `Cmd+P` —
   `WkWebViewProducer::print()` fetches the standard
   `NSPrintInfo::sharedPrintInfo`, asks the WebView for an

@@ -54,7 +54,7 @@ yet.
 | Pointer / touch / pen synthesis | ✅ | ? | ? | macOS has no public direct-touch synthesis API — events arrive at JS as `pointerType: "mouse"` |
 | Keyboard + IME (composition) | ✅ | ✅ | ? | Korean / Japanese / Chinese composition events round-trip |
 | Cursor-change events (host mirrors WebKit cursor) | ✅ | ? | ? | Polled via `NSCursor.currentSystemCursor` after each forwarded event |
-| Drag-and-drop *in* (file / URL → page) | ⏳ | ⏳ | ⏳ | `NSDraggingDestination` + `performDragOperation:` on parent NSView |
+| Drag-and-drop *in* (file / URL → page) | ✅ | ⏳ | ⏳ | Capture-phase `drop` user-script reports external-content drops via `NavigationEvent::DropDetected { x, y, file_count, primary_url }`. Observability only — does not call `preventDefault`, so WebKit's default drop behavior (file → navigate, drop on `<input type=file>`) still runs |
 | Drag-and-drop *out* (page content → host) | 🚫 | ? | ⏳ | macOS path is `_WK*` SPI |
 | Context-menu interception | ✅ | ? | ? | JS user-script + `WKScriptMessageHandler`; `NavigationEvent::ContextMenuRequested` |
 
