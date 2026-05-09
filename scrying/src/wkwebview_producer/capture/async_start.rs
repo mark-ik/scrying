@@ -25,8 +25,9 @@ use crate::{HostWgpuContext, InteropBackend, WebSurfaceMode, WryWebSurfaceError}
 
 use super::super::producer::WkWebViewProducer;
 use super::{
-    make_stream_configuration, write_pending, CaptureState, CaptureStatus, InProgressCaptureState,
-    LatestSample, PendingCaptureSlot, SendOnly, StreamErrorDelegate, StreamOutputDelegate,
+    host_window_pixel_size, make_stream_configuration, write_pending, CaptureState,
+    CaptureStatus, InProgressCaptureState, LatestSample, PendingCaptureSlot, SendOnly,
+    StreamErrorDelegate, StreamOutputDelegate,
 };
 
 impl WkWebViewProducer {
@@ -99,13 +100,21 @@ impl WkWebViewProducer {
             ));
         }
         let target_id = target_window_number as u32;
-        let target_size = self.config.size;
-        // Compute the source rect on the main thread (now), so the
-        // background block's `make_stream_configuration` call gets
-        // the right region. WKWebView / NSWindow are
-        // MainThreadOnly — we can't reach them from the dispatch
-        // queue the SCK completion fires on.
-        let source_rect = super::webview_window_rect(&self.webview, &host_window);
+        // Capture at native window pixel resolution; per-frame
+        // crop happens in `try_acquire_frame`. WKWebView /
+        // NSWindow are MainThreadOnly so we compute this on the
+        // main thread now, before the SCK completion block
+        // (which fires on a background queue).
+        let window_pixel_size = host_window_pixel_size(&host_window);
+
+        // Allocate the command queue for the per-frame blit on
+        // the main thread; we ferry it across to the SCK
+        // completion via `SendOnly`.
+        let command_queue = metal_device.newCommandQueue().ok_or_else(|| {
+            WryWebSurfaceError::Platform(
+                "MTLDevice::newCommandQueue returned nil".into(),
+            )
+        })?;
 
         *self
             .pending_capture
@@ -116,6 +125,7 @@ impl WkWebViewProducer {
 
         let pending = Arc::clone(&self.pending_capture);
         let metal_device_for_block = SendOnly(metal_device);
+        let command_queue_for_block = SendOnly(command_queue);
 
         let outer_block = RcBlock::new(
             move |content: *mut SCShareableContent, err: *mut NSError| {
@@ -186,8 +196,7 @@ impl WkWebViewProducer {
                         &target_window,
                     )
                 };
-                let stream_config =
-                    make_stream_configuration(target_size, Some(source_rect));
+                let stream_config = make_stream_configuration(window_pixel_size);
                 let stream_error = Arc::new(Mutex::new(None::<String>));
                 let error_delegate = StreamErrorDelegate::new(Arc::clone(&stream_error));
                 let stream = unsafe {
@@ -221,9 +230,11 @@ impl WkWebViewProducer {
 
                 // Capture the assembled state into the inner block.
                 let metal_device = metal_device_for_block.0.clone();
+                let command_queue = command_queue_for_block.0.clone();
                 let pending_inner = Arc::clone(&pending);
                 let in_progress = SendOnly(InProgressCaptureState {
                     metal_device,
+                    command_queue,
                     stream: stream.clone(),
                     output: output_delegate.clone(),
                     error_delegate: error_delegate.clone(),
@@ -247,6 +258,7 @@ impl WkWebViewProducer {
                     let parts = &in_progress.0;
                     let cap = CaptureState {
                         metal_device: parts.metal_device.clone(),
+                        command_queue: parts.command_queue.clone(),
                         stream: parts.stream.clone(),
                         output: parts.output.clone(),
                         _error_delegate: parts.error_delegate.clone(),

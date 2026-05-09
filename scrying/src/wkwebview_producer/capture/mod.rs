@@ -17,7 +17,7 @@ use objc2_core_foundation::CFRetained;
 use objc2_core_media::CMSampleBuffer;
 use objc2_core_video::kCVPixelFormatType_32BGRA;
 use objc2_foundation::{NSError, NSObject, NSObjectProtocol};
-use objc2_metal::MTLDevice;
+use objc2_metal::{MTLCommandQueue, MTLDevice};
 use objc2_screen_capture_kit::{
     SCStream, SCStreamConfiguration, SCStreamDelegate, SCStreamOutput, SCStreamOutputType,
 };
@@ -176,6 +176,7 @@ unsafe impl<T> Send for SendOnly<T> {}
 /// [`CaptureState`] when the stream goes live.
 pub(super) struct InProgressCaptureState {
     pub(super) metal_device: Retained<ProtocolObject<dyn MTLDevice>>,
+    pub(super) command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pub(super) stream: Retained<SCStream>,
     pub(super) output: Retained<StreamOutputDelegate>,
     pub(super) error_delegate: Retained<StreamErrorDelegate>,
@@ -205,6 +206,11 @@ pub(super) struct CaptureState {
     /// allocate IOSurface-backed `MTLTexture`s on the same device the
     /// consumer renders against (no cross-device migration).
     pub(super) metal_device: Retained<ProtocolObject<dyn MTLDevice>>,
+    /// Command queue for the per-frame Metal blit that crops the
+    /// full-window captured texture down to the WKWebView's pixel
+    /// rect. Allocated once at `start_capture` time on
+    /// `metal_device` and reused across frames.
+    pub(super) command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pub(super) stream: Retained<SCStream>,
     pub(super) output: Retained<StreamOutputDelegate>,
     pub(super) _error_delegate: Retained<StreamErrorDelegate>,
@@ -226,52 +232,28 @@ pub(super) struct CaptureState {
 
 /// Build the [`SCStreamConfiguration`] used by both
 /// [`super::WkWebViewProducer::start_capture`] and live resizes.
-/// Single source of truth for pixel format / cursor / queue depth.
 ///
-/// `_source_rect_unused`, when `Some`, *was* an attempt to crop
-/// to the WKWebView's window-region via
-/// `SCStreamConfiguration::setSourceRect:`. Apple documents this
-/// value as ignored when the filter targets a single window
-/// (which `initWithDesktopIndependentWindow:` does):
-///
-/// > "The system doesn't reference this value when you capture a
-/// > single window."
-/// > <https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/3919829-sourcerect>
-///
-/// So the parameter is plumbed but the call to `setSourceRect:`
-/// is *not* made — it'd be a no-op masquerading as a crop. We
-/// keep the rect computation in [`webview_window_rect`] because
-/// downstream consumers can use it (it's the rect they'd want to
-/// crop client-side), and because a future fix here will need
-/// the same math. **Known limitation**: the imported texture is
-/// the full host window; consumers compositing the texture must
-/// crop to the webview's rect themselves.
-///
-/// Three paths to a real crop, in increasing structural cost:
-/// 1. Display-style filter (`initWithDisplay:includingWindows:`)
-///    + `sourceRect` in screen coords — `sourceRect` is honored
-///    for display captures. Trade-off: any popover or floating
-///    window over the webview's screen region appears in the
-///    capture.
-/// 2. A Metal blit on every captured frame inside
-///    `try_acquire_frame`: source IOSurface-backed texture →
-///    cropped destination texture sized to the webview's rect.
-///    ~1 ms/frame on Apple silicon. Doesn't change the
-///    integration model.
-/// 3. A dedicated borderless `NSWindow` whose content view is the
-///    WKWebView (instead of subview-of-parent), parent-attached
-///    to the host's window. SCK then captures that single
-///    webview-sized window via `initWithDesktopIndependentWindow:`
-///    cleanly. Cleanest long-term but changes the producer's
-///    constructor contract.
+/// `window_pixel_size` is the full host window's pixel
+/// dimensions (window-points × backing-scale) — *not* the
+/// WKWebView's pixel size. SCK's `initWithDesktopIndependentWindow:`
+/// filter captures the entire window unconditionally; the
+/// `setWidth:` / `setHeight:` properties just control the IOSurface
+/// dimensions the captured pixels are scaled into. We deliberately
+/// match output to the source size so no scaling happens, and the
+/// per-frame crop in `try_acquire_frame` blits the WKWebView's
+/// pixel rect from this full-window texture into a webview-sized
+/// destination. Apple's `setSourceRect:` is ignored for
+/// single-window filters (per Apple's
+/// [sourceRect docs](https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/3919829-sourcerect));
+/// the Metal-blit crop is what actually limits the imported
+/// texture to webview pixels.
 pub(super) fn make_stream_configuration(
-    size: PhysicalSize<u32>,
-    _source_rect_unused: Option<objc2_core_foundation::CGRect>,
+    window_pixel_size: PhysicalSize<u32>,
 ) -> Retained<SCStreamConfiguration> {
     unsafe {
         let cfg = SCStreamConfiguration::new();
-        cfg.setWidth(size.width as usize);
-        cfg.setHeight(size.height as usize);
+        cfg.setWidth(window_pixel_size.width.max(1) as usize);
+        cfg.setHeight(window_pixel_size.height.max(1) as usize);
         // 32-bit BGRA — matches `MTLPixelFormat::BGRA8Unorm` and
         // `wgpu::TextureFormat::Bgra8Unorm` so the consumer renders
         // without a format swizzle pass.
@@ -282,6 +264,25 @@ pub(super) fn make_stream_configuration(
         cfg.setQueueDepth(3);
         cfg
     }
+}
+
+/// Compute the host window's pixel dimensions (points × backing
+/// scale). The SCK stream is configured to this size so the
+/// captured IOSurface preserves the full window at native
+/// resolution — `try_acquire_frame` then blits the WKWebView's
+/// pixel rect out of it.
+pub(super) fn host_window_pixel_size(
+    window: &objc2_app_kit::NSWindow,
+) -> PhysicalSize<u32> {
+    let scale = window.backingScaleFactor().max(1.0);
+    let frame = window
+        .contentView()
+        .map(|cv| cv.frame())
+        .unwrap_or_else(|| window.frame());
+    PhysicalSize::new(
+        ((frame.size.width * scale).round() as u32).max(1),
+        ((frame.size.height * scale).round() as u32).max(1),
+    )
 }
 
 /// Compute the WKWebView's rect within its host window, in

@@ -507,26 +507,24 @@ impl WkWebViewProducer {
         Ok(())
     }
 
-    /// Push a fresh `SCStreamConfiguration` (with up-to-date
-    /// width/height + source rect) to the live SCK stream after
-    /// the WKWebView's frame changes — either size (`resize`) or
-    /// origin (`set_offset`). No-op when capture isn't running.
+    /// Push a fresh `SCStreamConfiguration` to the live SCK
+    /// stream after the host window's pixel dimensions change
+    /// (resize / DPI flip). No-op when capture isn't running.
     ///
-    /// Without this, an `initWithDesktopIndependentWindow` filter
-    /// keeps streaming the entire host window: surrounding host
-    /// chrome leaks into the imported texture, and consumers that
-    /// composite the captured texture back into the same window
-    /// recursively capture themselves.
+    /// The SCK stream captures the *full* host window at native
+    /// pixel resolution; `try_acquire_frame` does the per-frame
+    /// blit-crop down to the WKWebView's pixel rect. So the
+    /// stream config tracks window dimensions, not webview
+    /// dimensions.
     pub(super) fn update_capture_for_layout_change(&self) {
-        use super::capture::{make_stream_configuration, webview_window_rect};
+        use super::capture::{host_window_pixel_size, make_stream_configuration};
         let Some(capture) = self.capture.as_ref() else {
             return;
         };
-        let source_rect = self
-            .webview
-            .window()
-            .map(|w| webview_window_rect(&self.webview, &w));
-        let new_cfg = make_stream_configuration(self.config.size, source_rect);
+        let Some(window) = self.webview.window() else {
+            return;
+        };
+        let new_cfg = make_stream_configuration(host_window_pixel_size(&window));
         unsafe {
             capture
                 .stream

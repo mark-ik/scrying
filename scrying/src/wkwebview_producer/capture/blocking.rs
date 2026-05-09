@@ -22,7 +22,8 @@ use objc2::AnyThread;
 use objc2_core_video::{CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetIOSurface, CVPixelBufferGetWidth};
 use objc2_foundation::{MainThreadMarker, NSArray, NSError};
 use objc2_metal::{
-    MTLDevice, MTLPixelFormat, MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
+    MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLDevice,
+    MTLPixelFormat, MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
 use objc2_screen_capture_kit::{
     SCContentFilter, SCShareableContent, SCStream, SCStreamOutputType, SCWindow,
@@ -37,8 +38,8 @@ use crate::{
 use super::super::helpers::pump_until;
 use super::super::producer::WkWebViewProducer;
 use super::{
-    make_stream_configuration, CaptureSignal, CaptureState, LatestSample, SendCFRetained,
-    StreamErrorDelegate, StreamOutputDelegate,
+    host_window_pixel_size, make_stream_configuration, CaptureSignal, CaptureState,
+    LatestSample, SendCFRetained, StreamErrorDelegate, StreamOutputDelegate,
 };
 
 impl WkWebViewProducer {
@@ -110,18 +111,21 @@ impl WkWebViewProducer {
         };
 
         let target_window = self.resolve_target_window(timeout)?;
-        let target_size = self.config.size;
-        // Compute the WKWebView's rect within the host window
-        // (points, top-left origin) so SCK only samples webview
-        // pixels — not surrounding host chrome, and not the
-        // recursively-rendered captured texture if the host
-        // composites it back into the same window.
+        // Capture the *full* host window at native pixel
+        // resolution; `try_acquire_frame` does the per-frame
+        // blit-crop down to the WKWebView's pixel rect.
         let host_window = self.webview.window().ok_or_else(|| {
             WryWebSurfaceError::Platform(
                 "WKWebView is not in a window — start_capture requires the producer's parent NSView to be embedded in an NSWindow".into(),
             )
         })?;
-        let source_rect = super::webview_window_rect(&self.webview, &host_window);
+        let window_pixel_size = host_window_pixel_size(&host_window);
+
+        let command_queue = metal_device.newCommandQueue().ok_or_else(|| {
+            WryWebSurfaceError::Platform(
+                "MTLDevice::newCommandQueue returned nil".into(),
+            )
+        })?;
 
         let filter = unsafe {
             SCContentFilter::initWithDesktopIndependentWindow(
@@ -130,7 +134,7 @@ impl WkWebViewProducer {
             )
         };
 
-        let stream_config = make_stream_configuration(target_size, Some(source_rect));
+        let stream_config = make_stream_configuration(window_pixel_size);
 
         let stream_error = Arc::new(Mutex::new(None::<String>));
         let error_delegate = StreamErrorDelegate::new(Arc::clone(&stream_error));
@@ -202,6 +206,7 @@ impl WkWebViewProducer {
 
         self.capture = Some(CaptureState {
             metal_device,
+            command_queue,
             stream,
             output: output_delegate,
             _error_delegate: error_delegate,
@@ -404,33 +409,121 @@ impl WkWebViewProducer {
             )
         })?;
 
-        let width = CVPixelBufferGetWidth(pixel_buffer);
-        let height = CVPixelBufferGetHeight(pixel_buffer);
+        let source_width = CVPixelBufferGetWidth(pixel_buffer);
+        let source_height = CVPixelBufferGetHeight(pixel_buffer);
 
-        let descriptor = unsafe {
+        // Wrap the IOSurface as a transient source MTLTexture.
+        // We don't hand this out — it's the full host-window
+        // capture; we blit a sub-rect of it into a webview-sized
+        // destination below.
+        let source_descriptor = unsafe {
             MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
                 MTLPixelFormat::BGRA8Unorm,
-                width,
-                height,
+                source_width,
+                source_height,
                 false,
             )
         };
-        descriptor.setUsage(MTLTextureUsage::ShaderRead);
-        descriptor.setStorageMode(MTLStorageMode::Shared);
+        source_descriptor.setUsage(MTLTextureUsage::ShaderRead);
+        source_descriptor.setStorageMode(MTLStorageMode::Shared);
 
-        let texture: Retained<ProtocolObject<dyn MTLTexture>> = capture
+        let source_texture: Retained<ProtocolObject<dyn MTLTexture>> = capture
             .metal_device
-            .newTextureWithDescriptor_iosurface_plane(&descriptor, &iosurface, 0)
+            .newTextureWithDescriptor_iosurface_plane(&source_descriptor, &iosurface, 0)
             .ok_or_else(|| {
+                WryWebSurfaceError::Platform(
+                    "MTLDevice::newTextureWithDescriptor:iosurface:plane: returned nil".into(),
+                )
+            })?;
+
+        // Compute the WKWebView's pixel rect within the source
+        // texture. SCK captures the host window's content view at
+        // its native pixel dimensions; we set
+        // `SCStreamConfiguration::width/height` to match (no
+        // scaling), so the source rect is just the webview's
+        // window-coords rect × backing scale.
+        let host_window = self.webview.window().ok_or_else(|| {
             WryWebSurfaceError::Platform(
-                "MTLDevice::newTextureWithDescriptor:iosurface:plane: returned nil".into(),
+                "WKWebView's host window vanished mid-capture".into(),
             )
         })?;
+        let webview_rect_pts =
+            super::webview_window_rect(&self.webview, &host_window);
+        let scale = host_window.backingScaleFactor().max(1.0);
+        let crop_x = (webview_rect_pts.origin.x * scale).round().max(0.0) as usize;
+        let crop_y = (webview_rect_pts.origin.y * scale).round().max(0.0) as usize;
+        let crop_w_raw = (webview_rect_pts.size.width * scale).round().max(1.0) as usize;
+        let crop_h_raw = (webview_rect_pts.size.height * scale).round().max(1.0) as usize;
+        // Clamp to the source texture so a stale layout-rect
+        // doesn't request bytes past the IOSurface bounds.
+        let crop_w = crop_w_raw.min(source_width.saturating_sub(crop_x));
+        let crop_h = crop_h_raw.min(source_height.saturating_sub(crop_y));
+        if crop_w == 0 || crop_h == 0 {
+            return Ok(None);
+        }
+
+        // Allocate a fresh destination texture sized to the
+        // webview's pixel rect. Per-frame allocation matches the
+        // existing source-texture pattern (cheap on Apple
+        // silicon; the IOSurface-backed path already creates a
+        // texture per frame).
+        let dest_descriptor = unsafe {
+            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                MTLPixelFormat::BGRA8Unorm,
+                crop_w,
+                crop_h,
+                false,
+            )
+        };
+        dest_descriptor.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::RenderTarget);
+        dest_descriptor.setStorageMode(MTLStorageMode::Shared);
+
+        let dest_texture: Retained<ProtocolObject<dyn MTLTexture>> = capture
+            .metal_device
+            .newTextureWithDescriptor(&dest_descriptor)
+            .ok_or_else(|| {
+                WryWebSurfaceError::Platform(
+                    "MTLDevice::newTextureWithDescriptor: (dest) returned nil".into(),
+                )
+            })?;
+
+        // Encode the blit. Source origin is the webview's pixel
+        // offset within the captured window; dest origin is the
+        // top-left of the cropped texture.
+        let cmd_buf = capture.command_queue.commandBuffer().ok_or_else(|| {
+            WryWebSurfaceError::Platform(
+                "MTLCommandQueue::commandBuffer returned nil".into(),
+            )
+        })?;
+        let blit = cmd_buf.blitCommandEncoder().ok_or_else(|| {
+            WryWebSurfaceError::Platform(
+                "MTLCommandBuffer::blitCommandEncoder returned nil".into(),
+            )
+        })?;
+        unsafe {
+            blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
+                &source_texture,
+                0,
+                0,
+                objc2_metal::MTLOrigin { x: crop_x, y: crop_y, z: 0 },
+                objc2_metal::MTLSize { width: crop_w, height: crop_h, depth: 1 },
+                &dest_texture,
+                0,
+                0,
+                objc2_metal::MTLOrigin { x: 0, y: 0, z: 0 },
+            );
+        }
+        blit.endEncoding();
+        cmd_buf.commit();
+        // The consumer's import path on Apple silicon doesn't
+        // need an explicit fence (IOSurface + MTL Shared storage
+        // give implicit cross-queue coherence); skipping
+        // `waitUntilCompleted` keeps the host thread non-blocking.
 
         let raw_metal_texture =
-            Retained::as_ptr(&texture) as *mut std::ffi::c_void;
+            Retained::as_ptr(&dest_texture) as *mut std::ffi::c_void;
         let frame = NativeMetalTextureRef {
-            size: PhysicalSize::new(width as u32, height as u32),
+            size: PhysicalSize::new(crop_w as u32, crop_h as u32),
             format: wgpu::TextureFormat::Bgra8Unorm,
             generation: capture.generation.fetch_add(1, Ordering::Relaxed),
             // IOSurface coherence is implicit on Apple silicon; the
@@ -441,12 +534,13 @@ impl WkWebViewProducer {
             raw_metal_texture,
         };
 
-        // Keep the texture alive past this function. The consumer's
-        // importer (`scrying::native_frame::metal::import`) will retain
-        // its own reference before our `last_emitted` is overwritten on
-        // the next `try_acquire_frame`, so consumers must consume each
-        // frame before requesting the next.
-        capture.last_emitted = Some(texture);
+        // Keep the destination texture alive past this function.
+        // The consumer's importer
+        // (`scrying::native_frame::metal::import`) will retain its
+        // own reference before our `last_emitted` is overwritten on
+        // the next `try_acquire_frame`, so consumers must consume
+        // each frame before requesting the next.
+        capture.last_emitted = Some(dest_texture);
 
         Ok(Some(WryWebSurfaceFrame::Native(NativeFrame::MetalTextureRef(frame))))
     }

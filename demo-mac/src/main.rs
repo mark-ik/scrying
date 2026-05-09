@@ -1118,14 +1118,20 @@ impl ApplicationHandler for App {
             if state.capture_started && state.render.is_some() {
                 match state.producer.capture_status() {
                     CaptureStatus::Live => {
-                        // Live: request a redraw to drive the wgpu loop.
-                        state.window.request_redraw();
-                        // --capture-test: also drain frames here
-                        // (separate from the wgpu render path) so
-                        // we can assert sizes without depending on
-                        // the redraw cadence.
                         if state.capture_test.is_some() {
+                            // --capture-test is the sole frame
+                            // consumer when active. Skip the
+                            // wgpu redraw path so the render
+                            // loop's `try_acquire_frame` doesn't
+                            // race the test driver for the
+                            // latest-sample slot — every other
+                            // frame would otherwise land at one
+                            // path or the other depending on
+                            // tick scheduling.
                             advance_capture_test(state, event_loop);
+                        } else {
+                            // Live: request a redraw to drive the wgpu loop.
+                            state.window.request_redraw();
                         }
                     }
                     CaptureStatus::Failed(msg) => {
