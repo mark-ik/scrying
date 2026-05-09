@@ -33,12 +33,13 @@ cargo run -p demo-mac -- --incognito-test            # nonPersistentDataStore is
 cargo run -p demo-mac -- --download-test             # downloads pipeline (HTTP loopback)
 cargo run -p demo-mac -- --probe-snapshot            # CPU snapshot via takeSnapshot:
 cargo run -p demo-mac -- --capture --dump-every 30   # SCK pipeline + per-N-frame readback
+cargo run -p demo-mac -- --capture-test              # SCK assertion smoke test (needs Screen Recording perm)
 cargo run -p demo-mac -- --profile-test              # per-profile WKWebsiteDataStore persistence
 # All assertion-style runs at once (headless, exit 1 on any FAIL)
 bash scripts/test-mac.sh
 ```
 
-`--*-test` modes default to a hidden window and `NSApplicationActivationPolicyProhibited` so they run silently in the background; pass `--visible` to watch the WKWebView in real time. `.github/workflows/test-mac.yml` runs `scripts/test-mac.sh` on every push to master against `macos-latest`.
+`--*-test` modes default to a hidden window and `NSApplicationActivationPolicyProhibited` so they run silently in the background; pass `--visible` to watch the WKWebView in real time. `--capture-test` is the one exception — it forces visibility because SCK can't capture hidden windows, and is held out of `scripts/test-mac.sh` because Screen Recording permission can't be self-granted (CI runners need a `tccutil` pre-grant). `.github/workflows/test-mac.yml` runs the rest of the suite on every push to master against `macos-latest`.
 
 ## Relationship to wgpu-graft
 

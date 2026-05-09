@@ -151,6 +151,25 @@ The HTTP-server detour is necessary because WebKit doesn't
 promote custom URL-scheme responses to downloads regardless of
 MIME type or `decidePolicyForNavigationResponse:` override.
 
+### `--capture-test`
+
+Smoke test for the ScreenCaptureKit pipeline. Implies
+`--capture` (so the wgpu render context, half-window webview,
+and `start_capture_async` kickoff all light up) and forces
+`--visible` (SCK can't bind an `SCContentFilter` to a hidden
+window). Once `capture_status` reports `Live`, drains 5 frames
+via `try_acquire_frame` and asserts each frame's reported
+`(width, height)` matches the configured webview size.
+
+**Held out of `scripts/test-mac.sh`** because Screen Recording
+permission can't be granted from inside the test process — a
+fresh macOS user prompts on first SCK call, and CI runners need
+a pre-grant via `tccutil`. Run manually:
+
+```bash
+cargo run -p demo-mac -- --capture-test
+```
+
 ### `--profile-test`
 
 Loads an inline page with a stable `https://demo-mac.scrying.local/`

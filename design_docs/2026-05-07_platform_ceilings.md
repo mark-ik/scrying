@@ -625,24 +625,54 @@ limitations.
   `--visible` overrides for debugging.
 - ✅ CI — `.github/workflows/test-mac.yml` runs the suite on
   `macos-latest` (currently Apple Silicon).
+- ✅ Cursor handler callback parity — `set_cursor_handler` /
+  `clear_cursor_handler` registers a
+  `Fn(CursorShape) + Send + Sync` closure invoked synchronously
+  on every `NSCursor.currentSystemCursor` change observed after a
+  forwarded input event. Coexists with the pull-model
+  `poll_cursor_shape` queue. Verified by `demo-mac --scripted`.
+- ✅ Download auth handler — the existing `AuthHandlerFn`
+  registered via `set_auth_handler` now also routes through
+  `WKDownloadDelegate::download:didReceiveAuthenticationChallenge:`.
+  One handler covers both page-level and download-level auth
+  challenges; hosts that need download-specific behavior can
+  branch on the URL inside the handler. Verified by phase D of
+  `demo-mac --download-test`.
+- ✅ Programmatic download initiation — `start_download(url)`
+  wraps `WKWebView::startDownloadUsingRequest:` so hosts can
+  begin downloads without navigating the WKWebView. Auth
+  challenges flow through the *download-level* delegate
+  callback (rather than the page-level one), exercising that
+  code path that promotion-driven downloads can't.
+- ✅ Download cancel / resume — `cancel_download(id)` (which
+  passes a non-nil completion block to Apple's `cancel:` to
+  un-suppress `didFailWithError`), captures the resume_data
+  WebKit emits on a `DownloadCancelled` event;
+  `resume_download(&[u8], PathBuf)` calls
+  `resumeDownloadFromResumeData:` with a fresh delegate
+  registration so resumed transfers fire the normal lifecycle
+  events. Verified by phase E of `demo-mac --download-test`.
+- ✅ SCK pipeline assertion test —
+  `demo-mac --capture-test` is an opt-in smoke test for the
+  ScreenCaptureKit path. Not in `scripts/test-mac.sh` because
+  Screen Recording permission can't be self-granted; CI runners
+  need a `tccutil` pre-grant. Surfaced a producer-side fix
+  along the way: `try_acquire_frame` now treats status-only
+  `CMSampleBuffer`s (every `SCFrameStatus` except `Complete`)
+  as "no frame ready" rather than a fatal error.
 
 **Outstanding for follow-up slices:**
 
-- Resume support for cancelled downloads —
-  `cancel:resumeData:` returns bytes that
-  `resumeDownloadFromResumeData:` can restart from. Surface
-  would be `cancel_download_with_resume(id) -> ResumeData` +
-  `resume_download(bytes) -> DownloadId`.
-- Authentication during downloads —
-  `download:didReceiveAuthenticationChallenge:`. Currently
-  unhandled; defaults to `PerformDefaultHandling`. Same
-  option-A/B shape as the page-level auth handler.
+- Authentication during downloads — wired through the shared
+  page handler, but the download-only-specific challenge path
+  (e.g. mid-download, post-promotion auth) only fires for
+  programmatic `start_download` flows in practice. Real
+  Apple-internal scenarios are rare; current shape is enough
+  for browser-class consumers.
 - Context-menu interception —
   `WKUIDelegate::webView:contextMenuConfigurationForElement:`.
 - Throttling control — suspending / resuming page activity for
   hidden tabs needs SPI (`_setSuspended:`) and is risky.
-- Cursor handler API parity — Windows has a `set_cursor_handler`
-  callback; macOS still uses `poll_cursor_shape` only.
 
 **Reference implementations.** [`tauri-apps/wry`](https://github.com/tauri-apps/wry)
 is a useful reference even though scrying doesn't depend on it. Its
