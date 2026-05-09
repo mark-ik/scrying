@@ -170,7 +170,12 @@ pub(super) fn synthesize_mouse_event(
         MouseEventKind::Wheel | MouseEventKind::HorizontalWheel => {
             // Scroll wheel events have no `NSEvent` factory — build a
             // CGEvent and round-trip through `eventWithCGEvent:`.
-            return synthesize_scroll_wheel_event(event);
+            // Pass through the webview + window so the scroll
+            // event carries a real screen-space location and the
+            // host's modifier-key state — without these, WebKit
+            // can't attribute the scroll to the WKWebView nor
+            // honor cmd-scroll-to-zoom etc.
+            return synthesize_scroll_wheel_event(webview, window, event);
         }
     };
 
@@ -231,7 +236,16 @@ pub(super) fn synthesize_mouse_event(
 /// AppKit: positive = up / right. Pixel units (not lines) so the
 /// consumer's host-side scroll-amount accounting maps directly to
 /// pixel deltas.
+///
+/// Sets the CGEvent's location and modifier flags so:
+/// - WebKit attributes the scroll to the WKWebView under that
+///   screen point (rather than wherever the cursor happens to be,
+///   or "nowhere" → first-responder fallback).
+/// - cmd-scroll-to-zoom / shift-scroll-for-horizontal / etc.
+///   honor the host's modifier-key state.
 pub(super) fn synthesize_scroll_wheel_event(
+    webview: &WKWebView,
+    window: &NSWindow,
     event: MouseInput,
 ) -> Result<MouseDispatch, WryWebSurfaceError> {
     let (wheel_count, wheel1, wheel2) = match event.kind {
@@ -252,6 +266,48 @@ pub(super) fn synthesize_scroll_wheel_event(
             "CGEventCreateScrollWheelEvent2 returned nil".into(),
         )
     })?;
+
+    // Compute the event location in CGEvent's coordinate system:
+    // global display points, top-left origin. We start from
+    // `event.point` (physical pixels, webview-local, top-left),
+    // walk through webview → window → screen → display.
+    let scale = window.backingScaleFactor().max(1.0);
+    let x_local_pt = f64::from(event.point.0) / scale;
+    let y_local_top_pt = f64::from(event.point.1) / scale;
+    let bounds = webview.bounds();
+    // Webview-local: AppKit is bottom-left, so flip Y here too.
+    let local_pt = NSPoint::new(x_local_pt, bounds.size.height - y_local_top_pt);
+    // Lift through the webview's view chain to window coords
+    // (still bottom-left), then to screen coords (still
+    // bottom-left, but in NSScreen-relative space).
+    let window_pt = webview.convertPoint_toView(local_pt, None);
+    let screen_pt = window.convertPointToScreen(window_pt);
+    // CGEvent uses top-left origin in global display points. The
+    // primary screen sits at `(0, primary_height)` in
+    // bottom-left NSScreen coords; flip Y around its height.
+    let primary_screen_height = objc2_app_kit::NSScreen::mainScreen(
+        objc2_foundation::MainThreadMarker::new()
+            .expect("synthesize_scroll_wheel_event must run on main thread"),
+    )
+    .map(|s| s.frame().size.height)
+    .unwrap_or(0.0);
+    let cg_location = objc2_core_foundation::CGPoint {
+        x: screen_pt.x,
+        y: primary_screen_height - screen_pt.y,
+    };
+    CGEvent::set_location(Some(&cg_event), cg_location);
+
+    // Map host modifier-key state to CGEventFlags so cmd-scroll
+    // / shift-scroll / etc. behave correctly.
+    let mut cg_flags = objc2_core_graphics::CGEventFlags::empty();
+    if event.virtual_keys.shift {
+        cg_flags |= objc2_core_graphics::CGEventFlags::MaskShift;
+    }
+    if event.virtual_keys.control {
+        cg_flags |= objc2_core_graphics::CGEventFlags::MaskControl;
+    }
+    CGEvent::set_flags(Some(&cg_event), cg_flags);
+
     let ns_event = NSEvent::eventWithCGEvent(&cg_event).ok_or_else(|| {
         WryWebSurfaceError::Platform("NSEvent::eventWithCGEvent returned nil".into())
     })?;
