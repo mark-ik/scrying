@@ -722,6 +722,20 @@ limitations.
   push-model "deliver one or two more samples after
   `updateConfiguration:` then go quiet" doesn't leave a
   stale-stretched frame on screen across a resize.
+- ✅ Capture-pipeline cadence probe —
+  `WkWebViewProducer::capture_metrics()` returns a
+  [`CaptureMetrics`](../scrying/src/wkwebview_producer/capture/mod.rs)
+  snapshot with `samples_received` (incremented from the SCK
+  background dispatch queue on every `Screen`-typed sample) and
+  `samples_consumed` (incremented in `try_acquire_frame` on every
+  `Ok(Some(...))`). The demo-mac `--capture` mode prints rates
+  once per second; the deltas confirm SCK keeps up with display
+  refresh on Apple Silicon (~58 push/s, ~58 consume/s) so the
+  perceived "a bit of lag" is pipeline depth (WebKit render →
+  AppKit composite → SCK encode → demo blit → wgpu present, ~3
+  vsyncs ≈ 50 ms at 60 Hz), not a backlog. Going lower than that
+  needs an architecture change like consumer-side crop (skip the
+  per-frame Metal blit pass).
 
 **Outstanding for follow-up slices:**
 

@@ -148,7 +148,10 @@ impl WkWebViewProducer {
         };
 
         let latest: Arc<LatestSample> = Arc::new(Mutex::new(None));
-        let output_delegate = StreamOutputDelegate::new(Arc::clone(&latest));
+        let samples_received = Arc::new(AtomicU64::new(0));
+        let samples_consumed = Arc::new(AtomicU64::new(0));
+        let output_delegate =
+            StreamOutputDelegate::new(Arc::clone(&latest), Arc::clone(&samples_received));
         let sample_queue = DispatchQueue::new("scrying.wkwebview.sck-sample", None);
 
         unsafe {
@@ -213,6 +216,8 @@ impl WkWebViewProducer {
             _sample_queue: sample_queue,
             latest,
             stream_error,
+            samples_received,
+            samples_consumed,
             last_emitted: None,
             generation: AtomicU64::new(0),
         });
@@ -559,6 +564,7 @@ impl WkWebViewProducer {
         // the next `try_acquire_frame`, so consumers must consume
         // each frame before requesting the next.
         capture.last_emitted = Some(dest_texture);
+        capture.samples_consumed.fetch_add(1, Ordering::Relaxed);
 
         Ok(Some(WryWebSurfaceFrame::Native(NativeFrame::MetalTextureRef(frame))))
     }

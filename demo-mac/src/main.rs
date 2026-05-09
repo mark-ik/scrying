@@ -1238,19 +1238,8 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 if let Some(render) = state.render.as_mut() {
-                    match render.render(&mut state.producer) {
-                        Ok(()) => {
-                            // Log every 60 frames so the log isn't a flood.
-                            if render.frames_drawn > 0 && render.frames_drawn % 60 == 0 {
-                                println!(
-                                    "demo-mac: rendered {} captured frames",
-                                    render.frames_drawn
-                                );
-                            }
-                        }
-                        Err(error) => {
-                            eprintln!("demo-mac: render failed: {error}");
-                        }
+                    if let Err(error) = render.render(&mut state.producer) {
+                        eprintln!("demo-mac: render failed: {error}");
                     }
                     state.window.request_redraw();
                 }

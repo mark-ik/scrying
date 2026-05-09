@@ -25,9 +25,9 @@ use crate::{HostWgpuContext, InteropBackend, WebSurfaceMode, WryWebSurfaceError}
 
 use super::super::producer::WkWebViewProducer;
 use super::{
-    host_window_pixel_size, make_stream_configuration, write_pending, CaptureState,
-    CaptureStatus, InProgressCaptureState, LatestSample, PendingCaptureSlot, SendOnly,
-    StreamErrorDelegate, StreamOutputDelegate,
+    host_window_pixel_size, make_stream_configuration, write_pending, CaptureMetrics,
+    CaptureState, CaptureStatus, InProgressCaptureState, LatestSample, PendingCaptureSlot,
+    SendOnly, StreamErrorDelegate, StreamOutputDelegate,
 };
 
 impl WkWebViewProducer {
@@ -208,7 +208,12 @@ impl WkWebViewProducer {
                     )
                 };
                 let latest: Arc<LatestSample> = Arc::new(Mutex::new(None));
-                let output_delegate = StreamOutputDelegate::new(Arc::clone(&latest));
+                let samples_received = Arc::new(AtomicU64::new(0));
+                let samples_consumed = Arc::new(AtomicU64::new(0));
+                let output_delegate = StreamOutputDelegate::new(
+                    Arc::clone(&latest),
+                    Arc::clone(&samples_received),
+                );
                 let sample_queue =
                     DispatchQueue::new("scrying.wkwebview.sck-sample", None);
                 if let Err(e) = unsafe {
@@ -241,6 +246,8 @@ impl WkWebViewProducer {
                     sample_queue: sample_queue.clone(),
                     latest: Arc::clone(&latest),
                     stream_error: Arc::clone(&stream_error),
+                    samples_received: Arc::clone(&samples_received),
+                    samples_consumed: Arc::clone(&samples_consumed),
                 });
 
                 let inner_block = RcBlock::new(move |err: *mut NSError| {
@@ -265,6 +272,8 @@ impl WkWebViewProducer {
                         _sample_queue: parts.sample_queue.clone(),
                         latest: Arc::clone(&parts.latest),
                         stream_error: Arc::clone(&parts.stream_error),
+                        samples_received: Arc::clone(&parts.samples_received),
+                        samples_consumed: Arc::clone(&parts.samples_consumed),
                         last_emitted: None,
                         generation: AtomicU64::new(0),
                     };
@@ -320,6 +329,30 @@ impl WkWebViewProducer {
                 self.install_capture_state(state);
                 CaptureStatus::Live
             }
+        }
+    }
+
+    /// Snapshot the live ScreenCaptureKit pipeline counters. Returns
+    /// [`CaptureMetrics::default`] (all zeros) if no capture is
+    /// active. The two counters are atomic and safe to call from any
+    /// thread, but in practice consumers poll from the same main
+    /// thread that drives [`Self::try_acquire_frame`].
+    ///
+    /// Useful for diagnosing the SCK push cadence: SCK delivers when
+    /// the captured window recomposites and aggressively throttles
+    /// on a static page, so a low `samples_received` rate is not a
+    /// scrying bug but an Apple-side energy optimisation.
+    pub fn capture_metrics(&self) -> CaptureMetrics {
+        let Some(capture) = self.capture.as_ref() else {
+            return CaptureMetrics::default();
+        };
+        CaptureMetrics {
+            samples_received: capture
+                .samples_received
+                .load(std::sync::atomic::Ordering::Relaxed),
+            samples_consumed: capture
+                .samples_consumed
+                .load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 

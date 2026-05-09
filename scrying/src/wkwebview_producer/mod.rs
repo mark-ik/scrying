@@ -89,7 +89,7 @@ mod trait_impl;
 mod ui_delegate;
 
 pub use api::FindOptions;
-pub use capture::CaptureStatus;
+pub use capture::{CaptureMetrics, CaptureStatus};
 pub use config::WkWebViewProducerConfig;
 pub use download_handler::DownloadHandlerFn;
 pub use nav_delegate::AuthHandlerFn;

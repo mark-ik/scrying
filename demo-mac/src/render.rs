@@ -4,6 +4,7 @@
 //! full-screen blit.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use scrying::{
     HostWgpuContext, ImportOptions, ImportedTexture, NativeFrame, TextureImporter,
@@ -76,6 +77,17 @@ pub struct WgpuRender {
     /// sample ready we re-render the previous one rather than
     /// clearing — otherwise the right half blanks on every miss.
     last_imported: Option<ImportedTexture>,
+    /// Latency-probe state. Once per second the demo logs SCK
+    /// delivery rate (push cadence) vs consume rate (frames the
+    /// consumer actually received via `try_acquire_frame`) vs
+    /// render rate (wgpu redraws). The deltas come from
+    /// [`WkWebViewProducer::capture_metrics`] minus the previous
+    /// snapshot, so the rates reflect the *last second*, not the
+    /// stream-lifetime average.
+    last_metrics_at: Option<Instant>,
+    last_samples_received: u64,
+    last_samples_consumed: u64,
+    last_frames_drawn_at_metrics: u64,
 }
 
 impl WgpuRender {
@@ -213,6 +225,10 @@ impl WgpuRender {
             dump_every: None,
             dumps_written: 0,
             last_imported: None,
+            last_metrics_at: None,
+            last_samples_received: 0,
+            last_samples_consumed: 0,
+            last_frames_drawn_at_metrics: 0,
         })
     }
 
@@ -449,6 +465,49 @@ impl WgpuRender {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         surface_texture.present();
+
+        self.maybe_log_metrics(producer);
+
         Ok(())
+    }
+
+    fn maybe_log_metrics(&mut self, producer: &WkWebViewProducer) {
+        let now = Instant::now();
+        let last = match self.last_metrics_at {
+            None => {
+                self.last_metrics_at = Some(now);
+                let m = producer.capture_metrics();
+                self.last_samples_received = m.samples_received;
+                self.last_samples_consumed = m.samples_consumed;
+                self.last_frames_drawn_at_metrics = self.frames_drawn;
+                return;
+            }
+            Some(t) => t,
+        };
+        let elapsed = now.duration_since(last);
+        if elapsed < Duration::from_secs(1) {
+            return;
+        }
+        let m = producer.capture_metrics();
+        let dt = elapsed.as_secs_f64();
+        let recv_delta = m.samples_received.saturating_sub(self.last_samples_received);
+        let cons_delta = m.samples_consumed.saturating_sub(self.last_samples_consumed);
+        let render_delta = self
+            .frames_drawn
+            .saturating_sub(self.last_frames_drawn_at_metrics);
+        let dropped = recv_delta.saturating_sub(cons_delta);
+        println!(
+            "demo-mac: capture cadence — sck push {:.1}/s, demo consume {:.1}/s, wgpu render {:.1}/s, dropped {} this window (totals: recv {}, consumed {})",
+            recv_delta as f64 / dt,
+            cons_delta as f64 / dt,
+            render_delta as f64 / dt,
+            dropped,
+            m.samples_received,
+            m.samples_consumed,
+        );
+        self.last_metrics_at = Some(now);
+        self.last_samples_received = m.samples_received;
+        self.last_samples_consumed = m.samples_consumed;
+        self.last_frames_drawn_at_metrics = self.frames_drawn;
     }
 }

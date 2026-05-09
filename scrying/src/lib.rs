@@ -23,7 +23,9 @@ pub mod webview2_composition_producer;
 pub mod wkwebview_producer;
 
 #[cfg(target_os = "macos")]
-pub use wkwebview_producer::{CaptureStatus, WkWebViewProducer, WkWebViewProducerConfig};
+pub use wkwebview_producer::{
+    CaptureMetrics, CaptureStatus, WkWebViewProducer, WkWebViewProducerConfig,
+};
 
 #[cfg(target_os = "linux")]
 pub mod webkitgtk_producer;

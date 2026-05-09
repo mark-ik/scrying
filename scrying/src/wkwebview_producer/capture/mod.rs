@@ -50,6 +50,34 @@ unsafe impl<T> Send for SendCFRetained<T> {}
 /// samples are dropped on overwrite.
 pub(super) type LatestSample = Mutex<Option<SendCFRetained<CMSampleBuffer>>>;
 
+/// State the SCK output delegate writes to from the background
+/// dispatch queue. Bundles the latest-sample slot with a delivery
+/// counter so [`CaptureMetrics`] can report SCK push cadence.
+pub(super) struct OutputDelegateState {
+    pub(super) latest: Arc<LatestSample>,
+    /// Total Screen-typed samples SCK has delivered to this stream
+    /// since `start_capture` resolved. Includes samples that
+    /// `try_acquire_frame` later drops via the dim-match guard or
+    /// overwrites in `LatestSample` before the consumer polls.
+    pub(super) samples_received: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Live ScreenCaptureKit pipeline counters. Read via
+/// [`super::WkWebViewProducer::capture_metrics`]. `Default` if no
+/// capture is active.
+///
+/// `samples_received` is incremented on the SCK background dispatch
+/// queue every time the stream delivers a `Screen`-typed sample.
+/// `samples_consumed` is incremented on the main thread for every
+/// `try_acquire_frame` call that returns `Ok(Some(...))` — i.e. every
+/// frame the consumer actually got. Their delta is the drop /
+/// dim-mismatch / no-imaging-payload count.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CaptureMetrics {
+    pub samples_received: u64,
+    pub samples_consumed: u64,
+}
+
 #[derive(Default)]
 pub(super) struct CaptureSignal {
     /// `Some(Ok(()))` once `startCaptureWithCompletionHandler:` /
@@ -63,7 +91,7 @@ define_class!(
     // - The superclass NSObject has no subclassing requirements.
     // - `StreamOutputDelegate` does not implement `Drop`.
     #[unsafe(super = NSObject)]
-    #[ivars = Arc<LatestSample>]
+    #[ivars = OutputDelegateState]
     pub(super) struct StreamOutputDelegate;
 
     unsafe impl NSObjectProtocol for StreamOutputDelegate {}
@@ -80,10 +108,14 @@ define_class!(
             if r#type != SCStreamOutputType::Screen {
                 return;
             }
+            let state = self.ivars();
+            state
+                .samples_received
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // Retain the sample; the protocol contract is that the
             // callee must retain if it wants to outlive this call.
             let retained = unsafe { CFRetained::retain(NonNull::from(sample_buffer)) };
-            if let Ok(mut slot) = self.ivars().lock() {
+            if let Ok(mut slot) = state.latest.lock() {
                 *slot = Some(SendCFRetained(retained));
             }
         }
@@ -91,8 +123,14 @@ define_class!(
 );
 
 impl StreamOutputDelegate {
-    pub(super) fn new(latest: Arc<LatestSample>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(latest);
+    pub(super) fn new(
+        latest: Arc<LatestSample>,
+        samples_received: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(OutputDelegateState {
+            latest,
+            samples_received,
+        });
         // SAFETY: NSObject's `init` returns a valid initialized instance.
         unsafe { msg_send![super(this), init] }
     }
@@ -183,6 +221,8 @@ pub(super) struct InProgressCaptureState {
     pub(super) sample_queue: DispatchRetained<DispatchQueue>,
     pub(super) latest: Arc<LatestSample>,
     pub(super) stream_error: Arc<Mutex<Option<String>>>,
+    pub(super) samples_received: Arc<AtomicU64>,
+    pub(super) samples_consumed: Arc<AtomicU64>,
 }
 
 /// Helper used by SCK completion blocks to update the shared
@@ -221,6 +261,14 @@ pub(super) struct CaptureState {
     /// from `try_acquire_frame` so the consumer learns the stream is
     /// dead.
     pub(super) stream_error: Arc<Mutex<Option<String>>>,
+    /// Shared with [`StreamOutputDelegate`]; incremented on the SCK
+    /// background dispatch queue when a `Screen`-typed sample
+    /// arrives. Read by [`super::WkWebViewProducer::capture_metrics`].
+    pub(super) samples_received: Arc<AtomicU64>,
+    /// Incremented on the main thread inside `try_acquire_frame`
+    /// when it returns `Ok(Some(...))` to the consumer. Read by
+    /// [`super::WkWebViewProducer::capture_metrics`].
+    pub(super) samples_consumed: Arc<AtomicU64>,
     /// Most-recently-emitted MTLTexture. The producer keeps it alive
     /// here because [`crate::native_frame::MetalTextureRef::raw_metal_texture`]
     /// is a raw pointer; the consumer's [`crate::native_frame`]
