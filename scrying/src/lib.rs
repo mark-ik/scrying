@@ -27,6 +27,9 @@ pub use wkwebview_producer::{
     CaptureMetrics, CaptureStatus, CookieChangeHandlerFn, WkWebViewProducer,
     WkWebViewProducerConfig,
 };
+// `ColorPipeline` lives in `lib.rs` (cross-platform-public) but is
+// listed alongside the macOS producer above so the `cfg(target_os
+// = "macos")` re-exports stay together. It's already public here.
 
 #[cfg(target_os = "linux")]
 pub mod webkitgtk_producer;
@@ -700,7 +703,42 @@ pub enum DragEventKind {
     Drop,
 }
 
-/// Snapshot of webview-level settings exposed by the producer.
+/// Color-space pipeline a producer's capture path is configured
+/// for. Picks how the engine encodes captured pixels into the
+/// IOSurface the consumer eventually imports as a wgpu texture.
+///
+/// Today this is a *static* per-producer choice (set in
+/// [`crate::wkwebview_producer::WkWebViewProducerConfig`] or via
+/// the producer's `set_color_pipeline` method). A future "adaptive"
+/// path could flip it per-page in response to page metadata; the
+/// in-flight-sample dropping already handled by the SCK
+/// configuration-revision gate would catch the cross-pipeline
+/// switch the same way it catches a resize.
+///
+/// Variants are non-exhaustive on purpose — adding HDR / Rec.2020
+/// later shouldn't be a breaking change.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ColorPipeline {
+    /// 8-bit BGRA, sRGB primaries, sRGB transfer. The historical
+    /// default — every page-side color value lands at the consumer
+    /// in sRGB-mapped 8-bit, regardless of whether the page itself
+    /// declared `color(display-p3 …)` or wider-gamut images.
+    /// Wider-gamut content is tone-mapped to sRGB upstream of us
+    /// (by AppKit / SCK).
+    #[default]
+    Srgb,
+    /// 8-bit BGRA, Display P3 primaries, sRGB transfer. Page-side
+    /// `color(display-p3 1 0 0)` or photos with embedded P3
+    /// profiles arrive at the consumer with their wider gamut
+    /// preserved. Same dynamic range as
+    /// [`Self::Srgb`] (~100 nits, SDR); only the gamut differs.
+    /// Consumers rendering on an sRGB-only display will see the
+    /// same colors they would have under `Srgb` (the macOS
+    /// composer maps P3→sRGB at present time); on a P3 display,
+    /// the wider gamut survives the round-trip.
+    DisplayP3,
+}
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WebSurfaceSettings {
     /// Zoom factor (`1.0` is normal). `None` leaves the producer's

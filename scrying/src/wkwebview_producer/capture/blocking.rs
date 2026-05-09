@@ -134,7 +134,8 @@ impl WkWebViewProducer {
             )
         };
 
-        let stream_config = make_stream_configuration(window_pixel_size);
+        let stream_config =
+            make_stream_configuration(window_pixel_size, self.config.color_pipeline);
 
         let stream_error = Arc::new(Mutex::new(None::<String>));
         let error_delegate = StreamErrorDelegate::new(Arc::clone(&stream_error));
@@ -220,6 +221,11 @@ impl WkWebViewProducer {
             samples_consumed,
             last_emitted: None,
             generation: AtomicU64::new(0),
+            // The initial config was applied synchronously by
+            // `startCaptureWithCompletionHandler:` resolving
+            // success — start both counters at 0 (revision == applied).
+            config_revision: Arc::new(AtomicU64::new(0)),
+            applied_config_revision: Arc::new(AtomicU64::new(0)),
         });
 
         // Capture is live — flip the advertised capability so consumers
@@ -417,16 +423,34 @@ impl WkWebViewProducer {
         let source_width = CVPixelBufferGetWidth(pixel_buffer);
         let source_height = CVPixelBufferGetHeight(pixel_buffer);
 
-        // Reject stale samples whose IOSurface was sized for a
-        // pre-resize window. After a resize we push a new
-        // `SCStreamConfiguration` via `updateConfiguration:`, but
-        // SCK can still flush one or two in-flight samples at the
-        // *previous* dimensions. Importing those would render the
-        // old layout stretched over the new right-half rect — a
-        // visible artifact that lingers because a static page
-        // rarely re-triggers SCK delivery. Treat the mismatched
-        // sample as "no frame yet"; the next post-resize sample
-        // arrives at the matching dims.
+        // Drop ambiguous in-flight samples while a configuration
+        // change is in flight. `config_revision` ticks the moment
+        // we hand SCK a new `SCStreamConfiguration`;
+        // `applied_config_revision` catches up only when SCK's
+        // completion handler fires. Any sample arriving in that
+        // gap could have been encoded under either the old or the
+        // new config (Apple doesn't tag CMSampleBuffers with
+        // their generating config), so the only safe move is to
+        // wait. Once `applied == revision`, future samples are
+        // guaranteed to be at the latest config and we accept
+        // them blindly — including for color-pipeline changes
+        // where dim-match alone wouldn't catch the difference.
+        let revision = capture
+            .config_revision
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let applied = capture
+            .applied_config_revision
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if applied < revision {
+            return Ok(None);
+        }
+
+        // Defense-in-depth dim check. The revision gate above
+        // catches samples *during* a config change; this catches
+        // anything that slips through (e.g. SCK delivering a
+        // sample at a slightly off-axis size due to an upstream
+        // bug, or a config-change path that didn't go through
+        // `update_capture_for_layout_change`). Cheap to keep.
         let host_window_for_dims = self.webview.window().ok_or_else(|| {
             WryWebSurfaceError::Platform(
                 "WKWebView's host window vanished mid-capture".into(),

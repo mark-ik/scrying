@@ -126,6 +126,10 @@ impl WkWebViewProducer {
         let pending = Arc::clone(&self.pending_capture);
         let metal_device_for_block = SendOnly(metal_device);
         let command_queue_for_block = SendOnly(command_queue);
+        // ColorPipeline is `Copy` and trivially Send; fold it
+        // into the block so SCK's background-queue completion
+        // doesn't need to reach back into `self`.
+        let color_pipeline = self.config.color_pipeline;
 
         let outer_block = RcBlock::new(
             move |content: *mut SCShareableContent, err: *mut NSError| {
@@ -196,7 +200,8 @@ impl WkWebViewProducer {
                         &target_window,
                     )
                 };
-                let stream_config = make_stream_configuration(window_pixel_size);
+                let stream_config =
+                    make_stream_configuration(window_pixel_size, color_pipeline);
                 let stream_error = Arc::new(Mutex::new(None::<String>));
                 let error_delegate = StreamErrorDelegate::new(Arc::clone(&stream_error));
                 let stream = unsafe {
@@ -237,6 +242,8 @@ impl WkWebViewProducer {
                 let metal_device = metal_device_for_block.0.clone();
                 let command_queue = command_queue_for_block.0.clone();
                 let pending_inner = Arc::clone(&pending);
+                let config_revision = Arc::new(AtomicU64::new(0));
+                let applied_config_revision = Arc::new(AtomicU64::new(0));
                 let in_progress = SendOnly(InProgressCaptureState {
                     metal_device,
                     command_queue,
@@ -248,6 +255,8 @@ impl WkWebViewProducer {
                     stream_error: Arc::clone(&stream_error),
                     samples_received: Arc::clone(&samples_received),
                     samples_consumed: Arc::clone(&samples_consumed),
+                    config_revision,
+                    applied_config_revision,
                 });
 
                 let inner_block = RcBlock::new(move |err: *mut NSError| {
@@ -276,6 +285,10 @@ impl WkWebViewProducer {
                         samples_consumed: Arc::clone(&parts.samples_consumed),
                         last_emitted: None,
                         generation: AtomicU64::new(0),
+                        config_revision: Arc::clone(&parts.config_revision),
+                        applied_config_revision: Arc::clone(
+                            &parts.applied_config_revision,
+                        ),
                     };
                     write_pending(
                         &pending_inner,

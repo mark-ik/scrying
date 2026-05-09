@@ -593,11 +593,34 @@ impl WkWebViewProducer {
         let Some(window) = self.webview.window() else {
             return;
         };
-        let new_cfg = make_stream_configuration(host_window_pixel_size(&window));
+        let new_cfg =
+            make_stream_configuration(host_window_pixel_size(&window), self.config.color_pipeline);
+        // Bump `config_revision` *before* asking SCK to apply, so a
+        // sample that arrives between this line and SCK's
+        // completion is treated as ambiguous (revision !=
+        // applied_revision → drop). The completion handler
+        // increments `applied_config_revision` to match, opening
+        // the gate for samples at the new config. This subsumes
+        // the dim-match guard for any new SCK config dimension we
+        // care about (color space, pixel format) without us having
+        // to read CFType attachments off each CMSampleBuffer.
+        let new_revision = capture
+            .config_revision
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let applied = Arc::clone(&capture.applied_config_revision);
+        let completion = block2::RcBlock::new(move |_err: *mut objc2_foundation::NSError| {
+            // Promote `applied` to the requested revision iff no
+            // newer revision has been requested in the meantime.
+            // `compare_exchange_weak` keeps the monotonic property:
+            // we never roll `applied` backwards relative to the
+            // latest *successfully applied* config.
+            let _ = applied.fetch_max(new_revision, std::sync::atomic::Ordering::Relaxed);
+        });
         unsafe {
             capture
                 .stream
-                .updateConfiguration_completionHandler(&new_cfg, None);
+                .updateConfiguration_completionHandler(&new_cfg, Some(&completion));
         }
     }
 

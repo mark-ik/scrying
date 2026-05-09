@@ -20,8 +20,8 @@ use objc2_web_kit::{
 };
 
 use crate::{
-    AuthChallenge, AuthDisposition, Cookie, DownloadDecision, DownloadDestinationRequest,
-    PermissionDecision, PermissionRequest, WryWebSurfaceError,
+    AuthChallenge, AuthDisposition, ColorPipeline, Cookie, DownloadDecision,
+    DownloadDestinationRequest, PermissionDecision, PermissionRequest, WryWebSurfaceError,
 };
 
 use super::cookies::{cookie_from_ns, ns_cookie_from};
@@ -809,6 +809,41 @@ impl WkWebViewProducer {
                 Some(&block),
             );
         }
+        Ok(())
+    }
+
+    /// Switch the SCK capture path's color pipeline live. Updates
+    /// `WkWebViewProducerConfig::color_pipeline`, then pushes a
+    /// fresh `SCStreamConfiguration` through the same
+    /// `update_capture_for_layout_change` path that resize / DPI-
+    /// flip use. The capture-revision gate dropping in-flight
+    /// pre-change samples means the consumer transitions cleanly:
+    /// frames stop briefly, SCK's completion handler fires, then
+    /// frames resume at the new color pipeline.
+    ///
+    /// No-op if the requested pipeline matches the current one.
+    /// No-op when capture isn't live; the next
+    /// `start_capture` / `start_capture_async` will pick up the
+    /// new value from the config.
+    pub fn set_color_pipeline(
+        &mut self,
+        pipeline: ColorPipeline,
+    ) -> Result<(), WryWebSurfaceError> {
+        if MainThreadMarker::new().is_none() {
+            return Err(WryWebSurfaceError::Platform(
+                "set_color_pipeline must be called on the main thread".into(),
+            ));
+        }
+        if self.config.color_pipeline == pipeline {
+            return Ok(());
+        }
+        self.config.color_pipeline = pipeline;
+        // `update_capture_for_layout_change` is a misnomer at this
+        // point — it's the generic "re-push SCStreamConfiguration
+        // and bump the revision counter" path, used for resize,
+        // DPI flips, and now color-pipeline changes. Renaming it
+        // would churn touch sites for no semantic gain.
+        self.update_capture_for_layout_change();
         Ok(())
     }
 

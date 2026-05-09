@@ -223,6 +223,8 @@ pub(super) struct InProgressCaptureState {
     pub(super) stream_error: Arc<Mutex<Option<String>>>,
     pub(super) samples_received: Arc<AtomicU64>,
     pub(super) samples_consumed: Arc<AtomicU64>,
+    pub(super) config_revision: Arc<AtomicU64>,
+    pub(super) applied_config_revision: Arc<AtomicU64>,
 }
 
 /// Helper used by SCK completion blocks to update the shared
@@ -276,6 +278,23 @@ pub(super) struct CaptureState {
     /// each successful `try_acquire_frame`.
     pub(super) last_emitted: Option<Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLTexture>>>,
     pub(super) generation: AtomicU64,
+    /// Monotonic counter incremented every time we hand SCK a new
+    /// `SCStreamConfiguration` (resize, DPI flip, color-pipeline
+    /// adaptation). Compared against [`Self::applied_config_revision`]
+    /// to detect "we've asked for a new config but SCK hasn't
+    /// confirmed application yet, so any sample arriving in this
+    /// window is ambiguous (could be old, could be new) — drop it."
+    /// Sole writer is `update_capture_for_layout_change`; the
+    /// completion-handler block bumps `applied` to match.
+    pub(super) config_revision: Arc<AtomicU64>,
+    /// Bumped from the SCK background queue inside the completion
+    /// handler of `updateConfiguration_completionHandler`. Once it
+    /// equals `config_revision`, samples are guaranteed to be at
+    /// the latest configuration. While unequal,
+    /// [`super::super::WkWebViewProducer::try_acquire_frame`]
+    /// returns `Ok(None)` to drop the in-flight ambiguous samples.
+    /// Atomic because the completion fires off-main.
+    pub(super) applied_config_revision: Arc<AtomicU64>,
 }
 
 /// Build the [`SCStreamConfiguration`] used by both
@@ -297,15 +316,34 @@ pub(super) struct CaptureState {
 /// texture to webview pixels.
 pub(super) fn make_stream_configuration(
     window_pixel_size: PhysicalSize<u32>,
+    color_pipeline: crate::ColorPipeline,
 ) -> Retained<SCStreamConfiguration> {
+    use objc2_core_graphics::{kCGColorSpaceDisplayP3, kCGColorSpaceSRGB};
     unsafe {
         let cfg = SCStreamConfiguration::new();
         cfg.setWidth(window_pixel_size.width.max(1) as usize);
         cfg.setHeight(window_pixel_size.height.max(1) as usize);
         // 32-bit BGRA — matches `MTLPixelFormat::BGRA8Unorm` and
         // `wgpu::TextureFormat::Bgra8Unorm` so the consumer renders
-        // without a format swizzle pass.
+        // without a format swizzle pass. Same 8-bit format for
+        // both `Srgb` and `DisplayP3` pipelines: P3 colors fit in
+        // 8 bits per channel, only the gamut tag differs.
         cfg.setPixelFormat(kCVPixelFormatType_32BGRA);
+        // SCK's `colorSpaceName` controls how the WindowServer-
+        // composited pixels are encoded into the IOSurface. With
+        // sRGB, P3-tagged page content gets gamut-mapped to sRGB
+        // upstream of us; with Display P3, the wider gamut
+        // survives. Same numeric range either way (~100 nits SDR);
+        // the consumer-side wgpu surface needs to be configured
+        // for the matching color space to actually display the
+        // P3 colors correctly on a P3-capable monitor (otherwise
+        // the macOS composer remaps P3→sRGB at present time and
+        // visual parity with `Srgb` ends up identical).
+        let color_space_name = match color_pipeline {
+            crate::ColorPipeline::Srgb => kCGColorSpaceSRGB,
+            crate::ColorPipeline::DisplayP3 => kCGColorSpaceDisplayP3,
+        };
+        cfg.setColorSpaceName(color_space_name);
         cfg.setShowsCursor(false);
         // Our consumer only ever keeps the latest sample (the
         // `LatestSample` Mutex overwrites on each callback), so

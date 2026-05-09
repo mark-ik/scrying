@@ -14,6 +14,8 @@ use std::path::PathBuf;
 
 use dpi::PhysicalSize;
 
+use crate::ColorPipeline;
+
 #[derive(Clone, Debug)]
 pub struct WkWebViewProducerConfig {
     /// Initial size of the WKWebView frame and the capture region, in
@@ -47,6 +49,15 @@ pub struct WkWebViewProducerConfig {
     /// download lands at `<download_dir>/<suggested_filename>` (with
     /// numeric suffixes appended on collision).
     pub download_dir: PathBuf,
+    /// Color pipeline for the SCK capture path. `Srgb` keeps the
+    /// historical default (BGRA8 sRGB tone-mapped); `DisplayP3`
+    /// switches SCK's `colorSpaceName` to
+    /// `kCGColorSpaceDisplayP3` so wider-gamut page content
+    /// (`color(display-p3 …)`, P3-tagged images) survives the
+    /// capture round-trip. Stored on the config so consumers can
+    /// pick at producer-construction time;
+    /// `WkWebViewProducer::set_color_pipeline` flips it live.
+    pub color_pipeline: ColorPipeline,
 }
 
 impl WkWebViewProducerConfig {
@@ -61,6 +72,7 @@ impl WkWebViewProducerConfig {
             frame_timeout: std::time::Duration::from_secs(2),
             download_dir,
             non_persistent: false,
+            color_pipeline: ColorPipeline::Srgb,
         }
     }
 

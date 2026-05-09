@@ -69,7 +69,8 @@ yet.
 | DPI awareness across monitor moves | ✅ | ? | ? | Backing-scale-change observer re-applies `config.size` |
 | Capture cadence probe (`CaptureMetrics`) | ✅ | ⏳ | ⏳ | `samples_received` / `samples_consumed` atomic counters |
 | Cross-API GPU sync (explicit fences) | ⏳ | ⏳ | ✅ | Scaffolded in 0.4.x, contractual in 0.5.0; Linux WPE already provides VkSemaphore |
-| Color management / HDR | ⏳ | ⏳ | ⏳ | Capture is locked at BGRA8Unorm sRGB; wide-gamut / HDR is tone-mapped before delivery |
+| Color management — Display P3 SDR | ✅ | ⏳ | ⏳ | `WkWebViewProducerConfig::color_pipeline = ColorPipeline::DisplayP3` (or `set_color_pipeline` live); SCK's `colorSpaceName` switches to `kCGColorSpaceDisplayP3`. Same 8-bit BGRA format as sRGB — only the gamut tag differs |
+| Color management — HDR / 16-float | ⏳ | ⏳ | ⏳ | Pixel format change to `RGBA16Float`, wgpu surface needs HDR config; bigger pipeline change |
 | Pre-composition extraction | 🚫 | ? | ⏳ | macOS would need direct `CALayer.contents` access pre-WindowServer-composite; `_WK*` SPI risk; spike needed. Would also fix the "SCK quiets on a static page" issue |
 | Sub-iframe / sub-frame capture | 🚫 | 🚫 | ⏳ | `WKWebView` is a single composition root; per-frame access is `_WK*`. Long-term WPE-first story (WPE exposes per-view buffers natively) |
 

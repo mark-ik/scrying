@@ -826,13 +826,48 @@ checklist deliberately omits.
   `WKHTTPCookieStore` for the producer's lifetime; the closure
   slot is what gates whether anything fires, which keeps the
   set / clear path lock-only and avoids re-registration churn.
-- Color management / HDR — capture path is locked at
-  `BGRA8Unorm` sRGB. Wide-gamut content (Display P3) and HDR
-  video frames are tone-mapped to sRGB before SCK delivers
-  them. Future: configurable
-  `SCStreamConfiguration::colorSpaceName` /
-  `SCStreamConfiguration::pixelFormat` selection; consumer-
-  side gamma handling.
+- ✅ Color management — Display P3 SDR opt-in. New
+  [`crate::ColorPipeline`] enum with `Srgb` (default) and
+  `DisplayP3` variants;
+  [`WkWebViewProducerConfig::color_pipeline`] picks at
+  construction time and
+  [`WkWebViewProducer::set_color_pipeline`] flips live. The SCK
+  configuration's `colorSpaceName` is set to
+  `kCGColorSpaceSRGB` or `kCGColorSpaceDisplayP3`
+  accordingly; pixel format stays at `BGRA8Unorm` (P3 colors
+  fit in 8-bit, only the gamut tag differs). On a P3-capable
+  display with the consumer's wgpu surface configured for P3
+  output, page-side `color(display-p3 …)` and P3-tagged images
+  arrive at the consumer in their wider gamut. On an sRGB-only
+  display the visible result is identical to `Srgb` — the macOS
+  composer remaps P3→sRGB at present time.
+
+  **Configuration-revision gate** generalizes the existing
+  dim-match guard: `CaptureState::config_revision` ticks every
+  time we hand SCK a new `SCStreamConfiguration` (resize, DPI
+  flip, *and* color-pipeline change);
+  `applied_config_revision` catches up when SCK's completion
+  handler fires. Until they're equal, `try_acquire_frame`
+  returns `Ok(None)` to drop ambiguous in-flight samples that
+  might be encoded under either the old or the new config —
+  Apple doesn't tag CMSampleBuffers with their generating
+  config, so the only safe move during a transition is to
+  wait. Subsumes the dim-match check for any future
+  reconfiguration axis (HDR pixel format, etc.) without us
+  having to read CFType color-space attachments off each
+  buffer.
+
+- HDR / 16-float — outstanding. Same `ColorPipeline` enum is
+  the right shape for a future `Hdr16f` variant, but the slice
+  is bigger: `pixelFormat` shifts from `kCVPixelFormatType_32BGRA`
+  to `kCVPixelFormatType_64RGBAHalf`, the per-frame blit's dest
+  texture format flips to `RGBA16Float`, and the wgpu surface
+  needs `Rgba16Float` + `CompositeAlphaMode::PreMultiplied` to
+  present HDR — not all configurations advertise the surface
+  format, and macOS-EDR vs PQ HDR present paths diverge.
+  `palette` (now a dep) gives us tone-mapping and gamut
+  conversion math for future testing / fallback rendering on
+  SDR displays.
 - DevTools / Web Inspector remote attach — `setInspectable(true)`
   is wired for macOS 13.3+, but the Safari → Develop menu →
   attach flow isn't documented anywhere; downstream consumers
