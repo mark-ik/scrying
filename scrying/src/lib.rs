@@ -268,6 +268,12 @@ pub enum NavigationEvent {
         /// `NSURLAuthenticationMethodServerTrust`,
         /// `NSURLAuthenticationMethodClientCertificate`.
         auth_method: String,
+        /// Whether this challenge fired on the page-navigation
+        /// channel or on a `WKDownload`'s bytes-fetch channel.
+        /// Browser-class consumers route the two differently:
+        /// page auth is a tab-level UI moment, download auth is
+        /// a per-transfer credential prompt.
+        source: AuthSource,
     },
     /// A WebKit-managed download started. The producer chose
     /// `destination_path` automatically (under the configured
@@ -439,6 +445,25 @@ pub enum DownloadDecision {
     Cancel,
 }
 
+/// Which delegate channel produced an auth challenge — useful for
+/// browser-class consumers that route page-load auth (the user
+/// typed a URL into a tab) differently from download auth (a
+/// background `WKDownload` is fetching bytes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AuthSource {
+    /// Fired by the page's
+    /// `WKNavigationDelegate::webView:didReceiveAuthenticationChallenge:`.
+    /// The challenge belongs to a top-level navigation request or
+    /// a sub-resource fetch initiated by the page.
+    Page,
+    /// Fired by a `WKDownloadDelegate::download:didReceiveAuthenticationChallenge:`,
+    /// either for a programmatic `start_download` call or for a
+    /// nav-promoted download whose response triggered an auth
+    /// requirement on the bytes-fetch leg.
+    Download,
+}
+
 /// Information passed to a host-registered auth-challenge handler
 /// (see `WkWebViewProducer::set_auth_handler`). The host returns an
 /// [`AuthDisposition`] describing how the challenge should be
@@ -456,6 +481,9 @@ pub struct AuthChallenge {
     /// Realm the server announced (HTTP basic / digest only —
     /// empty for other methods).
     pub realm: String,
+    /// Which delegate channel produced this challenge — see
+    /// [`AuthSource`].
+    pub source: AuthSource,
 }
 
 /// Disposition the host returns from its auth-challenge handler.

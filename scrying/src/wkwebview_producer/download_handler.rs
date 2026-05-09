@@ -460,7 +460,7 @@ define_class!(
         #[unsafe(method(download:didReceiveAuthenticationChallenge:completionHandler:))]
         fn download_did_receive_auth_challenge(
             &self,
-            _download: &WKDownload,
+            download: &WKDownload,
             challenge: &NSURLAuthenticationChallenge,
             completion_handler: &block2::DynBlock<
                 dyn Fn(NSURLSessionAuthChallengeDisposition, *mut NSURLCredential),
@@ -478,26 +478,39 @@ define_class!(
                 None => (String::new(), String::new(), String::new()),
             };
 
-            // Use the empty string for `url` because WKDownload's
-            // auth challenge is conceptually about the request
-            // for the download bytes, not the page that initiated
-            // it. Hosts that need cross-correlation can match on
-            // host / auth_method.
+            // Extract the URL of the resource being authenticated
+            // from `WKDownload::originalRequest` so the event /
+            // handler get a stable identifier for correlation
+            // with `DownloadStarted` / `DownloadProgress` and for
+            // host-side credential lookup. Empty when the download
+            // has no original request (defensive fallback for
+            // post-promotion redirected flows).
+            let url = unsafe {
+                download
+                    .originalRequest()
+                    .and_then(|req| req.URL())
+                    .and_then(|nsurl| nsurl.absoluteString())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            };
+
             if let Ok(mut state) = ivars.state.lock() {
                 state.events.push_back(NavigationEvent::AuthChallenged {
-                    url: String::new(),
+                    url: url.clone(),
                     host: host.clone(),
                     auth_method: auth_method.clone(),
+                    source: crate::AuthSource::Download,
                 });
             }
 
             let disposition = if let Ok(guard) = ivars.auth_handler.lock() {
                 guard.as_ref().map(|f| {
                     f(AuthChallenge {
-                        url: String::new(),
+                        url,
                         host,
                         auth_method,
                         realm,
+                        source: crate::AuthSource::Download,
                     })
                 })
             } else {

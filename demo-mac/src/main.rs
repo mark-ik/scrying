@@ -1526,11 +1526,15 @@ fn drain_events(state: &mut AppState) {
                 } => {
                     test.cancelled.insert(*id, resume_data.clone());
                 }
-                NavigationEvent::AuthChallenged { url, .. } => {
-                    if url.is_empty() {
-                        test.download_level_auth_seen = true;
-                    } else {
-                        test.page_level_auth_seen = true;
+                NavigationEvent::AuthChallenged { source, .. } => {
+                    match source {
+                        scrying::AuthSource::Download => {
+                            test.download_level_auth_seen = true;
+                        }
+                        scrying::AuthSource::Page => {
+                            test.page_level_auth_seen = true;
+                        }
+                        _ => {}
                     }
                 }
                 _ => {}
@@ -3313,7 +3317,7 @@ fn advance_download_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
                     }
                     if !test.download_level_auth_seen {
                         test.failures.push(
-                            "phase D: expected download-level auth callback (AuthChallenged with empty url) but never observed one"
+                            "phase D: expected download-level auth callback (AuthChallenged with AuthSource::Download) but never observed one"
                                 .into(),
                         );
                     }

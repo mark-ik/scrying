@@ -778,12 +778,26 @@ flat cross-platform checklist in
 the entries below keep the macOS-specific impl notes the
 checklist deliberately omits.
 
-- Authentication during downloads — wired through the shared
-  page handler, but the download-only-specific challenge path
-  (e.g. mid-download, post-promotion auth) only fires for
-  programmatic `start_download` flows in practice. Real
-  Apple-internal scenarios are rare; current shape is enough
-  for browser-class consumers.
+- ✅ Authentication during downloads — both
+  nav-promoted and programmatic `start_download` paths set the
+  shared `DownloadHandler` as the `WKDownloadDelegate`, and the
+  delegate's
+  `download:didReceiveAuthenticationChallenge:completionHandler:`
+  consults the same `auth_handler` registered for page-level
+  auth. Download-channel events now carry the resource URL from
+  `WKDownload::originalRequest` instead of the previous
+  empty-string sentinel, so hosts can correlate the auth
+  challenge with the matching `DownloadStarted` event.
+  
+  New
+  [`crate::AuthSource`] enum (`Page` /
+  `Download`) added to both `NavigationEvent::AuthChallenged`
+  and the `AuthChallenge` handler-arg struct so hosts can route
+  the two channels differently — page auth is a tab-level UI
+  moment, download auth is a per-transfer credential prompt.
+  The download-test (`--download-test`) phase D verifies the
+  `AuthSource::Download` event fires for an HTTP-Basic-protected
+  programmatic download.
 - Throttling control — suspending / resuming page activity for
   hidden tabs needs SPI (`_setSuspended:`) and is risky. The
   lighter alternative — Page Visibility sync, see below — is

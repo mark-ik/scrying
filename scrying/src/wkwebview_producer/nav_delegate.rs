@@ -272,6 +272,7 @@ define_class!(
                     url: url.clone(),
                     host: host.clone(),
                     auth_method: auth_method.clone(),
+                    source: crate::AuthSource::Page,
                 });
             }
 
@@ -287,6 +288,7 @@ define_class!(
                         host,
                         auth_method,
                         realm,
+                        source: crate::AuthSource::Page,
                     })
                 })
             } else {
