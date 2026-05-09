@@ -338,31 +338,42 @@ pub(super) fn make_stream_configuration(
     window_pixel_size: PhysicalSize<u32>,
     color_pipeline: crate::ColorPipeline,
 ) -> Retained<SCStreamConfiguration> {
-    use objc2_core_graphics::{kCGColorSpaceDisplayP3, kCGColorSpaceSRGB};
+    use objc2_core_graphics::{
+        kCGColorSpaceDisplayP3, kCGColorSpaceExtendedLinearDisplayP3, kCGColorSpaceSRGB,
+    };
+    use objc2_core_video::kCVPixelFormatType_64RGBAHalf;
     unsafe {
         let cfg = SCStreamConfiguration::new();
         cfg.setWidth(window_pixel_size.width.max(1) as usize);
         cfg.setHeight(window_pixel_size.height.max(1) as usize);
-        // 32-bit BGRA — matches `MTLPixelFormat::BGRA8Unorm` and
-        // `wgpu::TextureFormat::Bgra8Unorm` so the consumer renders
-        // without a format swizzle pass. Same 8-bit format for
-        // both `Srgb` and `DisplayP3` pipelines: P3 colors fit in
-        // 8 bits per channel, only the gamut tag differs.
-        cfg.setPixelFormat(kCVPixelFormatType_32BGRA);
-        // SCK's `colorSpaceName` controls how the WindowServer-
-        // composited pixels are encoded into the IOSurface. With
-        // sRGB, P3-tagged page content gets gamut-mapped to sRGB
-        // upstream of us; with Display P3, the wider gamut
-        // survives. Same numeric range either way (~100 nits SDR);
-        // the consumer-side wgpu surface needs to be configured
-        // for the matching color space to actually display the
-        // P3 colors correctly on a P3-capable monitor (otherwise
-        // the macOS composer remaps P3→sRGB at present time and
-        // visual parity with `Srgb` ends up identical).
-        let color_space_name = match color_pipeline {
-            crate::ColorPipeline::Srgb => kCGColorSpaceSRGB,
-            crate::ColorPipeline::DisplayP3 => kCGColorSpaceDisplayP3,
+        // Pixel format and color space travel together: SCK
+        // encodes captured pixels into the IOSurface using both,
+        // and the consumer-side Metal texture's pixel format has
+        // to match the IOSurface's. The mapping is driven by the
+        // `ColorPipeline` choice — see [`crate::ColorPipeline`]
+        // for the per-variant doc and the matching Metal/wgpu
+        // formats applied later in `try_acquire_frame`.
+        let (cv_pixel_format, color_space_name) = match color_pipeline {
+            crate::ColorPipeline::Srgb => (kCVPixelFormatType_32BGRA, kCGColorSpaceSRGB),
+            crate::ColorPipeline::DisplayP3 => {
+                (kCVPixelFormatType_32BGRA, kCGColorSpaceDisplayP3)
+            }
+            crate::ColorPipeline::Hdr16f => (
+                // 16-bit float per channel, RGBA channel order
+                // (note: not BGRA). The consumer's
+                // `MTLPixelFormat::RGBA16Float` and
+                // `wgpu::TextureFormat::Rgba16Float` use the
+                // same channel order, so no swizzle.
+                kCVPixelFormatType_64RGBAHalf,
+                // Extended-linear means values > 1.0 are valid
+                // (HDR over-bright highlights); the linear
+                // transfer means the GPU shader can sample
+                // without decoding a non-linear curve. P3
+                // primaries widen the gamut alongside.
+                kCGColorSpaceExtendedLinearDisplayP3,
+            ),
         };
+        cfg.setPixelFormat(cv_pixel_format);
         cfg.setColorSpaceName(color_space_name);
         cfg.setShowsCursor(false);
         // Our consumer only ever keeps the latest sample (the
@@ -371,6 +382,32 @@ pub(super) fn make_stream_configuration(
         // pipeline latency between WebKit render and demo present.
         cfg.setQueueDepth(2);
         cfg
+    }
+}
+
+/// Per-frame Metal pixel format (used for both source and
+/// destination textures in `try_acquire_frame`'s blit). Must
+/// match the pixel format SCK encoded into the IOSurface, which
+/// is in turn driven by [`make_stream_configuration`].
+pub(super) fn metal_pixel_format_for(
+    pipeline: crate::ColorPipeline,
+) -> objc2_metal::MTLPixelFormat {
+    match pipeline {
+        crate::ColorPipeline::Srgb | crate::ColorPipeline::DisplayP3 => {
+            objc2_metal::MTLPixelFormat::BGRA8Unorm
+        }
+        crate::ColorPipeline::Hdr16f => objc2_metal::MTLPixelFormat::RGBA16Float,
+    }
+}
+
+/// wgpu format for the texture handed to the consumer.
+/// Same gamut/transfer rules as [`metal_pixel_format_for`].
+pub(super) fn wgpu_format_for(pipeline: crate::ColorPipeline) -> wgpu::TextureFormat {
+    match pipeline {
+        crate::ColorPipeline::Srgb | crate::ColorPipeline::DisplayP3 => {
+            wgpu::TextureFormat::Bgra8Unorm
+        }
+        crate::ColorPipeline::Hdr16f => wgpu::TextureFormat::Rgba16Float,
     }
 }
 

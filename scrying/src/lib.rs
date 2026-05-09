@@ -738,6 +738,23 @@ pub enum ColorPipeline {
     /// composer maps P3→sRGB at present time); on a P3 display,
     /// the wider gamut survives the round-trip.
     DisplayP3,
+    /// 16-bit float per channel (RGBA), extended-linear Display P3
+    /// primaries. HDR + WCG (wide color gamut). Linear values >
+    /// 1.0 represent over-bright highlights; consumers that need
+    /// HDR display must configure their wgpu surface for an HDR
+    /// format (e.g. `Rgba16Float` + an EDR/PQ alpha mode).
+    /// Consumers stuck on SDR surfaces will see HDR-bright values
+    /// clamped to ~SDR-white at present time.
+    ///
+    /// The Metal source / dest textures upgrade from
+    /// `BGRA8Unorm` to `RGBA16Float`, the SCK config switches to
+    /// `kCVPixelFormatType_64RGBAHalf` /
+    /// `kCGColorSpaceExtendedLinearDisplayP3`, and
+    /// `MetalTextureRef::format` becomes
+    /// `wgpu::TextureFormat::Rgba16Float`. Per-frame GPU
+    /// bandwidth ~doubles; per-frame allocation also ~doubles
+    /// (8 bytes/pixel vs 4).
+    Hdr16f,
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WebSurfaceSettings {

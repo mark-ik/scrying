@@ -874,17 +874,38 @@ checklist deliberately omits.
   having to read CFType color-space attachments off each
   buffer.
 
-- HDR / 16-float — outstanding. Same `ColorPipeline` enum is
-  the right shape for a future `Hdr16f` variant, but the slice
-  is bigger: `pixelFormat` shifts from `kCVPixelFormatType_32BGRA`
-  to `kCVPixelFormatType_64RGBAHalf`, the per-frame blit's dest
-  texture format flips to `RGBA16Float`, and the wgpu surface
-  needs `Rgba16Float` + `CompositeAlphaMode::PreMultiplied` to
-  present HDR — not all configurations advertise the surface
-  format, and macOS-EDR vs PQ HDR present paths diverge.
-  `palette` (now a dep) gives us tone-mapping and gamut
-  conversion math for future testing / fallback rendering on
-  SDR displays.
+- ✅ HDR / 16-float — `ColorPipeline::Hdr16f` is now wired
+  end-to-end on the producer side. SCK's `pixelFormat` flips to
+  `kCVPixelFormatType_64RGBAHalf` and `colorSpaceName` to
+  `kCGColorSpaceExtendedLinearDisplayP3`; the Metal source and
+  destination textures (allocated per frame in
+  `try_acquire_frame`) become `MTLPixelFormat::RGBA16Float`;
+  `MetalTextureRef::format` reports
+  `wgpu::TextureFormat::Rgba16Float`. The per-frame revision
+  gate already accommodates pixel-format / color-space changes
+  uniformly, so flipping `set_color_pipeline` to `Hdr16f` on a
+  live capture rides the same drop-during-transition path as
+  resize.
+
+  Consumer-side rendering of HDR content requires an HDR-capable
+  wgpu surface (`Rgba16Float` + `CompositeAlphaMode::PreMultiplied`
+  on macOS-EDR, or PQ-on-Rec.2020 surface configurations). On
+  an SDR-only surface the demo's existing
+  `Bgra8Unorm` swap chain clamps over-bright values to
+  ~SDR-white at present time — the producer side is
+  correct, the SDR-display fallback is just visually less
+  exciting. Per-frame GPU bandwidth ~doubles (8 bytes/pixel vs
+  4) because the dest texture's stride doubles; per-frame Metal
+  blit cost on Apple silicon stays in the ~1ms ballpark for
+  webview-sized rects. `palette` is in tree against future
+  programmatic verification of color round-trips.
+
+  Channel ordering note: `kCVPixelFormatType_32BGRA` is BGRA
+  but `kCVPixelFormatType_64RGBAHalf` is RGBA — the SDR
+  pipeline's swizzle from BGRA to RGB happens at sample time in
+  the consumer's shader, while the HDR pipeline's source matches
+  `wgpu::TextureFormat::Rgba16Float` directly. No swizzle pass
+  in the producer either way.
 - DevTools / Web Inspector remote attach — `setInspectable(true)`
   is wired for macOS 13.3+, but the Safari → Develop menu →
   attach flow isn't documented anywhere; downstream consumers

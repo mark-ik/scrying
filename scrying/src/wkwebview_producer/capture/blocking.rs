@@ -23,7 +23,7 @@ use objc2_core_video::{CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetIO
 use objc2_foundation::{MainThreadMarker, NSArray, NSError};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLDevice,
-    MTLPixelFormat, MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
+    MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
 use objc2_screen_capture_kit::{
     SCContentFilter, SCShareableContent, SCStream, SCStreamOutputType, SCWindow,
@@ -473,10 +473,14 @@ impl WkWebViewProducer {
         // Wrap the IOSurface as a transient source MTLTexture.
         // We don't hand this out — it's the full host-window
         // capture; we blit a sub-rect of it into a webview-sized
-        // destination below.
+        // destination below. Format follows the configured color
+        // pipeline (`BGRA8Unorm` for Srgb / DisplayP3, `RGBA16Float`
+        // for Hdr16f) — must match what SCK encoded into the
+        // IOSurface.
+        let metal_format = super::metal_pixel_format_for(self.config.color_pipeline);
         let source_descriptor = unsafe {
             MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
-                MTLPixelFormat::BGRA8Unorm,
+                metal_format,
                 source_width,
                 source_height,
                 false,
@@ -520,10 +524,12 @@ impl WkWebViewProducer {
         // webview's pixel rect. Per-frame allocation matches the
         // existing source-texture pattern (cheap on Apple
         // silicon; the IOSurface-backed path already creates a
-        // texture per frame).
+        // texture per frame). Same pixel format as the source —
+        // a Metal blit copies bytes directly between matching
+        // formats.
         let dest_descriptor = unsafe {
             MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
-                MTLPixelFormat::BGRA8Unorm,
+                metal_format,
                 crop_w,
                 crop_h,
                 false,
@@ -595,7 +601,7 @@ impl WkWebViewProducer {
             Retained::as_ptr(&dest_texture) as *mut std::ffi::c_void;
         let frame = NativeMetalTextureRef {
             size: PhysicalSize::new(crop_w as u32, crop_h as u32),
-            format: wgpu::TextureFormat::Bgra8Unorm,
+            format: super::wgpu_format_for(self.config.color_pipeline),
             generation: capture.generation.fetch_add(1, Ordering::Relaxed),
             // The producer encodes an `MTLSharedEvent` signal at
             // `signal_value` after each frame's blit; consumers
