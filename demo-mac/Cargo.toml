@@ -1,0 +1,22 @@
+[package]
+name = "demo-mac"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal winit host probe for scrying's macOS WKWebView producer"
+
+[[bin]]
+name = "demo-mac"
+path = "src/main.rs"
+
+[dependencies]
+image = "0.25"
+pollster = "0.4.0"
+raw-window-handle = "0.6"
+wgpu = { version = "29.0.1", features = ["metal"] }
+winit = "0.30.12"
+scrying = { path = "../scrying" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.3"
+objc2-app-kit = "0.3.2"

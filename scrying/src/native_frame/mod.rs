@@ -17,6 +17,9 @@ mod sync_dx12;
 #[cfg(target_os = "macos")]
 mod metal;
 
+#[cfg(target_os = "macos")]
+mod sync_metal;
+
 use dpi::PhysicalSize;
 
 pub use error::{InteropError, UnsupportedReason};
@@ -24,6 +27,9 @@ pub use sync::{ImplicitOnlySynchronizer, InteropSynchronizer, NoopSynchronizer, 
 
 #[cfg(target_os = "windows")]
 pub use sync_dx12::Dx12FenceSynchronizer;
+
+#[cfg(target_os = "macos")]
+pub use sync_metal::MetalSharedEventSynchronizer;
 
 /// The wgpu graphics backend in use on the host device.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -319,7 +325,7 @@ fn import_metal_texture_ref(
 ) -> Result<ImportedTexture, InteropError> {
     #[cfg(target_os = "macos")]
     {
-        return metal::import(frame, host);
+        metal::import(frame, host)
     }
 
     #[cfg(not(target_os = "macos"))]

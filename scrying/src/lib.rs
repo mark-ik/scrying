@@ -22,6 +22,11 @@ pub mod webview2_composition_producer;
 #[cfg(target_os = "macos")]
 pub mod wkwebview_producer;
 
+#[cfg(target_os = "macos")]
+pub use wkwebview_producer::{
+    CaptureMetrics, CaptureStatus, WkWebViewProducer, WkWebViewProducerConfig,
+};
+
 #[cfg(target_os = "linux")]
 pub mod webkitgtk_producer;
 
@@ -79,17 +84,33 @@ impl WryWebSurfaceCapabilities {
     pub fn probe(host: Option<&HostWgpuContext>) -> Self {
         match SystemWebviewBackend::detect() {
             SystemWebviewBackend::WebView2 => probe_webview2(host),
-            SystemWebviewBackend::WkWebView => Self {
-                backend: SystemWebviewBackend::WkWebView,
-                preferred_mode: WebSurfaceMode::NativeChildOverlay,
-                imported_texture: CapabilityStatus::Unsupported(
-                    crate::native_frame::UnsupportedReason::NativeImportNotYetImplemented,
-                ),
-                native_child_overlay: CapabilityStatus::Supported,
-                cpu_snapshot: CapabilityStatus::Supported,
-                supported_frames: Vec::new(),
-                reason: "WKWebView snapshot capture is useful as a fallback, but no Metal texture producer is wired.",
-            },
+            SystemWebviewBackend::WkWebView => {
+                let imported_texture = match host.map(|h| h.backend) {
+                    Some(InteropBackend::Metal) => CapabilityStatus::Supported,
+                    Some(_) => CapabilityStatus::Unsupported(
+                        crate::native_frame::UnsupportedReason::HostBackendMismatch,
+                    ),
+                    None => CapabilityStatus::Unsupported(
+                        crate::native_frame::UnsupportedReason::HostBackendUnavailable,
+                    ),
+                };
+                Self {
+                    backend: SystemWebviewBackend::WkWebView,
+                    // ImportedTexture only when the host's wgpu
+                    // device is Metal — that's the only case
+                    // ScreenCaptureKit's IOSurface→MTLTexture path
+                    // can hand us a wgpu-importable handle.
+                    preferred_mode: match imported_texture {
+                        CapabilityStatus::Supported => WebSurfaceMode::ImportedTexture,
+                        _ => WebSurfaceMode::NativeChildOverlay,
+                    },
+                    imported_texture,
+                    native_child_overlay: CapabilityStatus::Supported,
+                    cpu_snapshot: CapabilityStatus::Supported,
+                    supported_frames: vec![NativeFrameKind::MetalTextureRef],
+                    reason: "WKWebView producer: ScreenCaptureKit → IOSurface → MTLTexture path is wired (requires Screen Recording permission and a Metal-backed host wgpu device); falls back to NativeChildOverlay if the host isn't on Metal, and CpuSnapshot via takeSnapshot: is always available.",
+                }
+            }
             SystemWebviewBackend::WebKitGtk => Self {
                 backend: SystemWebviewBackend::WebKitGtk,
                 preferred_mode: WebSurfaceMode::NativeChildOverlay,
@@ -212,6 +233,253 @@ pub enum NavigationEvent {
     Completed { url: String, success: bool },
     /// The document title changed.
     TitleChanged { title: String },
+    /// The page tried to open a new window (`target="_blank"`,
+    /// `window.open(...)`, JS-triggered popup). The producer
+    /// suppresses the engine-level popup unconditionally — browser-
+    /// shape consumers (multiple tabs per process) want full control
+    /// over how popups are routed and should observe this event,
+    /// then call `load_url(url)` on a fresh producer instance to
+    /// open it as a tab.
+    NewWindowRequested { url: String },
+    /// The web content process backing this WebView terminated
+    /// (typically a content-side crash). The producer's WKWebView
+    /// is no longer rendering; the host should reload (and may show
+    /// a "tab crashed" UI). Recovery is `producer.reload()` or
+    /// `load_url(...)` — the WKWebView itself is reusable.
+    ContentProcessTerminated,
+    /// The engine received an authentication challenge for the
+    /// given URL and protection space. The producer responds with
+    /// `PerformDefaultHandling` (system Keychain / interactive UI),
+    /// so this event is informational only — useful for browser
+    /// chrome that wants to log auth events or show a status
+    /// indicator. A future slice may grow a `respond_to_auth`
+    /// method for hosts that need to drive the disposition
+    /// themselves.
+    AuthChallenged {
+        url: String,
+        /// Host the credential is being requested for.
+        host: String,
+        /// Authentication method identifier (NSURLAuthenticationMethod*),
+        /// e.g. `NSURLAuthenticationMethodHTTPBasic`,
+        /// `NSURLAuthenticationMethodServerTrust`,
+        /// `NSURLAuthenticationMethodClientCertificate`.
+        auth_method: String,
+    },
+    /// A WebKit-managed download started. The producer chose
+    /// `destination_path` automatically (under the configured
+    /// download directory); the host is responsible for any UI
+    /// (progress bars, "show in Finder", etc.). The `id` correlates
+    /// with subsequent `DownloadProgress` / `DownloadFinished` /
+    /// `DownloadCancelled` events for this download.
+    DownloadStarted {
+        id: DownloadId,
+        url: String,
+        suggested_filename: String,
+        destination_path: std::path::PathBuf,
+        /// Total bytes the server announced via `Content-Length`.
+        /// `None` when the server didn't announce one (chunked
+        /// transfer, etc.).
+        total_bytes_expected: Option<u64>,
+    },
+    /// Throttled progress notification. Emitted at most ~10 Hz per
+    /// download, plus a final emit at completion. `bytes_written` is
+    /// the cumulative count of bytes written to disk.
+    DownloadProgress {
+        id: DownloadId,
+        bytes_written: u64,
+        total_bytes_expected: Option<u64>,
+    },
+    /// A download completed. `error` is `Some` on failure (the file
+    /// at `destination_path` may be partial or absent), `None` on
+    /// successful completion. Hosts that want to distinguish
+    /// host-driven cancellation from a server / network error
+    /// should listen for `DownloadCancelled` instead — that variant
+    /// only fires when the disposition came from
+    /// `set_download_handler` returning `DownloadDecision::Cancel`
+    /// or the host calling `cancel_download(id)`.
+    DownloadFinished {
+        id: DownloadId,
+        destination_path: std::path::PathBuf,
+        error: Option<String>,
+    },
+    /// A download was cancelled — either because a
+    /// host-registered destination handler returned
+    /// `DownloadDecision::Cancel`, or because the host called
+    /// `cancel_download(id)` mid-stream.
+    ///
+    /// `resume_data` is `Some` when WebKit captured enough state
+    /// to potentially resume the download via
+    /// [`crate::wkwebview_producer::WkWebViewProducer::resume_download`].
+    /// `None` when the cancel happened before any bytes
+    /// transferred (e.g. host destination handler returned
+    /// `Cancel` from `decideDestination`) or when the protocol /
+    /// server doesn't support resumption (no `Accept-Ranges`
+    /// support, etc.).
+    DownloadCancelled {
+        id: DownloadId,
+        destination_path: std::path::PathBuf,
+        resume_data: Option<Vec<u8>>,
+    },
+    /// The user right-clicked inside the page. The producer
+    /// suppresses WebKit's default context menu and emits this
+    /// event so a browser-class consumer can show its own — usually
+    /// a host-rendered `NSMenu` with items like "Open link in new
+    /// tab" or "Save image as...". Apple's
+    /// `webView:contextMenuConfigurationForElement:` is iOS-only,
+    /// so on macOS the producer goes through a JS user-script
+    /// (`contextmenu` capture-phase listener +
+    /// `event.preventDefault()`) and a dedicated
+    /// `WKScriptMessageHandler` to deliver this event.
+    ///
+    /// Coordinates are in CSS pixels relative to the WebView's
+    /// viewport (matching `MouseEvent.clientX` /
+    /// `MouseEvent.clientY`). `link_url` and `image_url` walk the
+    /// click target's ancestor chain to recover the closest
+    /// enclosing `<a href>` / `<img src>`; both are `None` when no
+    /// such ancestor exists (e.g. a right-click on plain body
+    /// text).
+    ContextMenuRequested {
+        page_url: String,
+        x: f64,
+        y: f64,
+        link_url: Option<String>,
+        image_url: Option<String>,
+    },
+}
+
+/// Opaque per-producer identifier for a download. Issued when
+/// WebKit promotes a navigation to a download; used by the host to
+/// correlate `DownloadStarted` / `DownloadProgress` /
+/// `DownloadFinished` / `DownloadCancelled` events and to drive
+/// [`crate::wkwebview_producer::WkWebViewProducer::cancel_download`].
+///
+/// IDs are monotonically increasing per producer and are not
+/// reused. They have no meaning across producers.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DownloadId(pub u64);
+
+/// Information passed to a host-registered download-destination
+/// handler (see
+/// [`crate::wkwebview_producer::WkWebViewProducer::set_download_handler`]).
+/// The host returns a [`DownloadDecision`] describing whether to
+/// accept the download (and where to write it) or cancel it.
+#[derive(Clone, Debug)]
+pub struct DownloadDestinationRequest {
+    pub id: DownloadId,
+    pub url: String,
+    pub suggested_filename: String,
+    pub mime_type: String,
+    pub total_bytes_expected: Option<u64>,
+}
+
+/// Disposition the host's destination handler returns to
+/// [`DownloadDestinationRequest`].
+#[derive(Clone, Debug)]
+pub enum DownloadDecision {
+    /// Accept the download and write it to this absolute path.
+    /// Parent directory is created if it doesn't exist.
+    AcceptAt(std::path::PathBuf),
+    /// Cancel the download. Triggers a `DownloadCancelled` event;
+    /// no bytes are written.
+    Cancel,
+}
+
+/// Information passed to a host-registered auth-challenge handler
+/// (see `WkWebViewProducer::set_auth_handler`). The host returns an
+/// [`AuthDisposition`] describing how the challenge should be
+/// resolved.
+#[derive(Clone, Debug)]
+pub struct AuthChallenge {
+    pub url: String,
+    /// Host the credential is being requested for.
+    pub host: String,
+    /// Authentication method identifier
+    /// (`NSURLAuthenticationMethodHTTPBasic`,
+    /// `...HTTPDigest`, `...ServerTrust`,
+    /// `...ClientCertificate`, etc.).
+    pub auth_method: String,
+    /// Realm the server announced (HTTP basic / digest only —
+    /// empty for other methods).
+    pub realm: String,
+}
+
+/// Disposition the host returns from its auth-challenge handler.
+/// Maps onto `NSURLSessionAuthChallengeDisposition`.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum AuthDisposition {
+    /// Fall back to WebKit's default handling (system Keychain /
+    /// interactive prompts).
+    PerformDefault,
+    /// Cancel the auth challenge — the load fails.
+    Cancel,
+    /// "I can't satisfy this protection space; ask the next one."
+    /// Useful for client-cert challenges where the host has no
+    /// matching cert.
+    RejectProtectionSpace,
+    /// Provide a username + password credential (HTTP basic /
+    /// digest). Persistence is session-only — no Keychain write.
+    UseCredential { username: String, password: String },
+}
+
+/// Information passed to a host-registered permission handler
+/// (see `WkWebViewProducer::set_permission_handler`). The host
+/// returns a [`PermissionDecision`].
+#[derive(Clone, Debug)]
+pub struct PermissionRequest {
+    /// Web origin requesting the permission, e.g.
+    /// `"https://example.com"`. Empty for `about:` / `data:` URLs.
+    pub origin: String,
+    /// URL of the frame that initiated the request — usually the
+    /// same as `origin` plus the path; differs from `origin` for
+    /// nested iframes.
+    pub frame_url: String,
+    pub kind: PermissionKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum PermissionKind {
+    Camera,
+    Microphone,
+    CameraAndMicrophone,
+    /// `DeviceMotionEvent` / `DeviceOrientationEvent`.
+    DeviceOrientation,
+}
+
+/// Disposition the host returns from its permission handler. Maps
+/// onto `WKPermissionDecision`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum PermissionDecision {
+    /// Allow the requested permission.
+    Grant,
+    /// Refuse the requested permission.
+    Deny,
+    /// Fall back to WebKit's default behavior — for media-capture
+    /// requests this means the OS shows its standard prompt; for
+    /// device-orientation it means the engine prompts according to
+    /// its own policy. Use this when the host doesn't have an
+    /// opinion (e.g. for an "untrusted page, let WebKit handle it"
+    /// fallback).
+    Prompt,
+}
+
+/// HTTP cookie payload used by the producer's cookie-store API
+/// (`request_all_cookies` / `set_cookie` / `delete_cookie` on the
+/// macOS producer). Mirrors the subset of `NSHTTPCookie` that
+/// browser-shape consumers actually need; `expires_at` is a Unix
+/// timestamp (seconds since 1970-01-01 UTC), `None` for session
+/// cookies.
+#[derive(Clone, Debug)]
+pub struct Cookie {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    pub expires_at: Option<f64>,
+    pub is_secure: bool,
+    pub is_http_only: bool,
 }
 
 /// Reason supplied to a focus move.
@@ -349,6 +617,49 @@ pub enum CursorShape {
     Custom(String),
 }
 
+/// One key / modifier-change event forwarded to the underlying webview.
+#[derive(Clone, Debug)]
+pub struct KeyboardInput {
+    pub kind: KeyEventKind,
+    /// Platform-native virtual-key code. Windows: VK_*, Mac: AppKit
+    /// `keyCode` (Apple HID usage, e.g. 0x00 = A, 0x24 = Return),
+    /// Linux: xkb keycode. Producers map this to whatever the
+    /// underlying engine expects.
+    pub virtual_key_code: u32,
+    /// Text characters this event would produce (after IME / dead-key
+    /// composition), if any. Empty for pure modifier-state changes.
+    pub characters: String,
+    /// Same text but with modifier keys (shift / alt) ignored, for
+    /// keyboard-shortcut handling. Empty when not applicable.
+    pub characters_ignoring_modifiers: String,
+    pub modifiers: KeyModifierFlags,
+    /// `true` when the OS reports this event as auto-repeat.
+    pub is_repeat: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum KeyEventKind {
+    Down,
+    Up,
+    /// A modifier key (shift, control, alt, meta / cmd) toggled.
+    /// `virtual_key_code` identifies which one; `characters` is empty.
+    ModifiersChanged,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct KeyModifierFlags {
+    pub shift: bool,
+    pub control: bool,
+    /// `Alt` on Windows, `Option` on macOS, `Mod1` on Linux.
+    pub alt: bool,
+    /// `Win` on Windows, `Command` on macOS, `Mod4` / `Super` on
+    /// Linux.
+    pub meta: bool,
+    /// Caps-lock toggle state at the moment of the event.
+    pub caps_lock: bool,
+}
+
 /// Drag-and-drop event forwarded to the webview.
 #[derive(Clone, Copy, Debug)]
 pub struct DragInput {
@@ -413,6 +724,18 @@ pub trait WryWebSurfaceProducer {
     /// `NavigationCompleted` (or analog) fires, or the timeout elapses.
     /// Producers that don't yet support navigation return
     /// [`WryWebSurfaceError::Unsupported`].
+    ///
+    /// # ⚠️ Blocking — host-event-loop hazard
+    ///
+    /// On macOS this method pumps the main `NSRunLoop` to wait for
+    /// the navigation delegate. Calling it from inside a host
+    /// event-loop callback (e.g. winit's `resumed` / `window_event`
+    /// under macOS, where winit guards against re-entrant handler
+    /// invocation) will trigger a re-entrancy panic. From event-loop
+    /// callbacks, prefer the non-blocking inherent
+    /// [`crate::wkwebview_producer::WkWebViewProducer::load_html`]
+    /// and observe completion via
+    /// [`Self::poll_navigation_event`].
     fn navigate_to_string(
         &mut self,
         html: &str,
@@ -452,6 +775,14 @@ pub trait WryWebSurfaceProducer {
     /// `NavigationCompleted` fires (or the timeout elapses). Producers
     /// that don't yet support URL navigation return
     /// [`WryWebSurfaceError::Unsupported`].
+    ///
+    /// # ⚠️ Blocking — host-event-loop hazard
+    ///
+    /// Same caveat as [`Self::navigate_to_string`]: pumps the main
+    /// `NSRunLoop` on macOS, panics if invoked from a winit event
+    /// handler. Use [`crate::wkwebview_producer::WkWebViewProducer::load_url`]
+    /// paired with [`Self::poll_navigation_event`] for non-blocking
+    /// navigation from event-loop contexts.
     fn navigate_to_url(
         &mut self,
         url: &str,
@@ -524,6 +855,18 @@ pub trait WryWebSurfaceProducer {
         let _ = event;
         Err(WryWebSurfaceError::Unsupported(
             "WryWebSurfaceProducer::send_pointer_input is not implemented for this platform",
+        ))
+    }
+
+    /// Forward a keyboard / modifier-state event to the webview. The
+    /// host typically calls this when the webview is the focus target
+    /// (see [`WryWebSurfaceProducer::move_focus`]) and the windowing
+    /// system delivers a key event. Producers that don't yet support
+    /// keyboard forwarding return [`WryWebSurfaceError::Unsupported`].
+    fn send_keyboard_input(&mut self, event: KeyboardInput) -> Result<(), WryWebSurfaceError> {
+        let _ = event;
+        Err(WryWebSurfaceError::Unsupported(
+            "WryWebSurfaceProducer::send_keyboard_input is not implemented for this platform",
         ))
     }
 

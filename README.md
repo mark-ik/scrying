@@ -8,8 +8,9 @@ This repo was extracted from [`wgpu-graft`](https://github.com/mark-ik/wgpu-graf
 
 | Crate | Purpose |
 | --- | --- |
-| [`scrying`](scrying/) | The library. Capability probe (`WebSurfaceMode`), per-platform `WryWebSurfaceProducer` impls, fallbacks. Windows producer is the reference implementation; macOS and Linux producers are skeletons. |
-| [`demo-wry-winit`](demo-wry-winit/) | Minimal winit + wgpu host probe. Creates a Wry webview, asks `scrying` which surface mode is viable, and on Windows captures the WebView2 composition target into a wgpu texture. |
+| [`scrying`](scrying/) | The library. Capability probe (`WebSurfaceMode`), per-platform `WryWebSurfaceProducer` impls, fallbacks. Windows + macOS producers are real implementations; Linux is a skeleton awaiting WPE/WebKitGTK work. |
+| [`demo-wry-winit`](demo-wry-winit/) | Windows host probe. Creates a Wry webview, asks `scrying` which surface mode is viable, and captures the WebView2 composition target into a wgpu texture. |
+| [`demo-mac`](demo-mac/) | macOS host probe. Hosts a `WkWebViewProducer` against a winit window's `NSView`; flagged modes drive nav / input / JS-messaging / SCK-capture / per-profile-data-store paths so each producer slice gets exercised at runtime. See [`demo-mac/README.md`](demo-mac/README.md). |
 
 See [`scrying/README.md`](scrying/README.md) for the producer/consumer contract, the Windows WGC + shared D3D11 path, and the future explicit-fence-sync work.
 
@@ -17,8 +18,27 @@ See [`scrying/README.md`](scrying/README.md) for the producer/consumer contract,
 
 ```bash
 cargo check -p scrying
-cargo run   -p demo-wry-winit
+# Windows
+cargo run -p demo-wry-winit
+# macOS — overlay mode (default)
+cargo run -p demo-mac
+# macOS — automated runtime tests
+cargo run -p demo-mac -- --scripted                  # JS messaging + input forwarding
+cargo run -p demo-mac -- --browser-test              # history / settings / URL schemes / find / PDF
+cargo run -p demo-mac -- --interaction-state-test    # interactionState round-trip
+cargo run -p demo-mac -- --pointer-input-test        # send_pointer_input → JS pointer events
+cargo run -p demo-mac -- --incognito-test            # nonPersistentDataStore isolation
+cargo run -p demo-mac -- --download-test             # downloads pipeline (HTTP loopback)
+cargo run -p demo-mac -- --probe-snapshot            # CPU snapshot via takeSnapshot:
+cargo run -p demo-mac -- --capture --dump-every 30   # SCK pipeline + per-N-frame readback
+cargo run -p demo-mac -- --capture-test              # SCK assertion smoke test (needs Screen Recording perm)
+cargo run -p demo-mac -- --profile-test              # persistent-store-shared-across-producers assertion
+cargo run -p demo-mac -- --two-tabs                  # multi-instance independence (no cross-talk between producers)
+# All assertion-style runs at once (headless, 8 modes, exit 1 on any FAIL)
+bash scripts/test-mac.sh
 ```
+
+`--*-test` modes default to a hidden window and `NSApplicationActivationPolicyProhibited` so they run silently in the background; pass `--visible` to watch the WKWebView in real time. `--capture-test` is the one exception — it forces visibility because SCK can't capture hidden windows, and is held out of `scripts/test-mac.sh` because Screen Recording permission can't be self-granted (CI runners need a `tccutil` pre-grant). `.github/workflows/test-mac.yml` runs the rest of the suite on every push to master against `macos-latest`.
 
 ## Relationship to wgpu-graft
 

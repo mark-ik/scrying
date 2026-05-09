@@ -1,0 +1,64 @@
+name: test-mac
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Cancel in-flight runs for the same ref when a new commit lands —
+# we only care about the latest state.
+concurrency:
+  group: test-mac-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  demo-mac-test-suite:
+    name: demo-mac test suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest currently maps to Apple Silicon (M1/M2). We
+        # only test on the latest macOS image because scrying's macOS
+        # producer targets macOS 14+ APIs (interactionState,
+        # WKWebsiteDataStore::dataStoreForIdentifier:).
+        os: [macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Cache the cargo registry + the workspace target dir so
+      # subsequent runs don't recompile every dependency. The cache
+      # key keys on Cargo.lock so a dependency bump invalidates
+      # cleanly.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # Library + helpers unit tests. Doesn't need a display.
+      - name: cargo test (scrying lib)
+        run: cargo test -p scrying --lib
+
+      # Build demo-mac once. test-mac.sh also runs `cargo build`
+      # internally but doing it as its own step gives clearer
+      # build-time diagnostics if compilation breaks.
+      - name: cargo build demo-mac
+        run: cargo build -p demo-mac
+
+      # The integration suite. Each --*-test mode is headless
+      # (with_visible(false) + NSApplicationActivationPolicyProhibited),
+      # so the GHA runner doesn't need an extra virtual-display
+      # setup beyond what the macOS image ships with by default.
+      # Per-mode 60s timeout via perl alarm guards against hangs.
+      - name: bash scripts/test-mac.sh
+        run: bash scripts/test-mac.sh

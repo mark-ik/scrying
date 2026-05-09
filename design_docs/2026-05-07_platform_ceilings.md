@@ -120,28 +120,179 @@ Metal import.
   window), sub-iframe capture.
 
 **Current scrying state (0.4.0+):**
-[`native_frame::metal`](../scrying/src/native_frame/metal.rs) lands the
-`MTLTexture` → `wgpu::Texture` import path (lifted from wgpu-graft's
-proven `import_metal_texture_ref` pattern). The
-[`MetalTextureRef`](../scrying/src/native_frame/mod.rs) variant on
-`NativeFrame` is wired into the import dispatch.
-[`wkwebview_producer`](../scrying/src/wkwebview_producer.rs) advertises
-`NativeFrameKind::MetalTextureRef` in `supported_frames` but is still
-a structural skeleton — it does not yet host a `WKWebView`, set up
-ScreenCaptureKit, or emit real frames. All trait methods (`navigate`,
-`acquire_frame`, `send_mouse_input`, etc.) currently return
-`Unsupported` until the capture pipeline lands.
+The macOS producer is a real working WebView, not a skeleton.
+Implementation landed in five cohesive slices on top of the
+[`native_frame::metal`](../scrying/src/native_frame/metal.rs)
+`MTLTexture` → `wgpu::Texture` import (initial M2 work, lifted
+structurally from wgpu-graft and adapted to the wgpu-hal 29 API drift
+where `texture_from_raw` now takes
+`Retained<ProtocolObject<dyn MTLTexture>>` directly):
 
-**Next slice (M3 / M4):** Stand up the WKWebView lifecycle (NSView
-host, `WKWebViewConfiguration`, `WKNavigationDelegate`), bind a
-`SCStream` content filter to the WKWebView's NSView, and route
-`SCStreamOutput`'s `CMSampleBuffer` → `IOSurfaceRef` →
-`[MTLDevice newTextureWithDescriptor:iosurface:plane:]` →
-`MetalTextureRef` → `WryWebSurfaceFrame::Native(...)`. Threading
-note: `SCStreamOutput` callbacks fire on a background `dispatch_queue`;
-the producer needs a `Mutex<Option<Retained<CMSampleBuffer>>>` for
-the most-recent-sample handoff, and `try_acquire_frame` reads it on
-the main thread.
+- **Slice A — WKWebView lifecycle.** `WkWebViewProducer::new` retains
+  the parent `NSView`, builds a default `WKWebViewConfiguration`,
+  creates the `WKWebView` with an NSRect derived from
+  `config.offset` and `config.size` (both physical pixels → both
+  divided by the parent window's `backingScaleFactor` to get
+  AppKit points), wires a navigation delegate, and adds the
+  WebView as a subview.
+  `navigate_to_string` waits on `WKNavigationDelegate.didFinishNavigation:`
+  while pumping the main run loop in 16 ms slices; `resize` /
+  `set_offset` reshape the live view; `Drop` removes from superview
+  and clears the delegate.
+- **Slice B — ScreenCaptureKit pipeline.**
+  [`WkWebViewProducer::start_capture(host, timeout)`](../scrying/src/wkwebview_producer.rs)
+  pulls the host wgpu's `MTLDevice` via
+  `as_hal::<Metal>().raw_device().clone()`, walks
+  `SCShareableContent.windows` for the WKWebView's host
+  `NSWindow.windowNumber`, builds an
+  `SCContentFilter::initWithDesktopIndependentWindow:`, configures an
+  `SCStream` for `kCVPixelFormatType_32BGRA` /
+  `setShowsCursor(false)` / `setQueueDepth(3)`, attaches custom
+  `SCStreamDelegate` + `SCStreamOutput` delegates on a dedicated
+  `DispatchQueue`, and blocks on `startCaptureWithCompletionHandler:`.
+  `try_acquire_frame` then takes the latest `CMSampleBuffer`,
+  extracts `IOSurfaceRef` via `CVPixelBufferGetIOSurface`, wraps it
+  as `MTLTexture` on the host device, and emits
+  `WryWebSurfaceFrame::Native(NativeFrame::MetalTextureRef(...))`.
+  A small `SendCFRetained<T>` newtype wraps the dispatch-queue →
+  main-thread sample handoff. `acquire_frame` is blocking — pumps
+  the run loop until a sample arrives or `frame_timeout` elapses.
+- **Slice C — navigation parity.** `navigate_to_url` loads a URL via
+  `loadRequest:`. The navigation delegate now fires `Starting` /
+  `SourceChanged` / `Completed` events into a FIFO drained by
+  `poll_navigation_event`. `move_focus` sends the WKWebView to
+  first-responder via the host `NSWindow`.
+- **Slice D — mouse forwarding.** `send_mouse_input` synthesizes an
+  `NSEvent` (window-coordinates, points, bottom-left origin via
+  `convertPoint_toView(None)`), and dispatches directly through the
+  WKWebView's NSResponder slots — `mouseDown:` / `mouseUp:` /
+  `mouseDragged:` / `mouseMoved:` / `rightMouse*` / `otherMouse*` /
+  `mouseExited:`. `Move` differentiates dragged-with-button from
+  plain `MouseMoved` based on `MouseVirtualKeys` button state;
+  `DoubleClick` rides on `clickCount = 2`. Scroll wheel and
+  X-button `buttonNumber` distinction are deferred (need the
+  `CGEvent` path).
+- **Slice E — bidirectional JS messaging.**
+  `WKUserContentController` is pre-loaded on the configuration with
+  a `WKScriptMessageHandler` named `scryingHostBridge` and a
+  document-start user script that builds a `window.chrome.webview`
+  shim. JS-side `window.chrome.webview.postMessage(s)` lands in a
+  FIFO drained by `poll_web_message`; host-side `post_web_message(s)`
+  runs an `evaluateJavaScript:` with a JSON-encoded literal that
+  dispatches to listeners registered via
+  `window.chrome.webview.addEventListener('message', ...)`. The shim
+  is idempotent and the JS API matches WebView2's surface so
+  consumers can write portable bridge code.
+- **Slice F — CPU snapshots.** `capture_cpu_snapshot` runs
+  `takeSnapshotWithConfiguration:completionHandler:` (main-thread
+  callback, no Screen Recording permission needed), pumps the run
+  loop until the NSImage arrives or `config.frame_timeout` elapses,
+  and decodes the `NSImage::TIFFRepresentation` through the `image`
+  crate's TIFF decoder into an `RgbaImage` returned as
+  `WryWebSurfaceFrame::CpuRgba`. Independent of `start_capture` —
+  works as a fallback diagnostic path, useful for thumbnails or for
+  verifying the WebView is rendering before standing up the SCK
+  pipeline.
+- **Slice G — scroll wheel via CGEvent.** `MouseEventKind::Wheel` /
+  `HorizontalWheel` build a `CGEventCreateScrollWheelEvent2` (pixel
+  units, AppKit sign convention) and convert through
+  `NSEvent::eventWithCGEvent:` before dispatching to
+  `webview.scrollWheel:`. Removes the only "deferred" caveat from
+  slice D's mouse forwarding.
+- **Slice H — title-changed events via KVO.** A `TitleObserver`
+  NSObject subclass is registered as a `title` key-path observer on
+  the WKWebView at construction time (`addObserver:forKeyPath:options:context:`
+  with `NSKeyValueObservingOptions::New`). When the page mutates
+  `document.title` after the initial load, the KVO callback pushes
+  `NavigationEvent::TitleChanged { title }` into the same FIFO the
+  navigation delegate writes to. `Drop` calls `removeObserver:`
+  before any retained references cascade so the observed object
+  outlives its observer registration.
+- **Slice I — keyboard forwarding (with IME baseline).**
+  `send_keyboard_input` synthesizes an `NSEvent` via
+  `keyEventWithType:...:characters:charactersIgnoringModifiers:isARepeat:keyCode:`
+  and dispatches through the WKWebView's `keyDown:` / `keyUp:` /
+  `flagsChanged:` slots. `characters` flows through to WebKit's
+  `NSTextInputClient` implementation, so IME composition (CJK, dead
+  keys, marked text) works without explicit composition-state
+  threading on the host side — the host just forwards whatever the
+  windowing system reports.
+- **Slice J — cursor-change reporting.** After each forwarded
+  pointer event, `observe_cursor_change` reads
+  `NSCursor.currentSystemCursor` and compares against the canonical
+  cursor singletons (`arrowCursor`, `IBeamCursor`,
+  `pointingHandCursor`, `crosshairCursor`, `openHandCursor`,
+  `closedHandCursor`, `operationNotAllowedCursor`, etc.) to translate
+  the WebKit-set cursor into a [`CursorShape`]. Only changes are
+  queued, so `poll_cursor_shape` reflects "the engine wants the host
+  to display X" without spamming `Default` events.
+- **Slice K — drag-and-drop forwarding (documented constraint).**
+  `WKWebView` receives drag/drop via the `NSDraggingDestination`
+  protocol, whose callbacks require an `NSDraggingInfo` parameter.
+  `NSDraggingInfo` instances are constructed only by AppKit's drag
+  manager — there is no public API to synthesize one. So
+  `send_drag_input` for **capture mode** is genuinely not feasible
+  without SPI. **Overlay mode** is automatic — AppKit's drag manager
+  delivers drags to the WKWebView through the responder chain
+  without producer involvement, so the host doesn't need to forward.
+  Producer returns `WryWebSurfaceError::Unsupported` with a message
+  that explains both branches.
+- **Slice L — per-profile `WKWebsiteDataStore`.** When
+  `config.data_dir` is non-empty, the producer derives a stable
+  version-8 UUID from the path's bytes via FNV-1a 128 and resolves
+  a per-profile persistent store through
+  `WKWebsiteDataStore::dataStoreForIdentifier:` (macOS 14+). Empty
+  `data_dir` keeps the shared default store. macOS doesn't take an
+  arbitrary path for data stores (storage lives in the app
+  container by UUID); the deterministic-UUID-from-path scheme is the
+  native analog of the per-directory profile model.
+- **Slice M — `MTLSharedEvent` synchronizer scaffolding.** New
+  `SyncMechanism::ExplicitMetalEvent` variant and a
+  `MetalSharedEventSynchronizer` skeleton in
+  [`scrying::native_frame`](../scrying/src/native_frame/sync_metal.rs)
+  parallel to the Windows `Dx12FenceSynchronizer`. Currently a no-op
+  (accepts both `None` and `ExplicitMetalEvent` without
+  waiting/signalling) because ScreenCaptureKit doesn't expose its
+  render queue for explicit fencing. Infrastructure is in place for
+  when Apple extends SCK or a downstream consumer wires manual CPU
+  signal points.
+- **Slice N — `SCStreamConfiguration` auto-update on resize.**
+  `resize` now pushes the new pixel dimensions through to the live
+  stream via `stream.updateConfiguration:completionHandler:` (with
+  the same non-size params as the original `start_capture` —
+  encapsulated in a single `make_stream_configuration` helper so the
+  two paths stay consistent). SCK samples post-resize arrive at the
+  requested resolution without restarting the stream.
+
+The producer struct accumulates over the slices: parent NSView,
+`WKWebView`, navigation delegate (with shared `NavState` carrying both
+the navigation completion signal and the events FIFO), script-message
+handler, web-message FIFO, and an `Option<CaptureState>` that's `Some`
+once `start_capture` has resolved. Capabilities flip from
+`NativeChildOverlay` (default) to `ImportedTexture` when capture
+starts, and back on `stop_capture` / `Drop`.
+
+Threading: SCK output callbacks fire on a background dispatch queue
+and write the latest sample into a `Mutex<Option<SendCFRetained<CMSampleBuffer>>>`
+that `try_acquire_frame` reads on the main thread; the
+`SCShareableContent` async resolution carries a similar
+`unsafe impl Send` wrapper around the matched `Retained<SCWindow>`.
+
+**Windows-0.2.0 parity status:** ✅ achieved by slices A–H. Slices
+I–N pushed the macOS producer well past the 0.2.0 baseline into
+0.3.0 / 0.4.0 territory: keyboard + IME, cursor reporting,
+per-profile data stores, MTLSharedEvent infrastructure, and resize-
+applies-to-stream are all live; drag-and-drop is documented as
+SPI-blocked.
+
+**Remaining limitations:**
+
+- Drag-and-drop forwarding in capture mode (SPI-required).
+- X-button `buttonNumber` distinction (X1/X2 arrive as Other-mouse
+  with default index; CGEvent would fix this in a small follow-up).
+- `MTLSharedEvent` is scaffolded but inert — needs a producer-side
+  signal hook that ScreenCaptureKit's public API doesn't expose
+  today. Implicit IOSurface coherence remains the contract.
 
 ---
 
@@ -240,22 +391,24 @@ every row marked `—` is structurally not on that platform.
 
 | Capability | Windows WV2 | macOS WKWebView | Linux WPE | Linux WebKitGTK |
 | --- | --- | --- | --- | --- |
-| Imported GPU texture per frame | ✅ 0.1.0 | ? | ? | ? (degraded) |
-| Resize / offset | ✅ | ? | ? | ? |
-| Navigate (URL + HTML) | ✅ 0.2.0 | ? | ? | ? |
+| Imported GPU texture per frame | ✅ 0.1.0 | ✅ 0.4.0 | ? | ? (degraded) |
+| Resize / offset | ✅ | ✅ 0.4.0 | ? | ? |
+| Navigate (URL + HTML) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | Reload / Stop / Back / Forward | ? | ? | ? | ? |
-| Mouse + scroll forwarding | ✅ 0.2.0 | ? | ? | ? |
+| Mouse forwarding (buttons + move + leave) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
+| Scroll wheel forwarding | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | Touch + pen forwarding | ? | ? | ? | ? |
-| Keyboard forwarding (basic) | ? | ? | ? | ? |
-| IME (CJK / non-Latin) | ? | ? | ? | ? |
-| Drag-and-drop into webview | ? | ? | ? | ? |
-| Focus management | ✅ 0.2.0 | ? | ? | ? |
-| Cursor-change reporting | ? | ? | ? | ? |
-| Navigation events (start/source/complete/title) | ✅ 0.2.0 | ? | ? | ? |
-| JS messaging (bidirectional) | ✅ 0.2.0 | ? | ? | ? |
-| PNG snapshot | ✅ 0.2.0 | ? (`takeSnapshot`) | ? (`get_snapshot`) | ? |
+| Keyboard forwarding (basic) | ? | ✅ 0.4.0 | ? | ? |
+| IME (CJK / non-Latin) | ? | ✅ 0.4.0 (via NSTextInputClient) | ? | ? |
+| Drag-and-drop into webview | ? | — capture (SPI-blocked) / ✅ overlay (auto) | ? | ? |
+| Focus management | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
+| Cursor-change reporting | ? | ✅ 0.4.0 | ? | ? |
+| Navigation events (start/source/complete) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
+| Title-changed event | ✅ 0.2.0 | ✅ 0.4.0 (KVO) | ? | ? |
+| JS messaging (bidirectional) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
+| PNG / CPU snapshot | ✅ 0.2.0 | ✅ 0.4.0 (CPU RGBA) | ? (`get_snapshot`) | ? |
 | Settings (zoom, UA, JS, devtools) | ? | ? | ? | ? |
-| Profile / cookies / storage | ? | ? | ? | ? |
+| Profile / cookies / storage | ? | ✅ 0.4.0 (per-profile UUID) | ? | ? |
 | Custom URL schemes | ? | ? | ? | ? |
 | Downloads | ? | ? | ? | ? |
 | New-window / popup intercept | ? | ? | ? | ? |
@@ -367,8 +520,263 @@ all three.
 These don't fit on the version-by-version curve and can ship
 independently when the work is ready:
 
-- **macOS producer scaffold**: WKWebView + SCK + IOSurface + Metal
-  pipeline alone, before driving the input surface.
+- **macOS producer scaffold**: ✅ landed in 0.4.0. Slices A–N
+  (lifecycle / SCK pipeline / nav parity / mouse / JS messaging /
+  CPU snapshots / scroll wheel / title-changed / keyboard + IME /
+  cursor changes / drag-doc / per-profile data stores /
+  `MTLSharedEvent` scaffold / resize-applies-to-stream) bring the
+  macOS WKWebView producer past Windows-0.2.0 parity. Browser-class
+  items 1–9 (history controls / new-window intercept / settings /
+  custom URL schemes / process-failure recovery / auth /
+  multi-instance verification / downloads / find + PDF) bring it to
+  a usable shape for browser-shape consumers like mere. Runtime
+  verification via [`demo-mac`](../demo-mac/) covers slices A–N
+  (12 of 13; drag is structurally SPI-blocked) plus six dedicated
+  `--*-test` modes that exercise items 1, 3, 4, 7, 8, 9 +
+  follow-ups (incognito, interactionState round-trip, pointer
+  input, downloads). The suite runs headless via
+  `bash scripts/test-mac.sh` and on every push via
+  `.github/workflows/test-mac.yml`.
+
+---
+
+## Browser-class consumer roadmap
+
+Beyond the parity baseline, an embeddable WebView library has to
+support a browser-shape consumer (e.g. [`mark-ik/mere`](https://github.com/mark-ik/mere)):
+multiple tabs per process, full navigation control, customizable
+chrome, robust lifecycle hooks. Items 1–9 below landed in 0.4.x;
+each has a brief notes column describing the API shape and known
+limitations.
+
+| # | Slice | Status | Public surface | macOS impl notes |
+| --- | --- | --- | --- | --- |
+| 1 | History controls | ✅ | `reload` / `stop` / `go_back` / `go_forward` / `can_go_back` / `can_go_forward` (trait) | direct `WKWebView::reload` / `stopLoading` / `goBack` / `goForward`; `go_back/forward` return `Ok(false)` if `canGoBack/Forward` is false |
+| 2 | New-window intercept | ✅ | `NavigationEvent::NewWindowRequested { url }` | `WKUIDelegate::webView:createWebViewWithConfiguration:...` returns null to suppress the engine popup; host opens its own tab in response |
+| 3 | Settings application | ✅ | `apply_settings(&WebSurfaceSettings)` (trait) | `pageZoom`, `customUserAgent`, `setInspectable` (macOS 13.3+), `WKPreferences::setJavaScriptEnabled`. Context-menu / accelerator-key fields silently ignored |
+| 4 | Custom URL schemes | ✅ | `UrlSchemeHandlerFn`, `UrlSchemeResponse`, `WkWebViewProducer::new_with_url_schemes` | `WKURLSchemeHandler` delegate per registered scheme; serves bytes synchronously inside `webView:startURLSchemeTask:` |
+| 5 | Process-failure recovery | ✅ | `NavigationEvent::ContentProcessTerminated` | `WKNavigationDelegate::webViewWebContentProcessDidTerminate:` |
+| 6 | Auth challenges | ✅ (option A) | `NavigationEvent::AuthChallenged { url, host, auth_method }` | `webView:didReceiveAuthenticationChallenge:` defaults to `PerformDefaultHandling`; option B (host-driven disposition) deferred until mere has auth UI |
+| 7 | Multi-instance verification | ✅ | n/a — architectural | `demo-mac --two-tabs` validates two producers in one process / one window cleanly drain independent event streams |
+| 8 | Downloads | ✅ | `DownloadId`, `DownloadDestinationRequest`, `DownloadDecision`, `set_download_handler` / `clear_download_handler`, `cancel_download(id)`, `NavigationEvent::DownloadStarted` / `DownloadProgress` / `DownloadFinished` / `DownloadCancelled`, `WkWebViewProducerConfig::download_dir` | Per-download `DownloadId` correlates lifecycle events; `decidePolicyForNavigationResponse:` promotes non-displayable HTTP responses to downloads; per-download throttle (100ms / 1MiB) on progress; `WKDownload::cancel(_:)` for host-driven cancel; host destination handler runs synchronously inside `decideDestination` |
+| 9 | Find / PDF | ✅ | `find_in_page` + `poll_find_match`, `request_pdf` + `poll_pdf`, `FindOptions` | both async-only via completion blocks; mirrors the snapshot pattern |
+
+**Recently shipped (post-9):**
+
+- ✅ Auth option B — `WkWebViewProducer::set_auth_handler` /
+  `clear_auth_handler` registers a `Fn(AuthChallenge) -> AuthDisposition`
+  closure invoked synchronously inside the navigation delegate.
+  Translates to `NSURLSessionAuthChallengeDisposition` with
+  optional `NSURLCredential` (HTTP basic via
+  `AuthDisposition::UseCredential { username, password }`).
+- ✅ Cookie store API — `request_all_cookies` / `poll_cookies`
+  (async fetch), `set_cookie(&Cookie)` / `delete_cookie(name,
+  domain, path)` (fire-and-forget). Wraps the
+  `WKHTTPCookieStore` on the producer's `WKWebsiteDataStore`.
+  Public `Cookie` struct mirrors `NSHTTPCookie`'s essential
+  fields.
+- ✅ Permission handlers — `set_permission_handler` /
+  `clear_permission_handler` registers a
+  `Fn(PermissionRequest) -> PermissionDecision` closure invoked
+  for camera / microphone / device-orientation requests.
+  No-handler default is `Prompt` (system UI).
+- ✅ Incognito / non-persistent profile —
+  `WkWebViewProducerConfig::non_persistent` (or the
+  `.non_persistent()` builder) wires
+  `WKWebsiteDataStore::nonPersistentDataStore`. Cookie / local
+  storage / IndexedDB live only for the producer's lifetime.
+  Verified by `demo-mac --incognito-test`.
+- ✅ Tab-state serialization —
+  `WkWebViewProducer::serialize_interaction_state` /
+  `restore_interaction_state` round-trip the WKWebView's
+  `interactionState` (back-forward list, scroll position, form
+  data) as opaque bytes. Verified by
+  `demo-mac --interaction-state-test`.
+- ✅ Touch / pen / pointer input —
+  `WryWebSurfaceProducer::send_pointer_input` synthesizes
+  `NSEvent`s through the same path as `send_mouse_input`. WebKit's
+  pointer-events JS API observes them as
+  `pointerType: "mouse"` (macOS has no public direct-touch
+  synthesis API). Verified by
+  `demo-mac --pointer-input-test`.
+- ✅ DPI awareness across monitor moves — `NSWindowDidChangeBackingPropertiesNotification`
+  observer registered in `WkWebViewProducer::new_with_url_schemes`,
+  re-applies `config.size` on the next `try_acquire_frame` /
+  `resize` so points/pixels stay coherent. Cleaned up explicitly
+  in `Drop`.
+- ✅ Downloads (item 8 expansion) — see the row in the table
+  above. `DownloadId` correlates events; throttled progress;
+  host-driven destination and cancellation. Verified by
+  `demo-mac --download-test`.
+- ✅ Producer module split — the previous single-file
+  ~4000-LOC `wkwebview_producer.rs` is now 18 submodules each
+  under a 600-LOC ceiling (`producer.rs`, `capture/{mod,
+  blocking, async_start}.rs`, `api.rs`, `trait_impl.rs`,
+  per-delegate `*_handler.rs`, `helpers.rs`, etc.).
+- ✅ Auth-challenge `protectionSpace` panic fix — bypass
+  objc2's debug-build `class_getInstanceMethod` check
+  (which doesn't see through `WKNSURLAuthenticationChallenge`'s
+  forwarding-proxy class) by reading the property via
+  `objc_msgSend` directly, gated on `respondsToSelector:` so
+  defensive failure modes still surface as empty fields rather
+  than a panic.
+- ✅ Headless test runs — `demo-mac --*-test` modes default to
+  hidden window + `NSApplicationActivationPolicyProhibited`, so
+  `bash scripts/test-mac.sh` runs silently in the background.
+  `--visible` overrides for debugging.
+- ✅ CI — `.github/workflows/test-mac.yml` runs the suite on
+  `macos-latest` (currently Apple Silicon).
+- ✅ Cursor handler callback parity — `set_cursor_handler` /
+  `clear_cursor_handler` registers a
+  `Fn(CursorShape) + Send + Sync` closure invoked synchronously
+  on every `NSCursor.currentSystemCursor` change observed after a
+  forwarded input event. Coexists with the pull-model
+  `poll_cursor_shape` queue. Verified by `demo-mac --scripted`.
+- ✅ Download auth handler — the existing `AuthHandlerFn`
+  registered via `set_auth_handler` now also routes through
+  `WKDownloadDelegate::download:didReceiveAuthenticationChallenge:`.
+  One handler covers both page-level and download-level auth
+  challenges; hosts that need download-specific behavior can
+  branch on the URL inside the handler. Verified by phase D of
+  `demo-mac --download-test`.
+- ✅ Programmatic download initiation — `start_download(url)`
+  wraps `WKWebView::startDownloadUsingRequest:` so hosts can
+  begin downloads without navigating the WKWebView. Auth
+  challenges flow through the *download-level* delegate
+  callback (rather than the page-level one), exercising that
+  code path that promotion-driven downloads can't.
+- ✅ Download cancel / resume — `cancel_download(id)` (which
+  passes a non-nil completion block to Apple's `cancel:` to
+  un-suppress `didFailWithError`), captures the resume_data
+  WebKit emits on a `DownloadCancelled` event;
+  `resume_download(&[u8], PathBuf)` calls
+  `resumeDownloadFromResumeData:` with a fresh delegate
+  registration so resumed transfers fire the normal lifecycle
+  events. Verified by phase E of `demo-mac --download-test`.
+- ✅ SCK pipeline assertion test —
+  `demo-mac --capture-test` is an opt-in smoke test for the
+  ScreenCaptureKit path. Not in `scripts/test-mac.sh` because
+  Screen Recording permission can't be self-granted; CI runners
+  need a `tccutil` pre-grant. Surfaced a producer-side fix
+  along the way: `try_acquire_frame` now treats status-only
+  `CMSampleBuffer`s (every `SCFrameStatus` except `Complete`)
+  as "no frame ready" rather than a fatal error.
+- ✅ Capability-probe parity for macOS —
+  `WryWebSurfaceCapabilities::probe` now mirrors the Windows
+  shape: a Metal-backed host wgpu device gets
+  `imported_texture: Supported`,
+  `preferred_mode: ImportedTexture`, and
+  `supported_frames: [MetalTextureRef]`. Hosts that drive
+  fallback selection from `probe` (rather than constructing a
+  producer to read its runtime capabilities) now discover the
+  SCK / Metal path on macOS.
+- ✅ Offset units standardized — `WkWebViewProducerConfig::offset`
+  is now physical pixels (matches the trait's `set_offset`
+  contract and `config.size`'s units). Pre-fix `with_offset(200, …)`
+  and `set_offset(200, …)` landed at different positions on
+  Retina; both now resolve to the same point.
+- ✅ Final `DownloadProgress` carries the response's announced
+  `Content-Length` — `DownloadEntry` captures `total_bytes_expected`
+  at `decideDestination` time rather than reusing
+  `last_progress_bytes`, so throttled downloads no longer emit
+  `bytes_written > total_bytes_expected` on the final tick.
+- ✅ Scroll-wheel events carry location + modifier flags —
+  `synthesize_scroll_wheel_event` now sets the CGEvent's
+  location (webview rect → screen-global, top-left origin) and
+  `CGEventFlags` (Shift / Control) before the round-trip
+  through `NSEvent::eventWithCGEvent:`. WebKit attributes the
+  scroll to the right WKWebView and honors cmd-scroll /
+  shift-scroll modifier behavior.
+- ✅ `is_http_only` round-trip through `set_cookie` —
+  `NSHTTPCookie::cookieWithProperties:` doesn't expose HttpOnly
+  as a settable property (Apple's documented set of property
+  keys excludes it). `set_cookie` now routes HttpOnly cookies
+  through `cookiesWithResponseHeaderFields:forURL:` with a
+  synthesized `Set-Cookie` header; non-HttpOnly cookies keep the
+  faster property-dict path. Verified by the `is_http_only=true`
+  assertion in `--incognito-test`.
+- ✅ Multi-instance + persistent-store coverage —
+  `--profile-test` is now a one-process self-assertion (two
+  persistent producers at the same `data_dir`, set on #1 → see
+  on #2; complement to `--incognito-test`'s isolation
+  assertion); `--two-tabs` asserts each producer's nav events
+  stay in its own queue (no cross-talk). Both run in the
+  headless suite — `scripts/test-mac.sh` is now 8 modes / 8 PASS.
+- ✅ SCK source-rect crop via per-frame Metal blit —
+  `initWithDesktopIndependentWindow:` captures the entire host
+  window (Apple ignores `sourceRect` for single-window filters);
+  the producer now captures at full window resolution and
+  blit-crops to the WKWebView's pixel rect inside
+  `try_acquire_frame` before handing the texture out.
+  `CaptureState` carries an `MTLCommandQueue` allocated on the
+  host's wgpu Metal device; per-frame cost is ~1 ms on Apple
+  silicon. The imported texture's dimensions match the
+  webview's pixel rect — no host chrome, no recursive capture
+  even when the consumer composites the texture back into the
+  same window. The crop's Y origin lives in window-frame
+  top-left coords (chrome height is added on top of the
+  content-view-relative Y flip) so the title-bar region of the
+  captured texture is excluded; `try_acquire_frame` rejects
+  in-flight pre-resize samples whose IOSurface dimensions
+  differ from the current host-window pixel size, so SCK's
+  push-model "deliver one or two more samples after
+  `updateConfiguration:` then go quiet" doesn't leave a
+  stale-stretched frame on screen across a resize.
+- ✅ Capture-pipeline cadence probe —
+  `WkWebViewProducer::capture_metrics()` returns a
+  [`CaptureMetrics`](../scrying/src/wkwebview_producer/capture/mod.rs)
+  snapshot with `samples_received` (incremented from the SCK
+  background dispatch queue on every `Screen`-typed sample) and
+  `samples_consumed` (incremented in `try_acquire_frame` on every
+  `Ok(Some(...))`). The demo-mac `--capture` mode prints rates
+  once per second; the deltas confirm SCK keeps up with display
+  refresh on Apple Silicon (~58 push/s, ~58 consume/s) so the
+  perceived "a bit of lag" is pipeline depth (WebKit render →
+  AppKit composite → SCK encode → demo blit → wgpu present, ~3
+  vsyncs ≈ 50 ms at 60 Hz), not a backlog. Going lower than that
+  needs an architecture change like consumer-side crop (skip the
+  per-frame Metal blit pass).
+
+- ✅ Context-menu interception via JS user-script —
+  `WKUIDelegate` exposes
+  `webView:contextMenuConfigurationForElement:completionHandler:`
+  on iOS only; macOS has no public-API context-menu hook.
+  Rather than reach for `_WK*` SPI, the producer now injects a
+  capture-phase `contextmenu` user-script via
+  `WKUserContentController` that walks the click target's
+  ancestor chain to recover the closest enclosing `<a href>` /
+  `<img src>`, calls `event.preventDefault()` to suppress
+  WebKit's default `NSMenu`, and posts a NUL-delimited 5-field
+  payload to a dedicated `WKScriptMessageHandler`
+  (`scryingContextMenu`). The handler parses the payload and
+  pushes a [`crate::NavigationEvent::ContextMenuRequested`]
+  event with `page_url` / `x` / `y` (CSS pixels relative to
+  the WebView viewport) / `link_url` / `image_url`. Verified in
+  `--two-tabs --visible` that each producer's right-clicks
+  route to its own nav-event queue (no cross-talk).
+
+**Outstanding for follow-up slices:**
+
+- Authentication during downloads — wired through the shared
+  page handler, but the download-only-specific challenge path
+  (e.g. mid-download, post-promotion auth) only fires for
+  programmatic `start_download` flows in practice. Real
+  Apple-internal scenarios are rare; current shape is enough
+  for browser-class consumers.
+- Throttling control — suspending / resuming page activity for
+  hidden tabs needs SPI (`_setSuspended:`) and is risky.
+
+**Reference implementations.** [`tauri-apps/wry`](https://github.com/tauri-apps/wry)
+is a useful reference even though scrying doesn't depend on it. Its
+[`wkwebview/`](https://github.com/tauri-apps/wry/tree/dev/src/wkwebview)
+producer has solved many of the same Cocoa / objc2 lifetime and
+threading footguns ahead of us — when adding a follow-up slice
+above, skim wry's matching subsystem first; it'll often have a
+ready-made answer to "does this delegate method retain its
+arguments?" or "is `_setX:` actually reachable via objc2-web-kit?"
+
+---
+
 - **Linux WPE producer scaffold**: WPE + DMABUF + VkSemaphore
   pipeline alone.
 - **Linux WebKitGTK fallback**: probably ships only if a downstream
@@ -438,13 +846,3 @@ required.
   probe?** The demo currently keeps a wry HWND-WebView for sanity
   checking. Once scrying covers input + lifecycle on every platform,
   the wry path inside the demo is just legacy ballast.
-
-
-prompt for mac:
-Things I'm guessing at that may need fixing once you compile on Mac:
-
-wgpu 29 hal API drift on Metal. wgpu::hal::metal::Device::texture_from_raw signature might differ from what I lifted from wgpu-graft. If it errors, the fix is usually a renamed parameter or shifted arg order.
-metal::Texture::from_ptr's exact import path. I import foreign_types_shared::ForeignType for the trait it requires; the metal crate at 0.33 should still expose from_ptr via that trait. Worth confirming.
-objc2-metal coexistence with metal crate. Both depend on Objective-C runtime types. Should coexist but could conflict if dep features are mismatched.
-Anything else macOS-specific I can't see from a Windows compile.
-Push errors back and I'll iterate. After the import path compiles clean on Mac, M3 (WKWebView lifecycle) is the next big chunk — that's the bulk of the macOS producer work.

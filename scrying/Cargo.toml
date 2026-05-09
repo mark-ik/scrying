@@ -32,22 +32,25 @@ glib = "0.18"
 [target.'cfg(target_os = "macos")'.dependencies]
 # Single objc2 0.6.x line. Default features kept on all of these — slim
 # them once we know exactly what symbols the WKWebView producer + SCK
-# capture pipeline pulls. `metal` + `foreign-types-shared` cover the
-# wgpu-hal `texture_from_raw` interop path; the objc2-* crates cover
-# producer-side WKWebView, ScreenCaptureKit, and IOSurface plumbing.
-metal = "0.33"
-foreign-types-shared = "0.3.1"
+# capture pipeline pulls. wgpu-hal 29's `metal::Device::texture_from_raw`
+# takes `Retained<ProtocolObject<dyn MTLTexture>>` directly, so the
+# interop path uses `objc2_metal` rather than the legacy `metal` /
+# `foreign-types-shared` crates. The objc2-* crates cover producer-side
+# WKWebView, ScreenCaptureKit, and IOSurface plumbing.
 objc2 = "0.6.3"
 objc2-foundation = "0.3.2"
 objc2-app-kit = "0.3.2"
 objc2-web-kit = "0.3.2"
 objc2-screen-capture-kit = "0.3.2"
 objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
 objc2-core-media = "0.3.2"
-objc2-core-video = "0.3.2"
+objc2-core-video = { version = "0.3.2", features = ["objc2-io-surface"] }
 objc2-io-surface = "0.3.2"
 objc2-metal = { version = "0.3.2", features = [
+    "MTLAllocation",
     "MTLDevice",
+    "MTLPixelFormat",
     "MTLResource",
     "MTLTexture",
     "objc2-io-surface",
