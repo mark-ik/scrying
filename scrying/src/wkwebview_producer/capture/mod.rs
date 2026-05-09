@@ -17,7 +17,7 @@ use objc2_core_foundation::CFRetained;
 use objc2_core_media::CMSampleBuffer;
 use objc2_core_video::kCVPixelFormatType_32BGRA;
 use objc2_foundation::{NSError, NSObject, NSObjectProtocol};
-use objc2_metal::{MTLCommandQueue, MTLDevice};
+use objc2_metal::{MTLCommandQueue, MTLDevice, MTLSharedEvent};
 use objc2_screen_capture_kit::{
     SCStream, SCStreamConfiguration, SCStreamDelegate, SCStreamOutput, SCStreamOutputType,
 };
@@ -225,6 +225,7 @@ pub(super) struct InProgressCaptureState {
     pub(super) samples_consumed: Arc<AtomicU64>,
     pub(super) config_revision: Arc<AtomicU64>,
     pub(super) applied_config_revision: Arc<AtomicU64>,
+    pub(super) shared_event: Retained<ProtocolObject<dyn MTLSharedEvent>>,
 }
 
 /// Helper used by SCK completion blocks to update the shared
@@ -278,6 +279,25 @@ pub(super) struct CaptureState {
     /// each successful `try_acquire_frame`.
     pub(super) last_emitted: Option<Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLTexture>>>,
     pub(super) generation: AtomicU64,
+    /// `MTLSharedEvent` allocated against `metal_device` and
+    /// signalled inside `try_acquire_frame`'s per-frame blit
+    /// command buffer. Consumers can wait on monotonic
+    /// `signal_value`s via
+    /// `MTLCommandBuffer::encodeWaitForEvent:value:` on their own
+    /// queue before sampling. Today the IOSurface coherence story
+    /// makes this redundant on Apple silicon, but exposing the
+    /// signal flips `producer_sync` to
+    /// `ExplicitMetalEvent` so consumers that *do* want explicit
+    /// sync (e.g. for a future `MTLSharedEvent`-based
+    /// `InteropSynchronizer`, or for cross-queue ordering with
+    /// non-wgpu Metal work) have the handle and value to use.
+    pub(super) shared_event: Retained<ProtocolObject<dyn MTLSharedEvent>>,
+    /// Monotonic counter for the `MTLSharedEvent` signal value.
+    /// Bumped *before* encoding the signal so each frame gets a
+    /// fresh value the consumer can wait on; the value the
+    /// producer just signalled at lives in
+    /// [`crate::native_frame::MetalTextureRef::signal_value`].
+    pub(super) next_signal_value: AtomicU64,
     /// Monotonic counter incremented every time we hand SCK a new
     /// `SCStreamConfiguration` (resize, DPI flip, color-pipeline
     /// adaptation). Compared against [`Self::applied_config_revision`]

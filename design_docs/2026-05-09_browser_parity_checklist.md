@@ -68,7 +68,7 @@ yet.
 | Resize correctness (dim-match guard) | ✅ | ? | ? | Stale pre-resize SCK samples rejected by IOSurface-dim check |
 | DPI awareness across monitor moves | ✅ | ? | ? | Backing-scale-change observer re-applies `config.size` |
 | Capture cadence probe (`CaptureMetrics`) | ✅ | ⏳ | ⏳ | `samples_received` / `samples_consumed` atomic counters |
-| Cross-API GPU sync (explicit fences) | ⏳ | ⏳ | ✅ | Scaffolded in 0.4.x, contractual in 0.5.0; Linux WPE already provides VkSemaphore |
+| Cross-API GPU sync (explicit fences) | ✅ | ⏳ | ✅ | Producer encodes `MTLCommandBuffer::encodeSignalEvent_value` after each per-frame blit; `MetalTextureRef::signal_value` carries the per-frame event value; `WkWebViewProducer::metal_shared_event` returns the `MTLSharedEvent` handle. Default `WgpuTextureImporter` accepts `ExplicitMetalEvent`; consumer-side wait insertion remains opt-in (IOSurface coherence covers correctness on Apple silicon) |
 | Color management — Display P3 SDR | ✅ | ⏳ | ⏳ | `WkWebViewProducerConfig::color_pipeline = ColorPipeline::DisplayP3` (or `set_color_pipeline` live); SCK's `colorSpaceName` switches to `kCGColorSpaceDisplayP3`. Same 8-bit BGRA format as sRGB — only the gamut tag differs |
 | Color management — HDR / 16-float | ⏳ | ⏳ | ⏳ | Pixel format change to `RGBA16Float`, wgpu surface needs HDR config; bigger pipeline change |
 | Pre-composition extraction | 🚫 | ? | ⏳ | macOS would need direct `CALayer.contents` access pre-WindowServer-composite; `_WK*` SPI risk; spike needed. Would also fix the "SCK quiets on a static page" issue |

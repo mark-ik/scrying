@@ -459,13 +459,30 @@ driver gives someone stale frames, (b) downstream interop expands
 beyond WebView2 capture, or (c) the code wants to be canonically
 correct rather than empirically correct.
 
-### macOS — MTLSharedEvent (precautionary)
+### macOS — MTLSharedEvent (now real, opt-in wait)
 
 IOSurface coherence is implicit on Apple silicon and via IOSurface
 locks on Intel. **No fence work is required for correctness today.**
-If empirical coherence ever fails, `MTLSharedEvent` between the
-SCK-side command queue and the wgpu Metal queue is the analog: signal
-+ wait, same shape as the D3D12 fence.
+That said, the producer now encodes a real `MTLSharedEvent` signal
+in every per-frame blit's command buffer (`MTLCommandBuffer::encodeSignalEvent_value`),
+advancing a monotonic per-`CaptureState`
+counter. Each emitted `MetalTextureRef` carries the signalled value
+in `signal_value`, and consumers can pull the event handle via
+[`crate::WkWebViewProducer::metal_shared_event`].
+
+`producer_sync` flips from `None` to `ExplicitMetalEvent`; the
+default [`WgpuTextureImporter`] uses
+[`MetalSharedEventSynchronizer`] on macOS, which accepts the
+mechanism without inserting a wait — IOSurface coherence still
+does the heavy lifting. Consumers that *do* need explicit
+ordering (interleaving the producer's blit with non-wgpu Metal
+queues, or implementing a custom `InteropSynchronizer`) can
+encode `encodeWaitForEvent:value:` against the returned event +
+each frame's `signal_value` before sampling.
+
+So scrying's macOS GPU-sync story is now: implicit coherence
+covers the default path, explicit signalling is wired and
+available, and the consumer chooses which to use.
 
 ### Linux WPE — VkSemaphore (already contractual)
 

@@ -126,6 +126,11 @@ impl WkWebViewProducer {
                 "MTLDevice::newCommandQueue returned nil".into(),
             )
         })?;
+        let shared_event = metal_device.newSharedEvent().ok_or_else(|| {
+            WryWebSurfaceError::Platform(
+                "MTLDevice::newSharedEvent returned nil".into(),
+            )
+        })?;
 
         let filter = unsafe {
             SCContentFilter::initWithDesktopIndependentWindow(
@@ -226,6 +231,8 @@ impl WkWebViewProducer {
             // success — start both counters at 0 (revision == applied).
             config_revision: Arc::new(AtomicU64::new(0)),
             applied_config_revision: Arc::new(AtomicU64::new(0)),
+            shared_event,
+            next_signal_value: AtomicU64::new(0),
         });
 
         // Capture is live — flip the advertised capability so consumers
@@ -561,6 +568,23 @@ impl WkWebViewProducer {
             );
         }
         blit.endEncoding();
+        // Encode an `MTLSharedEvent` signal *after* the blit so
+        // the GPU advances `event.signaledValue` to
+        // `signal_value` only once the per-frame copy is fully
+        // complete. Consumers that opt in to explicit-event
+        // synchronization wait on this value via
+        // `MTLCommandBuffer::encodeWaitForEvent:value:` on their
+        // own queue. Producers without an explicit-sync consumer
+        // pay only the cost of a u64 GPU write — implicit
+        // IOSurface coherence still does the work.
+        let signal_value = capture
+            .next_signal_value
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        cmd_buf.encodeSignalEvent_value(
+            ProtocolObject::from_ref(&*capture.shared_event),
+            signal_value,
+        );
         cmd_buf.commit();
         // The consumer's import path on Apple silicon doesn't
         // need an explicit fence (IOSurface + MTL Shared storage
@@ -573,12 +597,18 @@ impl WkWebViewProducer {
             size: PhysicalSize::new(crop_w as u32, crop_h as u32),
             format: wgpu::TextureFormat::Bgra8Unorm,
             generation: capture.generation.fetch_add(1, Ordering::Relaxed),
-            // IOSurface coherence is implicit on Apple silicon; the
-            // explicit `MTLSharedEvent` upgrade path is documented in
-            // `design_docs/2026-05-07_platform_ceilings.md` and not
-            // wired in slice B.
-            producer_sync: SyncMechanism::None,
+            // The producer encodes an `MTLSharedEvent` signal at
+            // `signal_value` after each frame's blit; consumers
+            // that need explicit sync wait on
+            // `producer.metal_shared_event()` for that value via
+            // `encodeWaitForEvent:value:`. IOSurface coherence
+            // still covers the implicit-sync path on Apple silicon
+            // — the explicit signal is opt-in surface for
+            // consumers who want to interleave their own Metal
+            // queue with the producer's blit.
+            producer_sync: SyncMechanism::ExplicitMetalEvent,
             raw_metal_texture,
+            signal_value,
         };
 
         // Keep the destination texture alive past this function.

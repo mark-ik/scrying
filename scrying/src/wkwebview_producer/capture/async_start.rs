@@ -107,12 +107,18 @@ impl WkWebViewProducer {
         // (which fires on a background queue).
         let window_pixel_size = host_window_pixel_size(&host_window);
 
-        // Allocate the command queue for the per-frame blit on
-        // the main thread; we ferry it across to the SCK
-        // completion via `SendOnly`.
+        // Allocate the command queue for the per-frame blit and
+        // the shared event we'll signal from each blit's command
+        // buffer on the main thread; both ferry across to the
+        // SCK completion via `SendOnly`.
         let command_queue = metal_device.newCommandQueue().ok_or_else(|| {
             WryWebSurfaceError::Platform(
                 "MTLDevice::newCommandQueue returned nil".into(),
+            )
+        })?;
+        let shared_event = metal_device.newSharedEvent().ok_or_else(|| {
+            WryWebSurfaceError::Platform(
+                "MTLDevice::newSharedEvent returned nil".into(),
             )
         })?;
 
@@ -126,6 +132,7 @@ impl WkWebViewProducer {
         let pending = Arc::clone(&self.pending_capture);
         let metal_device_for_block = SendOnly(metal_device);
         let command_queue_for_block = SendOnly(command_queue);
+        let shared_event_for_block = SendOnly(shared_event);
         // ColorPipeline is `Copy` and trivially Send; fold it
         // into the block so SCK's background-queue completion
         // doesn't need to reach back into `self`.
@@ -241,6 +248,7 @@ impl WkWebViewProducer {
                 // Capture the assembled state into the inner block.
                 let metal_device = metal_device_for_block.0.clone();
                 let command_queue = command_queue_for_block.0.clone();
+                let shared_event = shared_event_for_block.0.clone();
                 let pending_inner = Arc::clone(&pending);
                 let config_revision = Arc::new(AtomicU64::new(0));
                 let applied_config_revision = Arc::new(AtomicU64::new(0));
@@ -257,6 +265,7 @@ impl WkWebViewProducer {
                     samples_consumed: Arc::clone(&samples_consumed),
                     config_revision,
                     applied_config_revision,
+                    shared_event,
                 });
 
                 let inner_block = RcBlock::new(move |err: *mut NSError| {
@@ -289,6 +298,8 @@ impl WkWebViewProducer {
                         applied_config_revision: Arc::clone(
                             &parts.applied_config_revision,
                         ),
+                        shared_event: parts.shared_event.clone(),
+                        next_signal_value: AtomicU64::new(0),
                     };
                     write_pending(
                         &pending_inner,
@@ -343,6 +354,31 @@ impl WkWebViewProducer {
                 CaptureStatus::Live
             }
         }
+    }
+
+    /// Strong reference to the `MTLSharedEvent` the producer
+    /// signals at after each per-frame Metal blit. Returns `None`
+    /// when no capture is active. Consumers that opt in to
+    /// explicit-event synchronization (i.e. respect
+    /// `MetalTextureRef::producer_sync ==
+    /// SyncMechanism::ExplicitMetalEvent`) call this once after
+    /// `start_capture` resolves, then encode
+    /// `MTLCommandBuffer::encodeWaitForEvent:value:` against the
+    /// returned event with each frame's
+    /// `MetalTextureRef::signal_value` before sampling.
+    ///
+    /// On Apple silicon the IOSurface coherence story makes this
+    /// optional — implicit synchronization already covers
+    /// correctness. Use this when interleaving the producer's
+    /// blit with non-wgpu Metal queues, or when wiring a custom
+    /// `InteropSynchronizer` that needs to insert an explicit
+    /// wait fence.
+    pub fn metal_shared_event(
+        &self,
+    ) -> Option<Retained<ProtocolObject<dyn objc2_metal::MTLSharedEvent>>> {
+        self.capture
+            .as_ref()
+            .map(|capture| capture.shared_event.clone())
     }
 
     /// Snapshot the live ScreenCaptureKit pipeline counters. Returns

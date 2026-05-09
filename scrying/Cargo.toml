@@ -54,6 +54,7 @@ objc2-io-surface = "0.3.2"
 objc2-metal = { version = "0.3.2", features = [
     "MTLAllocation",
     "MTLDevice",
+    "MTLEvent",
     "MTLPixelFormat",
     "MTLResource",
     "MTLTexture",

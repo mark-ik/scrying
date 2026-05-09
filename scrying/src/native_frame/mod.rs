@@ -157,6 +157,21 @@ pub struct MetalTextureRef {
     /// Raw `MTLTexture *` pointer. Must be non-null. Apple platforms only.
     #[cfg(target_os = "macos")]
     pub raw_metal_texture: *mut std::ffi::c_void,
+    /// `MTLSharedEvent` value the producer signals at after the
+    /// per-frame Metal blit completes. Consumers that opt in to
+    /// explicit synchronization (`producer_sync ==
+    /// SyncMechanism::ExplicitMetalEvent`) wait for this value via
+    /// `MTLCommandBuffer::encodeWaitForEvent:value:` on their own
+    /// queue before sampling the texture, against the
+    /// `MTLSharedEvent` exposed via
+    /// [`crate::WkWebViewProducer::metal_shared_event`].
+    ///
+    /// Only meaningful when `producer_sync ==
+    /// SyncMechanism::ExplicitMetalEvent`. `0` for the implicit-
+    /// IOSurface-coherence path; the synchronizer treats `0` as
+    /// "no wait recorded for this frame," matching the
+    /// [`Dx12SharedTexture::fence_value`] convention.
+    pub signal_value: u64,
 }
 
 /// A native frame from a producer, ready to be imported by a
@@ -199,12 +214,27 @@ pub struct WgpuTextureImporter {
 }
 
 impl WgpuTextureImporter {
-    /// Default importer with [`ImplicitOnlySynchronizer`].
+    /// Default importer.
+    ///
+    /// - **macOS**: [`MetalSharedEventSynchronizer`] — accepts
+    ///   both `SyncMechanism::None` (legacy) and
+    ///   `SyncMechanism::ExplicitMetalEvent` (the macOS WKWebView
+    ///   producer's per-frame `MTLSharedEvent` signal).
+    ///   Consumer-side wait insertion is currently a no-op
+    ///   because IOSurface coherence already covers correctness
+    ///   on Apple silicon, but the synchronizer accepts the
+    ///   advertised mechanism so the producer's
+    ///   `MetalTextureRef::producer_sync ==
+    ///   SyncMechanism::ExplicitMetalEvent` doesn't hit the
+    ///   strict-rejection path on import.
+    /// - **Other platforms**: [`ImplicitOnlySynchronizer`].
     pub fn new(host: HostWgpuContext) -> Self {
-        Self {
-            host,
-            synchronizer: Box::new(ImplicitOnlySynchronizer),
-        }
+        #[cfg(target_os = "macos")]
+        let synchronizer: Box<dyn InteropSynchronizer> =
+            Box::new(MetalSharedEventSynchronizer);
+        #[cfg(not(target_os = "macos"))]
+        let synchronizer: Box<dyn InteropSynchronizer> = Box::new(ImplicitOnlySynchronizer);
+        Self { host, synchronizer }
     }
 
     /// Importer with a custom [`InteropSynchronizer`].
