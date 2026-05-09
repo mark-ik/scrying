@@ -815,6 +815,40 @@ pub enum ColorPipeline {
     /// (8 bytes/pixel vs 4).
     Hdr16f,
 }
+
+/// How aggressively the engine throttles a WebView whose host
+/// view isn't currently in a window (browser-shape: a tab that
+/// isn't the active one). Public-API alternative to the
+/// `_setSuspended:`-shaped SPI on macOS 14+ / iOS 17+ —
+/// `WKPreferences.inactiveSchedulingPolicy` ships exactly these
+/// three options. Older OS versions ignore the setting silently.
+///
+/// Page Visibility (`set_visible(false)`) is the *light* throttle:
+/// it sets `document.hidden = true`, RAF and autoplay throttle.
+/// This enum picks how the engine handles a WebView whose view
+/// is fully detached from the window hierarchy, where the engine
+/// has more latitude to slow or stop background work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InactiveSchedulingPolicy {
+    /// Pause JS execution and timer firing entirely. The page
+    /// thaws when the WebView returns to a window. Public-API
+    /// equivalent of the `_suspendPage:` SPI without the SPI
+    /// breakage risk.
+    Suspend,
+    /// Limit (but don't stop) processing — timers slow,
+    /// animation stops, but JS can still run. The "more
+    /// aggressive than Page Visibility, less than full suspend"
+    /// notch.
+    Throttle,
+    /// No throttling beyond standard Page Visibility behavior.
+    /// Useful when the host knows the page is doing work the
+    /// user explicitly wants to keep current (audio playback,
+    /// uploads, etc.) even while the tab is off-screen.
+    None,
+}
+
+/// Snapshot of webview-level settings exposed by the producer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WebSurfaceSettings {
     /// Zoom factor (`1.0` is normal). `None` leaves the producer's
@@ -833,6 +867,13 @@ pub struct WebSurfaceSettings {
     /// Whether the engine's default browser-acceleration shortcuts (zoom,
     /// reload, F5, etc.) are intercepted.
     pub builtin_accelerator_keys_enabled: Option<bool>,
+    /// Throttling policy for a WebView whose host view isn't in a
+    /// window — browser-shape consumers use this for inactive
+    /// tabs. Public on macOS 14+ / iOS 17+ via
+    /// `WKPreferences.inactiveSchedulingPolicy`; ignored
+    /// silently on older OS versions. `None` leaves the engine's
+    /// default in place.
+    pub inactive_scheduling_policy: Option<InactiveSchedulingPolicy>,
 }
 
 /// Producer contract implemented by platform-specific Wry/WebView frame sources.

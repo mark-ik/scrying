@@ -44,7 +44,7 @@ yet.
 | Process-failure recovery | ✅ | ✅ | ? | `NavigationEvent::ContentProcessTerminated`; reload to recover |
 | Tab-state serialize / restore | ✅ | ? | ? | `serialize_interaction_state` / `restore_interaction_state` (opaque bytes) |
 | Page Visibility / occlusion sync | ✅ | ⏳ | ⏳ | `set_visible(bool)` cascades through `NSView::setHidden:`; WebKit pushes `visibilitychange` so timers / RAF / autoplay throttle. Distinct from the SPI-only `_setSuspended:` heavy pause |
-| Throttling control (hard pause) | 🚫 | ? | ⏳ | macOS needs `_setSuspended:` SPI; Page Visibility sync (above) is the public-API alternative |
+| Throttling control (hard pause) | ✅ | ? | ⏳ | `WebSurfaceSettings::inactive_scheduling_policy` (`Suspend` / `Throttle` / `None`) → `WKPreferences.inactiveSchedulingPolicy` on macOS 14+ / iOS 17+. Older OS versions: silent no-op. Composes with `set_visible(false)` for browser-shape inactive-tab handling. SPI alternative (`_suspendPage:` for older macOS) and the wider SPI evaluation live in [`2026-05-09_spi_evaluation.md`](2026-05-09_spi_evaluation.md) |
 
 ## Input forwarding
 

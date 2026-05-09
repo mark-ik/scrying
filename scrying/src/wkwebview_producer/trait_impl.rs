@@ -248,6 +248,39 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
                 prefs.setJavaScriptEnabled(js);
             }
         }
+        if let Some(policy) = settings.inactive_scheduling_policy {
+            // `inactiveSchedulingPolicy` was added in macOS 14 /
+            // iOS 17. Calling it on older OS versions sends an
+            // unrecognized selector and crashes; gate via
+            // `respondsToSelector:` rather than a runtime
+            // version check (cheaper, equivalent semantically).
+            // The selector is `setInactiveSchedulingPolicy:`.
+            unsafe {
+                use objc2::sel;
+                let config = self.webview().configuration();
+                let prefs = config.preferences();
+                let prefs_obj: &objc2::runtime::AnyObject = (&*prefs).as_ref();
+                if prefs_obj
+                    .class()
+                    .responds_to(sel!(setInactiveSchedulingPolicy:))
+                {
+                    let value = match policy {
+                        crate::InactiveSchedulingPolicy::Suspend => {
+                            objc2_web_kit::WKInactiveSchedulingPolicy::Suspend
+                        }
+                        crate::InactiveSchedulingPolicy::Throttle => {
+                            objc2_web_kit::WKInactiveSchedulingPolicy::Throttle
+                        }
+                        crate::InactiveSchedulingPolicy::None => {
+                            objc2_web_kit::WKInactiveSchedulingPolicy::None
+                        }
+                    };
+                    prefs.setInactiveSchedulingPolicy(value);
+                }
+                // Older macOS / iOS: silent no-op. Documented at
+                // the field on `WebSurfaceSettings`.
+            }
+        }
         // The remaining fields (default_context_menus_enabled,
         // builtin_accelerator_keys_enabled) don't have direct
         // WKWebView analogs — context menus need the WKUIDelegate's
