@@ -2,6 +2,13 @@
 //! [`super::WkWebViewProducer::new_with_url_schemes`]. Mirrors the shape
 //! of `WebView2CompositionConfig` on Windows so consumers can write
 //! cross-platform setup with minimal cfg-gating.
+//!
+//! **Minimum macOS: 14.0 (Sonoma).** `data_dir` resolves through
+//! `WKWebsiteDataStore::dataStoreForIdentifier:` (macOS 14+);
+//! `setInspectable` (macOS 13.3+) wires `apply_settings`'s
+//! `devtools_enabled`; ScreenCaptureKit (macOS 12.3+) backs the
+//! capture pipeline. The producer makes no runtime-availability
+//! checks — older OS versions are unsupported.
 
 use std::path::PathBuf;
 

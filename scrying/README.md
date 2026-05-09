@@ -69,6 +69,8 @@ The lower-level building blocks live in [`windows_capture`]:
 
 ## macOS producer details
 
+**Minimum macOS: 14.0 (Sonoma).** The producer hard-depends on `WKWebsiteDataStore::dataStoreForIdentifier:` (per-profile storage, macOS 14+) and `WKWebView::setInspectable:` (macOS 13.3+). It also uses `ScreenCaptureKit` (macOS 12.3+), `WKDownloadDelegate` (macOS 11.3+), and `WKWebView::interactionState` (macOS 12+). All of these are called unconditionally — there are no runtime-availability guards — so building or running against an older SDK / OS is unsupported. CI targets `macos-latest` (Apple Silicon, currently 14+) which matches.
+
 The macOS producer ([`wkwebview_producer::WkWebViewProducer`]) was developed in slice-by-slice fashion. Slices A–N cover the core surface (lifecycle, SCK pipeline, navigation, mouse / scroll / keyboard, JS messaging, snapshots, KVO, cursor reporting, profile data store, MTLSharedEvent scaffolding, resize-applies-to-stream). Items 1–9 of the browser-class roadmap (history controls, new-window intercept, settings, custom URL schemes, process-failure recovery, auth pass-through, multi-instance, downloads, find + PDF) build on top to make scrying usable for browser-shape consumers. Both rosters are tracked in [`design_docs/2026-05-07_platform_ceilings.md`](../design_docs/2026-05-07_platform_ceilings.md) with API hooks and known limitations.
 
 Browser-class additions on top of `WryWebSurfaceProducer`:
