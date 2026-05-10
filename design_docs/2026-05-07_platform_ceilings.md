@@ -459,30 +459,54 @@ driver gives someone stale frames, (b) downstream interop expands
 beyond WebView2 capture, or (c) the code wants to be canonically
 correct rather than empirically correct.
 
-### macOS — MTLSharedEvent (now real, opt-in wait)
+### macOS — MTLSharedEvent (real producer signal + producer-side wait)
 
-IOSurface coherence is implicit on Apple silicon and via IOSurface
-locks on Intel. **No fence work is required for correctness today.**
-That said, the producer now encodes a real `MTLSharedEvent` signal
-in every per-frame blit's command buffer (`MTLCommandBuffer::encodeSignalEvent_value`),
-advancing a monotonic per-`CaptureState`
-counter. Each emitted `MetalTextureRef` carries the signalled value
-in `signal_value`, and consumers can pull the event handle via
-[`crate::WkWebViewProducer::metal_shared_event`].
+IOSurface coherence is implicit on Apple silicon for the *source*
+texture (the IOSurface SCK delivers, wrapped via
+`newTextureWithDescriptor_iosurface_plane`). **The destination
+texture is not IOSurface-backed** — it's a plain
+`newTextureWithDescriptor` allocation in
+`MTLStorageMode::Shared`, used as the blit target for the
+chrome-stripped webview-pixel-rect crop. Metal does not implicitly
+synchronize across `MTLCommandQueue` boundaries even when both
+queues live on the same `MTLDevice`, so the consumer's wgpu queue
+can race against the producer's blit-write to the destination
+without an explicit fence.
 
-`producer_sync` flips from `None` to `ExplicitMetalEvent`; the
-default [`WgpuTextureImporter`] uses
-[`MetalSharedEventSynchronizer`] on macOS, which accepts the
-mechanism without inserting a wait — IOSurface coherence still
-does the heavy lifting. Consumers that *do* need explicit
-ordering (interleaving the producer's blit with non-wgpu Metal
-queues, or implementing a custom `InteropSynchronizer`) can
-encode `encodeWaitForEvent:value:` against the returned event +
-each frame's `signal_value` before sampling.
+The producer now closes that race two ways at once:
 
-So scrying's macOS GPU-sync story is now: implicit coherence
-covers the default path, explicit signalling is wired and
-available, and the consumer chooses which to use.
+1. **Real `MTLSharedEvent` signal.** Every per-frame blit's
+   command buffer encodes
+   `MTLCommandBuffer::encodeSignalEvent:value:` after the blit's
+   `endEncoding` and before `commit`, advancing a monotonic
+   per-`CaptureState` counter. Each emitted `MetalTextureRef`
+   carries the signalled value in `signal_value`; consumers pull
+   the event handle via
+   [`crate::WkWebViewProducer::metal_shared_event`]. `producer_sync`
+   reports `SyncMechanism::ExplicitMetalEvent`.
+2. **Producer-side `waitUntilCompleted`.** After commit, the
+   producer CPU-blocks on the same command buffer until the GPU
+   finishes. ~1 ms stall per acquire on Apple silicon — the
+   *correct* default. Without it, consumers using the default
+   `WgpuTextureImporter` (which doesn't insert a Metal wait, see
+   below) would race.
+
+The default [`WgpuTextureImporter`] on macOS uses
+[`MetalSharedEventSynchronizer`], which accepts the
+`ExplicitMetalEvent` mechanism but does not currently encode a
+consumer-side wait. The producer-side `waitUntilCompleted`
+guarantees correctness for that default path. The architectural
+follow-up — encoding `encodeWaitForEvent:value:` on the consumer's
+wgpu Metal queue via the wgpu-hal escape — would let us drop the
+producer-side CPU stall entirely (~1ms per acquire reclaimed)
+without changing public API. The producer-side signal is already
+in place, so this upgrade is consumer-side-only.
+
+Consumers that need explicit ordering today (interleaving the
+blit with non-wgpu Metal queues, or wiring a custom
+`InteropSynchronizer`) can already encode their own
+`encodeWaitForEvent:value:` against
+`metal_shared_event()` + each frame's `signal_value`.
 
 ### Linux WPE — VkSemaphore (already contractual)
 

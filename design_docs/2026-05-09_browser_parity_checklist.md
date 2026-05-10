@@ -56,7 +56,7 @@ yet.
 | Cursor-change events (host mirrors WebKit cursor) | ✅ | ? | ? | Polled via `NSCursor.currentSystemCursor` after each forwarded event |
 | Drag-and-drop *in* (file / URL → page) | ✅ | ⏳ | ⏳ | Capture-phase `drop` user-script reports external-content drops via `NavigationEvent::DropDetected { x, y, file_count, primary_url }`. Observability only — does not call `preventDefault`, so WebKit's default drop behavior (file → navigate, drop on `<input type=file>`) still runs |
 | Drag-and-drop *out* (page content → host) | 🚫 | ? | ⏳ | macOS path is `_WK*` SPI |
-| Context-menu interception | ✅ | ? | ? | JS user-script + `WKScriptMessageHandler`; `NavigationEvent::ContextMenuRequested` |
+| Context-menu interception | ✅ | ? | ? | JS user-script + `WKScriptMessageHandler` always fires `NavigationEvent::ContextMenuRequested` (observability); engine-default menu suppression is gated on `window.__scryingSuppressContextMenu` and respects `WebSurfaceSettings::default_context_menus_enabled` via `evaluateJavaScript:` |
 
 ## Capture & rendering
 
@@ -68,7 +68,7 @@ yet.
 | Resize correctness (dim-match guard) | ✅ | ? | ? | Stale pre-resize SCK samples rejected by IOSurface-dim check |
 | DPI awareness across monitor moves | ✅ | ? | ? | Backing-scale-change observer re-applies `config.size` |
 | Capture cadence probe (`CaptureMetrics`) | ✅ | ⏳ | ⏳ | `samples_received` / `samples_consumed` atomic counters |
-| Cross-API GPU sync (explicit fences) | ✅ | ⏳ | ✅ | Producer encodes `MTLCommandBuffer::encodeSignalEvent_value` after each per-frame blit; `MetalTextureRef::signal_value` carries the per-frame event value; `WkWebViewProducer::metal_shared_event` returns the `MTLSharedEvent` handle. Default `WgpuTextureImporter` accepts `ExplicitMetalEvent`; consumer-side wait insertion remains opt-in (IOSurface coherence covers correctness on Apple silicon) |
+| Cross-API GPU sync (explicit fences) | ✅ | ⏳ | ✅ | Producer encodes `MTLCommandBuffer::encodeSignalEvent_value` after each per-frame blit; `MetalTextureRef::signal_value` carries the per-frame event value; `WkWebViewProducer::metal_shared_event` returns the `MTLSharedEvent` handle. Producer also `waitUntilCompleted`s on its own command buffer before handing the texture out — necessary for correctness because the destination texture is non-IOSurface-backed and Metal doesn't implicitly synchronize across the producer/consumer queues. Architectural follow-up: consumer-side `encodeWaitForEvent:value:` via the wgpu-hal Metal escape removes the CPU stall entirely (~1ms per acquire saved) |
 | Color management — Display P3 SDR | ✅ | ⏳ | ⏳ | `WkWebViewProducerConfig::color_pipeline = ColorPipeline::DisplayP3` (or `set_color_pipeline` live); SCK's `colorSpaceName` switches to `kCGColorSpaceDisplayP3`. Same 8-bit BGRA format as sRGB — only the gamut tag differs |
 | Color management — HDR / 16-float | ✅ | ⏳ | ⏳ | `ColorPipeline::Hdr16f`: SCK config flips to `kCVPixelFormatType_64RGBAHalf` + `kCGColorSpaceExtendedLinearDisplayP3`; Metal source/dest become `RGBA16Float`; `MetalTextureRef::format = wgpu::TextureFormat::Rgba16Float`. Per-frame bandwidth ~doubles. Consumers must configure their wgpu surface for HDR (Rgba16Float + EDR alpha mode) to actually display HDR; SDR surfaces clamp >1.0 values to ~SDR-white |
 | Pre-composition extraction | 🚫 | ? | ⏳ | macOS would need direct `CALayer.contents` access pre-WindowServer-composite; `_WK*` SPI risk; spike needed. Would also fix the "SCK quiets on a static page" issue |

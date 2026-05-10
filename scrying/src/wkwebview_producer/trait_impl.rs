@@ -259,7 +259,7 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
                 use objc2::sel;
                 let config = self.webview().configuration();
                 let prefs = config.preferences();
-                let prefs_obj: &objc2::runtime::AnyObject = (&*prefs).as_ref();
+                let prefs_obj: &objc2::runtime::AnyObject = prefs.as_ref();
                 if prefs_obj
                     .class()
                     .responds_to(sel!(setInactiveSchedulingPolicy:))
@@ -281,12 +281,35 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
                 // the field on `WebSurfaceSettings`.
             }
         }
-        // The remaining fields (default_context_menus_enabled,
-        // builtin_accelerator_keys_enabled) don't have direct
-        // WKWebView analogs — context menus need the WKUIDelegate's
-        // `contextMenuConfigurationForElement:` interception, and
-        // accelerator keys are handled by the host's responder chain
-        // before WebKit ever sees them. Silently ignore per the
+        if let Some(menus_enabled) = settings.default_context_menus_enabled {
+            // The producer's context-menu user-script
+            // (CONTEXT_MENU_USER_SCRIPT) gates its
+            // `event.preventDefault()` on
+            // `window.__scryingSuppressContextMenu`. Default
+            // (undefined) → suppressed; setting `false` lets
+            // WebKit's engine-default `NSMenu` show. Observability
+            // events fire either way.
+            //
+            // `evaluateJavaScript:` writes to *the current
+            // page* — survives same-document navigations but
+            // resets on top-level loads. The user-script's own
+            // initialisation guard means a subsequent load gets
+            // the default-suppress behavior again unless the
+            // host re-applies the setting after `Completed`.
+            let js = if menus_enabled {
+                "window.__scryingSuppressContextMenu = false;"
+            } else {
+                "delete window.__scryingSuppressContextMenu;"
+            };
+            let js_ns = NSString::from_str(js);
+            unsafe {
+                self.webview()
+                    .evaluateJavaScript_completionHandler(&js_ns, None);
+            }
+        }
+        // `builtin_accelerator_keys_enabled` is still ignored —
+        // accelerator keys are handled by the host's responder
+        // chain before WebKit sees them. Silently ignore per the
         // trait's "ignore unsupported fields" contract.
         Ok(())
     }

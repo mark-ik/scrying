@@ -592,10 +592,26 @@ impl WkWebViewProducer {
             signal_value,
         );
         cmd_buf.commit();
-        // The consumer's import path on Apple silicon doesn't
-        // need an explicit fence (IOSurface + MTL Shared storage
-        // give implicit cross-queue coherence); skipping
-        // `waitUntilCompleted` keeps the host thread non-blocking.
+        // CPU-side wait until the blit's GPU work finishes before
+        // we hand the destination texture out. Necessary for
+        // correctness: the destination is `newTextureWithDescriptor`
+        // (not IOSurface-backed), and the consumer's wgpu queue
+        // is a separate `MTLCommandQueue` from this producer's.
+        // Metal does *not* implicitly synchronize work across
+        // queues, even when both are on the same device. Without
+        // this wait, the consumer can sample the destination
+        // before the blit's writes land. IOSurface coherence
+        // covers the *source* texture (IOSurface-backed, implicit
+        // cross-queue coherence per Apple) but not a non-IOSurface
+        // destination. ~1ms stall per acquire on Apple silicon —
+        // measurable but small at 60fps; the medium-term refactor
+        // is to insert a consumer-side `encodeWaitForEvent:value:`
+        // via the wgpu-hal Metal escape against
+        // `metal_shared_event()` + the per-frame `signal_value`,
+        // which removes the CPU stall entirely. The producer-side
+        // signal is already encoded above, so the upgrade is a
+        // consumer-side-only change.
+        cmd_buf.waitUntilCompleted();
 
         let raw_metal_texture =
             Retained::as_ptr(&dest_texture) as *mut std::ffi::c_void;
