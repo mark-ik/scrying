@@ -1,6 +1,7 @@
 //! Minimal winit + wgpu host probe for scrying system-webview texture interop.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[cfg(target_os = "windows")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -33,6 +34,16 @@ struct Cli {
     popup_test: bool,
     process_test: bool,
     routing_test: bool,
+    download_test: bool,
+    auth_test: bool,
+    permission_test: bool,
+    visibility_test: bool,
+    keyboard_test: bool,
+    multi_view_test: bool,
+    find_test: bool,
+    pdf_test: bool,
+    context_test: bool,
+    media_test: bool,
 }
 
 impl Cli {
@@ -49,6 +60,16 @@ impl Cli {
                 "--popup-test" => cli.popup_test = true,
                 "--process-test" => cli.process_test = true,
                 "--routing-test" => cli.routing_test = true,
+                "--download-test" => cli.download_test = true,
+                "--auth-test" => cli.auth_test = true,
+                "--permission-test" => cli.permission_test = true,
+                "--visibility-test" => cli.visibility_test = true,
+                "--keyboard-test" => cli.keyboard_test = true,
+                "--multi-view-test" => cli.multi_view_test = true,
+                "--find-test" => cli.find_test = true,
+                "--pdf-test" => cli.pdf_test = true,
+                "--context-test" => cli.context_test = true,
+                "--media-test" => cli.media_test = true,
                 _ => eprintln!("demo-win: unknown arg: {arg}"),
             }
         }
@@ -65,6 +86,16 @@ impl Cli {
             || self.popup_test
             || self.process_test
             || self.routing_test
+            || self.download_test
+            || self.auth_test
+            || self.permission_test
+            || self.visibility_test
+            || self.keyboard_test
+            || self.multi_view_test
+            || self.find_test
+            || self.pdf_test
+            || self.context_test
+            || self.media_test
     }
 }
 
@@ -319,7 +350,12 @@ impl AppState {
             .map(|s| s.shared_handle().0 as *mut std::ffi::c_void);
 
         #[cfg(target_os = "windows")]
-        let captured = run_platform_composition_visual_probe(&window, &host, fence_handle, cli)?;
+        let captured = if cli.multi_view_test {
+            validate_platform_multi_view(event_loop, &window)?;
+            None
+        } else {
+            run_platform_composition_visual_probe(&window, &host, fence_handle, cli)?
+        };
 
         #[cfg(target_os = "windows")]
         let renderer = if cli.one_shot() {
@@ -688,6 +724,93 @@ fn hwnd_from_window(window: &Window) -> Result<*mut std::ffi::c_void, Box<dyn st
 }
 
 #[cfg(target_os = "windows")]
+fn validate_platform_multi_view(
+    event_loop: &ActiveEventLoop,
+    primary_window: &Window,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use windows::Win32::System::WinRT::{
+        CreateDispatcherQueueController, DQTAT_COM_STA, DQTYPE_THREAD_CURRENT,
+        DispatcherQueueOptions,
+    };
+
+    let _dispatcher_queue = unsafe {
+        CreateDispatcherQueueController(DispatcherQueueOptions {
+            dwSize: std::mem::size_of::<DispatcherQueueOptions>() as u32,
+            threadType: DQTYPE_THREAD_CURRENT,
+            apartmentType: DQTAT_COM_STA,
+        })
+    }
+    .ok();
+
+    let secondary_window = event_loop.create_window(
+        Window::default_attributes()
+            .with_title("demo-win secondary")
+            .with_inner_size(winit::dpi::PhysicalSize::new(640, 420)),
+    )?;
+
+    let primary_config = scrying::PlatformWebSurfaceConfig::new(
+        winit::dpi::PhysicalSize::new(360, 260),
+        std::env::temp_dir().join("demo-win-multi-view-primary"),
+    )
+    .with_offset(24.0, 24.0)
+    .with_diagnostic_backdrop((50, 70, 92));
+    let secondary_config = scrying::PlatformWebSurfaceConfig::new(
+        winit::dpi::PhysicalSize::new(360, 260),
+        std::env::temp_dir().join("demo-win-multi-view-secondary"),
+    )
+    .with_offset(24.0, 24.0)
+    .with_diagnostic_backdrop((80, 64, 72));
+
+    let primary_hwnd = hwnd_from_window(primary_window)?;
+    let secondary_hwnd = hwnd_from_window(&secondary_window)?;
+    let mut primary =
+        unsafe { scrying::PlatformWebSurfaceProducer::new(primary_hwnd, primary_config)? };
+    let mut secondary =
+        unsafe { scrying::PlatformWebSurfaceProducer::new(secondary_hwnd, secondary_config)? };
+
+    primary.navigate_to_string(
+        &multi_view_html("primary"),
+        std::time::Duration::from_secs(5),
+    )?;
+    secondary.navigate_to_string(
+        &multi_view_html("secondary"),
+        std::time::Duration::from_secs(5),
+    )?;
+    wait_for_web_message(
+        &mut primary,
+        "multi-view:primary:ready",
+        std::time::Duration::from_secs(2),
+    )?;
+    wait_for_web_message(
+        &mut secondary,
+        "multi-view:secondary:ready",
+        std::time::Duration::from_secs(2),
+    )?;
+
+    drop(secondary);
+    drop(primary);
+    drop(secondary_window);
+    println!(
+        "demo-win: multi-view-test: PASS - two simultaneous WebView2 composition producers ran on separate HWNDs"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn multi_view_html(label: &str) -> String {
+    format!(
+        r#"<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>{label}</title></head>
+<body style="margin:0;display:grid;place-items:center;height:100vh;background:#17202a;color:#f8f1d8;font:16px system-ui,sans-serif;">
+<main>{label}</main>
+<script>window.chrome.webview.postMessage("multi-view:{label}:ready");</script>
+</body>
+</html>"#
+    )
+}
+
+#[cfg(target_os = "windows")]
 struct CapturedComposition {
     /// The most recently imported WebView texture; `None` until the renderer's
     /// first `try_acquire_frame` lands a frame. The probe path no longer
@@ -771,6 +894,30 @@ fn run_platform_composition_visual_probe(
     if cli.process_test {
         validate_platform_process_failure_recovery(&mut producer)?;
     }
+    if cli.download_test {
+        validate_platform_downloads(&mut producer)?;
+    }
+    if cli.auth_test {
+        validate_platform_basic_auth(&mut producer)?;
+    }
+    if cli.permission_test {
+        validate_platform_permissions(&mut producer)?;
+    }
+    if cli.visibility_test {
+        validate_platform_visibility(&mut producer)?;
+    }
+    if cli.find_test {
+        validate_platform_find(&mut producer)?;
+    }
+    if cli.pdf_test {
+        validate_platform_pdf(&mut producer)?;
+    }
+    if cli.context_test {
+        validate_platform_context_menu(&mut producer)?;
+    }
+    if cli.media_test {
+        validate_platform_media_capture_observability(&mut producer)?;
+    }
     if cli.profile_test {
         validate_platform_profile_store(producer, parent_hwnd, user_data_dir)?;
         return Ok(None);
@@ -779,7 +926,7 @@ fn run_platform_composition_visual_probe(
         validate_platform_incognito_store(producer, parent_hwnd, user_data_dir)?;
         return Ok(None);
     }
-    if keyboard_validate_enabled() {
+    if cli.keyboard_test || keyboard_validate_enabled() {
         validate_platform_keyboard_smoke(&mut producer)?;
     }
 
@@ -901,6 +1048,336 @@ fn process_recovery_html() -> &'static str {
     <script>window.chrome.webview.postMessage("process-test:recovered");</script>
 </body>
 </html>"#
+}
+
+#[cfg(target_os = "windows")]
+fn validate_platform_downloads(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const HOST: &str = "scrying-download.local";
+    const FILE_NAME: &str = "scrying-win-download.txt";
+    const BODY: &[u8] = b"scrying windows download smoke\n";
+    let destination = std::env::temp_dir().join(format!(
+        "scrying-demo-win-download-{}-{FILE_NAME}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&destination);
+    let destination_for_handler = destination.clone();
+    producer.set_download_handler(Box::new(move |request| {
+        if request.suggested_filename.ends_with(FILE_NAME) {
+            scrying::DownloadDecision::AcceptAt(destination_for_handler.clone())
+        } else {
+            scrying::DownloadDecision::Cancel
+        }
+    }))?;
+    producer.register_virtual_host_handler(
+        HOST,
+        Arc::new(|_url: &str| -> UrlSchemeResponse {
+            UrlSchemeResponse {
+                mime_type: "text/plain".into(),
+                body: BODY.to_vec(),
+                headers: Vec::new(),
+            }
+            .with_header(
+                "Content-Disposition",
+                format!("attachment; filename=\"{FILE_NAME}\""),
+            )
+        }),
+    )?;
+
+    drain_navigation_events(producer);
+    drain_web_messages(producer);
+    producer.load_url(&format!("https://{HOST}/{FILE_NAME}"))?;
+    let completed_path = wait_for_download_finished(producer, std::time::Duration::from_secs(8))?;
+    if completed_path != destination {
+        return Err(format!(
+            "download-test: expected destination {:?}, got {:?}",
+            destination, completed_path
+        )
+        .into());
+    }
+    let bytes = std::fs::read(&destination)?;
+    if bytes != BODY {
+        return Err(format!(
+            "download-test: downloaded bytes mismatch: expected {} bytes, got {}",
+            BODY.len(),
+            bytes.len()
+        )
+        .into());
+    }
+    let _ = std::fs::remove_file(&destination);
+    producer.clear_download_handler()?;
+    println!(
+        "demo-win: download-test: PASS - DownloadStarting destination and completion events verified"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn validate_platform_basic_auth(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (url, server) = spawn_basic_auth_server()?;
+    let observed = Arc::new(AtomicBool::new(false));
+    let observed_for_handler = observed.clone();
+    producer.set_auth_handler(Box::new(move |challenge| {
+        if challenge.host.starts_with("127.0.0.1:") {
+            observed_for_handler.store(true, Ordering::SeqCst);
+            scrying::AuthDisposition::UseCredential {
+                username: "user".into(),
+                password: "pass".into(),
+            }
+        } else {
+            scrying::AuthDisposition::PerformDefault
+        }
+    }))?;
+
+    drain_navigation_events(producer);
+    drain_web_messages(producer);
+    producer.navigate_to_url(&url, std::time::Duration::from_secs(8))?;
+    wait_for_web_message(
+        producer,
+        "auth-test:ready",
+        std::time::Duration::from_secs(3),
+    )?;
+    if !observed.load(Ordering::SeqCst) {
+        return Err("auth-test: WebView2 did not invoke the basic-auth handler".into());
+    }
+    producer.clear_auth_handler()?;
+    match server.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(format!("auth-test server failed: {error}").into()),
+        Err(_) => return Err("auth-test server thread panicked".into()),
+    }
+    println!("demo-win: auth-test: PASS - BasicAuthenticationRequested used host credentials");
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn validate_platform_permissions(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const HOST: &str = "scrying-permission.local";
+    let observed = Arc::new(AtomicBool::new(false));
+    let observed_for_handler = observed.clone();
+    producer.set_permission_handler(Box::new(move |request| {
+        if request.kind == scrying::PermissionKind::Microphone {
+            observed_for_handler.store(true, Ordering::SeqCst);
+            scrying::PermissionDecision::Deny
+        } else {
+            scrying::PermissionDecision::Prompt
+        }
+    }))?;
+    producer.register_virtual_host_handler(
+        HOST,
+        Arc::new(|_url: &str| -> UrlSchemeResponse {
+            UrlSchemeResponse {
+                mime_type: "text/html".into(),
+                body: permission_test_html().as_bytes().to_vec(),
+                headers: Vec::new(),
+            }
+        }),
+    )?;
+
+    drain_navigation_events(producer);
+    drain_web_messages(producer);
+    producer.navigate_to_url(
+        &format!("https://{HOST}/permission"),
+        std::time::Duration::from_secs(5),
+    )?;
+    let message = wait_for_web_message_prefix(
+        producer,
+        "permission-test:",
+        std::time::Duration::from_secs(5),
+    )?;
+    if !observed.load(Ordering::SeqCst) {
+        return Err(format!(
+            "permission-test: permission handler was not invoked; page reported {message:?}"
+        )
+        .into());
+    }
+    if message != "permission-test:denied" {
+        return Err(format!("permission-test: expected denied message, got {message:?}").into());
+    }
+    producer.clear_permission_handler()?;
+    println!("demo-win: permission-test: PASS - PermissionRequested mapped to host denial");
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn permission_test_html() -> &'static str {
+    r#"<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Scrying Permission Test</title></head>
+<body>
+    <h1>permission test</h1>
+    <script>
+        const post = value => window.chrome.webview.postMessage(value);
+        (async () => {
+            try {
+                await navigator.mediaDevices.getUserMedia({ audio: true });
+                post("permission-test:granted");
+            } catch (error) {
+                if (error && error.name === "NotAllowedError") {
+                    post("permission-test:denied");
+                } else {
+                    post("permission-test:error:" + (error && error.name ? error.name : "unknown"));
+                }
+            }
+        })();
+    </script>
+</body>
+</html>"#
+}
+
+#[cfg(target_os = "windows")]
+fn validate_platform_visibility(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    drain_navigation_events(producer);
+    drain_web_messages(producer);
+    producer.navigate_to_string(visibility_test_html(), std::time::Duration::from_secs(5))?;
+    wait_for_web_message(
+        producer,
+        "visibility-test:ready:visible",
+        std::time::Duration::from_secs(3),
+    )?;
+    producer.set_visible(false)?;
+    wait_for_web_message(
+        producer,
+        "visibility-test:state:hidden",
+        std::time::Duration::from_secs(3),
+    )?;
+    producer.set_visible(true)?;
+    wait_for_web_message(
+        producer,
+        "visibility-test:state:visible",
+        std::time::Duration::from_secs(3),
+    )?;
+    println!("demo-win: visibility-test: PASS - SetIsVisible reached Page Visibility state");
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn visibility_test_html() -> &'static str {
+    r#"<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Scrying Visibility Test</title></head>
+<body>
+    <h1>visibility test</h1>
+    <script>
+        const post = value => window.chrome.webview.postMessage(value);
+        const report = prefix => post(prefix + ":" + document.visibilityState);
+        document.addEventListener("visibilitychange", () => report("visibility-test:state"));
+        report("visibility-test:ready");
+    </script>
+</body>
+</html>"#
+}
+
+#[cfg(target_os = "windows")]
+fn validate_platform_find(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    producer.navigate_to_string(
+        r#"<!doctype html><html><body><main>alpha beta needle gamma needle</main></body></html>"#,
+        std::time::Duration::from_secs(5),
+    )?;
+    producer.find_in_page(
+        "needle",
+        scrying::webview2_composition_producer::WebView2FindOptions::default(),
+    )?;
+    let result = wait_for_find_result(producer, std::time::Duration::from_secs(5))??;
+    if !result.matched || result.match_count < 2 {
+        return Err(format!("find-test: expected at least two matches, got {result:?}").into());
+    }
+    producer.stop_find()?;
+
+    println!(
+        "demo-win: find-test: PASS - WebView2 native find reported {} matches",
+        result.match_count
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn validate_platform_pdf(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    producer.navigate_to_string(
+        r#"<!doctype html><html><body><h1>Scrying PDF smoke</h1><p>printable content</p></body></html>"#,
+        std::time::Duration::from_secs(5),
+    )?;
+    producer.request_pdf()?;
+    let bytes = wait_for_pdf(producer, std::time::Duration::from_secs(10))??;
+    if !bytes.starts_with(b"%PDF-") {
+        return Err(format!(
+            "pdf-test: output did not start with %PDF-, length={}",
+            bytes.len()
+        )
+        .into());
+    }
+    println!(
+        "demo-win: pdf-test: PASS - WebView2 native PrintToPdfStream returned {} bytes",
+        bytes.len()
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn validate_platform_context_menu(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    producer.apply_settings(&WebSurfaceSettings {
+        default_context_menus_enabled: Some(false),
+        ..WebSurfaceSettings::default()
+    })?;
+    producer.navigate_to_string(
+        r#"<!doctype html><html><body style="margin:0"><a id="target" href="https://example.test/context" style="display:block;width:220px;height:80px;padding:24px">context target</a><script>const post=value=>window.chrome.webview.postMessage(value);post("context-test:ready");window.chrome.webview.addEventListener("message", event => { if (event.data === "context-test:trigger") { const target = document.getElementById("target"); target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 40 })); post("context-test:triggered"); } });</script></body></html>"#,
+        std::time::Duration::from_secs(5),
+    )?;
+    wait_for_web_message(
+        producer,
+        "context-test:ready",
+        std::time::Duration::from_secs(3),
+    )?;
+    drain_navigation_events(producer);
+    producer.post_web_message("context-test:trigger")?;
+    wait_for_web_message(
+        producer,
+        "context-test:triggered",
+        std::time::Duration::from_secs(3),
+    )?;
+    let (page_url, link_url) = wait_for_context_menu(producer, std::time::Duration::from_secs(5))?;
+    if link_url.as_deref() != Some("https://example.test/context") {
+        return Err(
+            format!("context-test: unexpected link_url {link_url:?} page {page_url:?}").into(),
+        );
+    }
+    println!(
+        "demo-win: context-test: PASS - context-menu bridge reported link target {link_url:?}"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn validate_platform_media_capture_observability(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    producer.navigate_to_string(
+        r#"<!doctype html><html><body><script>window.chrome.webview.postMessage("scrying:media-capture:audio:1,video:2");</script></body></html>"#,
+        std::time::Duration::from_secs(5),
+    )?;
+    let (audio, video) = wait_for_media_capture_state(producer, std::time::Duration::from_secs(5))?;
+    if audio != 1 || video != 2 {
+        return Err(
+            format!("media-test: unexpected track counts audio={audio} video={video}").into(),
+        );
+    }
+    println!(
+        "demo-win: media-test: PASS - WebMessage media bridge emitted NavigationEvent::MediaCaptureStateChanged"
+    );
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -1325,6 +1802,250 @@ fn wait_for_content_process_terminated(
 }
 
 #[cfg(target_os = "windows")]
+fn wait_for_download_finished(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    timeout: std::time::Duration,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut started = None;
+    let mut last_event = String::new();
+    while std::time::Instant::now() < deadline {
+        pump_windows_messages_for(std::time::Duration::from_millis(16));
+        while let Some(event) = producer.poll_navigation_event() {
+            match event {
+                NavigationEvent::DownloadStarted {
+                    id,
+                    destination_path,
+                    ..
+                } => {
+                    started = Some((id, destination_path));
+                }
+                NavigationEvent::DownloadFinished {
+                    id,
+                    destination_path,
+                    error,
+                } => {
+                    if let Some(error) = error {
+                        return Err(
+                            format!("download-test: download {id:?} failed with {error}").into(),
+                        );
+                    }
+                    return Ok(destination_path);
+                }
+                NavigationEvent::DownloadCancelled { id, .. } => {
+                    return Err(format!("download-test: download {id:?} was cancelled").into());
+                }
+                other => last_event = format!("{other:?}"),
+            }
+        }
+    }
+
+    Err(format!(
+        "timed out waiting for DownloadFinished; started={started:?}; last navigation event {last_event:?}"
+    )
+    .into())
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_web_message_prefix(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    expected_prefix: &str,
+    timeout: std::time::Duration,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last_message = String::new();
+    while std::time::Instant::now() < deadline {
+        pump_windows_messages_for(std::time::Duration::from_millis(16));
+        while let Some(message) = producer.poll_web_message() {
+            if message.starts_with(expected_prefix) {
+                return Ok(message);
+            }
+            last_message = message;
+        }
+    }
+    Err(format!(
+        "timed out waiting for web message prefix {expected_prefix:?}; last message {last_message:?}"
+    )
+    .into())
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_find_result(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    timeout: std::time::Duration,
+) -> Result<
+    Result<scrying::webview2_composition_producer::WebView2FindResult, String>,
+    Box<dyn std::error::Error>,
+> {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        pump_windows_messages_for(std::time::Duration::from_millis(16));
+        if let Some(result) = producer.poll_find_match() {
+            return Ok(result);
+        }
+    }
+    Err("timed out waiting for native find completion".into())
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_pdf(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    timeout: std::time::Duration,
+) -> Result<Result<Vec<u8>, String>, Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        pump_windows_messages_for(std::time::Duration::from_millis(16));
+        if let Some(result) = producer.poll_pdf() {
+            return Ok(result);
+        }
+    }
+    Err("timed out waiting for native PDF completion".into())
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_context_menu(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    timeout: std::time::Duration,
+) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last_event = String::new();
+    while std::time::Instant::now() < deadline {
+        pump_windows_messages_for(std::time::Duration::from_millis(16));
+        while let Some(event) = producer.poll_navigation_event() {
+            match event {
+                NavigationEvent::ContextMenuRequested {
+                    page_url, link_url, ..
+                } => return Ok((page_url, link_url)),
+                other => last_event = format!("{other:?}"),
+            }
+        }
+    }
+    Err(
+        format!("timed out waiting for ContextMenuRequested; last navigation event {last_event:?}")
+            .into(),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_media_capture_state(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    timeout: std::time::Duration,
+) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last_event = String::new();
+    while std::time::Instant::now() < deadline {
+        pump_windows_messages_for(std::time::Duration::from_millis(16));
+        while let Some(event) = producer.poll_navigation_event() {
+            match event {
+                NavigationEvent::MediaCaptureStateChanged {
+                    audio_active_tracks,
+                    video_active_tracks,
+                } => return Ok((audio_active_tracks, video_active_tracks)),
+                other => last_event = format!("{other:?}"),
+            }
+        }
+    }
+    Err(format!(
+        "timed out waiting for MediaCaptureStateChanged; last navigation event {last_event:?}"
+    )
+    .into())
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_basic_auth_server()
+-> Result<(String, std::thread::JoinHandle<Result<(), String>>), Box<dyn std::error::Error>> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(false)?;
+    let addr = listener.local_addr()?;
+    let url = format!("http://{addr}/secure");
+    let handle = std::thread::spawn(move || -> Result<(), String> {
+        listener
+            .set_nonblocking(false)
+            .map_err(|error| error.to_string())?;
+        for _ in 0..4 {
+            let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .map_err(|error| error.to_string())?;
+            stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(3)))
+                .map_err(|error| error.to_string())?;
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            loop {
+                let read = std::io::Read::read(&mut stream, &mut buffer)
+                    .map_err(|error| error.to_string())?;
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+                if request.len() > 16 * 1024 {
+                    return Err("request headers exceeded 16 KiB".into());
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            if request.contains("Authorization: Basic dXNlcjpwYXNz") {
+                let body = r#"<!doctype html><script>window.chrome.webview.postMessage("auth-test:ready");</script>"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                std::io::Write::write_all(&mut stream, response.as_bytes())
+                    .map_err(|error| error.to_string())?;
+                return Ok(());
+            }
+            let response = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"scrying\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            std::io::Write::write_all(&mut stream, response.as_bytes())
+                .map_err(|error| error.to_string())?;
+        }
+        Err("basic-auth server did not receive authorized retry".into())
+    });
+    Ok((url, handle))
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_set_cookie_server()
+-> Result<(String, std::thread::JoinHandle<Result<(), String>>), Box<dyn std::error::Error>> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(false)?;
+    let addr = listener.local_addr()?;
+    let url = format!("http://{addr}/set-cookie");
+    let handle = std::thread::spawn(move || -> Result<(), String> {
+        let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .map_err(|error| error.to_string())?;
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        loop {
+            let read =
+                std::io::Read::read(&mut stream, &mut buffer).map_err(|error| error.to_string())?;
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let body = r#"<!doctype html><script>window.chrome.webview.postMessage("cookie-test:set-cookie-ready");</script>"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: scrying_set_cookie_observed=1; Path=/; Max-Age=60\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        std::io::Write::write_all(&mut stream, response.as_bytes())
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    });
+    Ok((url, handle))
+}
+
+#[cfg(target_os = "windows")]
 fn wait_for_title(
     producer: &mut scrying::PlatformWebSurfaceProducer,
     expected: &str,
@@ -1402,11 +2123,50 @@ fn validate_platform_cookie_store(
         .into());
     }
 
+    let set_cookie_pulses = Arc::new(AtomicUsize::new(0));
+    let pulses_for_handler = set_cookie_pulses.clone();
+    producer.set_cookie_change_handler(Box::new(move || {
+        pulses_for_handler.fetch_add(1, Ordering::SeqCst);
+    }))?;
+    let (set_cookie_url, set_cookie_server) = spawn_set_cookie_server()?;
+    producer.navigate_to_url(&set_cookie_url, std::time::Duration::from_secs(5))?;
+    wait_for_web_message(
+        producer,
+        "cookie-test:set-cookie-ready",
+        std::time::Duration::from_secs(3),
+    )?;
+    wait_for_cookie_change_pulse(&set_cookie_pulses, 1, std::time::Duration::from_secs(3))?;
+    producer.clear_cookie_change_handler()?;
+    set_cookie_server
+        .join()
+        .map_err(|_| "set-cookie server thread panicked")?
+        .map_err(|error| format!("set-cookie server failed: {error}"))?;
+
     println!(
-        "demo-win: cookie-test: PASS - set/read/delete round-trip verified for {}",
+        "demo-win: cookie-test: PASS - set/read/delete and Set-Cookie observation verified for {}",
         cookie.name
     );
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_cookie_change_pulse(
+    counter: &AtomicUsize,
+    expected_at_least: usize,
+    timeout: std::time::Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        pump_windows_messages_for(std::time::Duration::from_millis(16));
+        if counter.load(Ordering::SeqCst) >= expected_at_least {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "timed out waiting for cookie-change pulse; observed {} expected at least {expected_at_least}",
+        counter.load(Ordering::SeqCst)
+    )
+    .into())
 }
 
 #[cfg(target_os = "windows")]
@@ -1440,6 +2200,8 @@ fn keyboard_validate_enabled() -> bool {
 fn validate_platform_keyboard_smoke(
     producer: &mut scrying::PlatformWebSurfaceProducer,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use windows::Win32::UI::WindowsAndMessaging::{WM_CHAR, WM_KEYDOWN, WM_KEYUP};
+
     const EXPECTED: &str = "scry42";
 
     producer.move_focus(scrying::FocusReason::Programmatic)?;
@@ -1452,23 +2214,13 @@ fn validate_platform_keyboard_smoke(
             '0'..='9' => ch as u32,
             _ => return Err(format!("unsupported keyboard smoke character: {ch:?}").into()),
         };
-        let characters = ch.to_string();
-        producer.send_keyboard_input(scrying::KeyboardInput {
-            kind: scrying::KeyEventKind::Down,
-            virtual_key_code,
-            characters: characters.clone(),
-            characters_ignoring_modifiers: characters,
-            modifiers: scrying::KeyModifierFlags::default(),
-            is_repeat: false,
-        })?;
-        producer.send_keyboard_input(scrying::KeyboardInput {
-            kind: scrying::KeyEventKind::Up,
-            virtual_key_code,
-            characters: String::new(),
-            characters_ignoring_modifiers: String::new(),
-            modifiers: scrying::KeyModifierFlags::default(),
-            is_repeat: false,
-        })?;
+        producer.forward_keyboard_message(WM_KEYDOWN, virtual_key_code as usize, 1)?;
+        producer.forward_keyboard_message(WM_CHAR, ch as usize, 1)?;
+        producer.forward_keyboard_message(
+            WM_KEYUP,
+            virtual_key_code as usize,
+            1 | (1isize << 30) | (1isize << 31),
+        )?;
         pump_windows_messages_for(std::time::Duration::from_millis(30));
     }
 
@@ -1480,7 +2232,9 @@ fn validate_platform_keyboard_smoke(
             if let Some(value) = message.strip_prefix("keyboard-smoke:") {
                 last_value = value.to_string();
                 if value == EXPECTED {
-                    println!("WebView2 keyboard smoke: typed {value:?} via send_keyboard_input");
+                    println!(
+                        "demo-win: keyboard-test: PASS - typed {value:?} through raw Win32 keyboard messages"
+                    );
                     return Ok(());
                 }
             }

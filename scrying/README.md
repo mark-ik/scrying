@@ -63,6 +63,13 @@ The Windows producer ([`webview2_composition_producer::WebView2CompositionProduc
 - `NewWindowRequested` event routing for `target="_blank"` / `window.open(...)`, with the default WebView2 popup suppressed so the host owns tab creation
 - `ProcessFailed` routing to `NavigationEvent::ContentProcessTerminated`, plus DevTools-protocol diagnostic calls for bounded crash/recovery smokes
 - `register_virtual_host_handler(host, handler)` for app-owned `https://{host}/...` content via WebView2 `WebResourceRequested`, using the same `UrlSchemeResponse` body/header shape as macOS custom schemes
+- `DownloadStarting` routing to `NavigationEvent::DownloadStarted` / `DownloadProgress` / `DownloadFinished` / `DownloadCancelled`, with `set_download_handler`, `cancel_download`, `pause_download`, `resume_download`, and `can_resume_download` for host-owned destinations and live WebView2 operation control. WebView2 does not expose a portable offline resume-data blob through this path, so cancelled/interrupted events still carry `resume_data: None`.
+- `BasicAuthenticationRequested` routing to `NavigationEvent::AuthChallenged` plus `set_auth_handler` for host-supplied HTTP Basic credentials. Challenges matching an active download URL are reported as `AuthSource::Download`; WebView2 otherwise surfaces Basic auth at the WebView level.
+- `PermissionRequested` routing through `set_permission_handler` for camera, microphone, and sensor-like prompts
+- Browser-convenience APIs: native `find_in_page` / `poll_find_match`, native `request_pdf` / `poll_pdf` using `PrintToPdfStream`, and `print()` via WebView2's print UI.
+- `ContextMenuRequested` routing through both WebView2's native `ContextMenuRequested` event and a document-start context-menu bridge, with default-menu suppression tied to `WebSurfaceSettings::default_context_menus_enabled`.
+- `MediaCaptureStateChanged` routing through a document-start `getUserMedia` observer that tracks active audio/video tracks.
+- Cookie-change callbacks for host cookie writes/deletes, page-side `document.cookie` writes, and native `Set-Cookie` response headers observed through `WebResourceResponseReceived`.
 
 `WebView2 TextureStream` is not treated as the primary path because it is a page/media texture stream API, not a whole-webview compositor-output API.
 

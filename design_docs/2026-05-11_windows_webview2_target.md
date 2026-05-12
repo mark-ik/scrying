@@ -94,51 +94,65 @@ Audited against
   maps `https://{host}/...` requests through WebView2 `WebResourceRequested`
   and serves `UrlSchemeResponse` bodies/headers without network access.
 - Settings: zoom, user agent, JavaScript enablement, DevTools enablement,
-  default context menus, accelerator keys, and WebView visibility.
+  default context menus, accelerator keys, and WebView visibility with
+  page-observed Page Visibility proof.
 - Cookies and profiles: `ICoreWebView2CookieManager` request / set / delete,
   best-effort cookie-change pulses for host mutations and page-side
   `document.cookie` writes, plus persistent profile identity through
   `user_data_dir`, and `WebView2CompositionConfig::non_persistent()` for
   InPrivate / non-persistent controllers.
+- Downloads: WebView2 `DownloadStarting` maps to the shared download event
+  family with `DownloadId`, host destination decisions, progress,
+  completion/cancellation, `cancel_download`, and live `pause_download` /
+  `resume_download` / `can_resume_download` operation control. WebView2 does
+  not expose a portable offline resume-data blob through this path.
+- Auth: WebView2 `BasicAuthenticationRequested` maps to
+  `NavigationEvent::AuthChallenged` and `set_auth_handler` can provide HTTP
+  Basic credentials. Challenges whose URL matches an active download operation
+  are classified as `AuthSource::Download`; other WebView-level challenges
+  remain `AuthSource::Page`.
+- Permissions: WebView2 `PermissionRequested` maps camera, microphone, and
+  sensor-like prompts through `set_permission_handler`.
 - Snapshots: `ICoreWebView2::CapturePreview` PNG snapshots.
 - Runtime proof in `demo-win`: `--scripted`, `--browser-test`,
   `--cookie-test`, `--profile-test`, `--incognito-test`, `--popup-test`,
-  `--routing-test`, and `--process-test`.
+  `--routing-test`, `--process-test`, `--download-test`, `--auth-test`, and
+  `--permission-test`, `--visibility-test`, and `--multi-view-test`.
 
 ### Partially Shipped or Needs Runtime Proof
 
-- Keyboard and IME: API paths are wired, but the optional
-  `WEBVIEW_KEYBOARD_VALIDATE=1` DOM round-trip still times out. The target is
-  a bounded `demo-win` smoke that validates ASCII text, accelerators / system
-  keys, dead keys, and one CJK IME path through raw host-window messages.
-- Drag-and-drop: WebView2 OLE forwarding helpers are wired, but portable
-  trait-level shape and a runtime smoke still need cleanup.
-- Visibility: `SetIsVisible` is wired and `--browser-test` exercises the call,
-  but a page-observed hidden/visible round-trip should prove throttling and
-  Page Visibility behavior.
+- Keyboard and IME: API paths are wired, and `demo-win --keyboard-test` now
+  provides a bounded repro. Raw `WM_KEYDOWN` / `WM_CHAR` / `WM_KEYUP`
+  forwarding still times out before the DOM input event arrives, so this is a
+  confirmed message-loop / WebView2 focus-routing blocker rather than an
+  unbounded static-analysis caveat.
+- Drag-and-drop: WebView2 OLE forwarding helpers are wired. The
+  `WebSurfaceProducer::send_drag_input` trait method now returns a
+  Windows-specific unsupported message because real WebView2 drops require the
+  host's OLE `IDataObject`; use the concrete `drag_enter` / `drag_over` /
+  `drag_leave` / `drop_data` methods until a portable data-carrier abstraction
+  exists.
 - Profile: persistent cookie recreation and InPrivate isolation are proven.
-  Simultaneous multi-view behavior still needs a host-window strategy because
-  one HWND cannot own two composition roots in the current setup.
+  Simultaneous multi-view behavior is proven for separate HWNDs by
+  `demo-win --multi-view-test`; one HWND still cannot own two composition roots
+  in the current setup.
 
 ### Missing Windows Slices
 
 - Tab-state serialize / restore: design a Windows equivalent for macOS's
   opaque interaction-state blob, or document the WebView2 limitation and set
   the target to URL/history/form-state best effort.
-- Downloads: wire WebView2 download events, destination decisions, progress,
-  cancellation, and auth source correlation to the existing cross-platform
-  download types.
-- Auth challenges: wire page-load and download-channel authentication
-  challenges into `AuthChallenge` / `AuthDisposition` or document any
-  WebView2-specific disposition mismatch.
-- Permission handlers: wire camera, microphone, and related WebView2
-  permission requests into `PermissionRequest` / `PermissionDecision`.
-- Browser conveniences: find-in-page, print-to-PDF / PDF request, interactive
-  print, content rules or WebView2 equivalents, spellcheck controls, and
-  autofill/credential integration notes.
-- Observability events: context-menu requested, external drop detected,
-  WebRTC capture lifecycle, native cookie-change / `Set-Cookie` observation if
-  a newer WebView2 binding exposes it.
+- Portable download resume data: WebView2 exposes live operation pause/resume,
+  but not a macOS-style offline resume-data blob through the currently wired
+  path.
+- Browser conveniences: content rules or WebView2 equivalents, spellcheck
+  controls, and autofill/credential integration notes. Find-in-page,
+  print-to-PDF / PDF request, and interactive print are wired through native
+  WebView2 APIs and covered by `--find-test` / `--pdf-test`.
+- Observability events: external drop detected remains open. Context-menu
+  requested and WebRTC capture lifecycle events are wired, and native
+  `Set-Cookie` observation is covered through WebView2
+  `WebResourceResponseReceived`.
 - Capture polish: capture metrics, resize stale-frame/dim-match guard, DPI
   monitor-move handling, Display P3 / HDR pipeline decision, and documented
   hard-throttling limit.
@@ -157,16 +171,16 @@ so a busy queue cannot defeat the timeout.
 Goal: close the remaining input confidence gap without changing the public
 surface unnecessarily.
 
-- Add a `demo-win` keyboard/IME smoke that drives raw window messages through
-  `forward_keyboard_message` when possible, not only the portable synthetic
-  `send_keyboard_input` bridge.
-- Prove ASCII text entry, accelerator-modified keys, dead keys, and at least
-  one CJK IME composition path.
-- Add a visibility smoke that listens for page-side `visibilitychange`,
-  confirms `document.hidden`, and records throttled animation cadence when
-  hidden.
-- Decide whether drag-in observability should become a portable event or stay
-  Windows-inherent OLE forwarding.
+- ✅ Add a bounded `demo-win --keyboard-test` probe that drives raw window
+  messages through `forward_keyboard_message`; current result is a reproducible
+  DOM-delivery timeout, so the remaining work is host message-loop/focus
+  routing rather than API discovery.
+- ASCII text entry, accelerator-modified keys, dead keys, and CJK IME
+  composition remain blocked behind that routing issue.
+- ✅ Add a visibility smoke that listens for page-side `visibilitychange` and
+  confirms `document.hidden`.
+- ✅ Keep drag-in Windows-inherent for now: WebView2 needs an OLE `IDataObject`,
+  and the portable trait method reports that concrete requirement.
 
 Done condition: a Windows host can confidently route focus, text, IME, mouse,
 wheel, touch/pen, cursor, visibility, and drag-in through scrying without
@@ -190,11 +204,12 @@ UI without reaching around `WebView2CompositionProducer`.
 
 Goal: make Windows viable for real browsing and authenticated/document flows.
 
-- Wire page and download auth events into the shared auth types.
-- Wire permission requests for camera/microphone/device-like prompts.
+- Wire page auth events into the shared auth types. ✅ `--auth-test`
+- Document download-channel auth source limits in WebView2. ✅
+- Wire permission requests for camera/microphone/device-like prompts. ✅ `--permission-test`
 - Wire downloads with id correlation, destination decisions, progress,
-  cancellation, and follow-up resume policy.
-- Add runtime smokes with local deterministic test pages/servers where needed.
+  cancellation, and follow-up resume policy. 🟡 shipped except portable resume data; covered by `--download-test`
+- Add runtime smokes with local deterministic test pages/servers where needed. ✅
 
 Done condition: a browser shell can prompt for credentials and permissions,
 route downloads, cancel downloads, and report transfer progress entirely
@@ -205,11 +220,15 @@ through scrying.
 Goal: match the chrome-visible macOS conveniences where WebView2 exposes public
 APIs.
 
-- Find-in-page with result polling.
-- PDF generation / print-to-PDF plus interactive print if WebView2 exposes a
-  host-safe path.
-- Context-menu requested event and optional default-menu suppression.
-- WebRTC capture lifecycle observability.
+- ✅ Find-in-page with result polling. Covered by `--find-test`.
+- ✅ PDF generation / print-to-PDF plus interactive print. `request_pdf` uses
+  `PrintToPdfStream`; `print()` invokes WebView2's print UI. Covered by
+  `--pdf-test` for the non-interactive PDF path.
+- ✅ Context-menu requested event and optional default-menu suppression. Native
+  WebView2 context-menu events are registered; the deterministic smoke uses
+  the document-start bridge and is covered by `--context-test`.
+- ✅ WebRTC capture lifecycle observability. Covered by `--media-test` for the
+  bridge/event path.
 - Content blocking / request filtering policy or a documented WebView2
   equivalent.
 - Spellcheck/autocorrect and autofill/credential integration notes.

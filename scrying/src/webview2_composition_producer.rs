@@ -25,35 +25,39 @@ use std::time::{Duration, Instant};
 
 use dpi::PhysicalSize;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, COREWEBVIEW2_MOUSE_EVENT_KIND,
-    COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS, COREWEBVIEW2_MOVE_FOCUS_REASON,
-    COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON,
-    COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED, COREWEBVIEW2_DOWNLOAD_STATE,
+    COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON,
+    COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED,
+    COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED, COREWEBVIEW2_DOWNLOAD_STATE,
     COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED, COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED,
-    COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_CAMERA,
-    COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_KIND_OTHER_SENSORS,
-    COREWEBVIEW2_PERMISSION_STATE, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
-    COREWEBVIEW2_PERMISSION_STATE_DEFAULT, COREWEBVIEW2_PERMISSION_STATE_DENY,
+    COREWEBVIEW2_MOUSE_EVENT_KIND, COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS,
+    COREWEBVIEW2_MOVE_FOCUS_REASON, COREWEBVIEW2_PERMISSION_KIND,
+    COREWEBVIEW2_PERMISSION_KIND_CAMERA, COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
+    COREWEBVIEW2_PERMISSION_KIND_OTHER_SENSORS, COREWEBVIEW2_PERMISSION_STATE,
+    COREWEBVIEW2_PERMISSION_STATE_ALLOW, COREWEBVIEW2_PERMISSION_STATE_DEFAULT,
+    COREWEBVIEW2_PERMISSION_STATE_DENY, COREWEBVIEW2_PRINT_DIALOG_KIND_BROWSER,
     COREWEBVIEW2_PROCESS_FAILED_KIND, COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
     COREWEBVIEW2_PROCESS_FAILED_KIND_UNKNOWN_PROCESS_EXITED, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
-    ICoreWebView2, ICoreWebView2_2, ICoreWebView2CompositionController, ICoreWebView2Controller,
-    ICoreWebView2Cookie, ICoreWebView2CookieManager, ICoreWebView2DownloadOperation,
-    ICoreWebView2Environment, ICoreWebView2Environment3, ICoreWebView2Environment10,
-    ICoreWebView2EnvironmentOptions, ICoreWebView2PermissionRequestedEventArgs2, ICoreWebView2_4,
-    ICoreWebView2_10,
+    ICoreWebView2, ICoreWebView2_2, ICoreWebView2_4, ICoreWebView2_10, ICoreWebView2_11,
+    ICoreWebView2_16, ICoreWebView2_28, ICoreWebView2CompositionController,
+    ICoreWebView2Controller, ICoreWebView2Cookie, ICoreWebView2CookieManager,
+    ICoreWebView2DownloadOperation, ICoreWebView2Environment, ICoreWebView2Environment3,
+    ICoreWebView2Environment6, ICoreWebView2Environment10, ICoreWebView2Environment15,
+    ICoreWebView2EnvironmentOptions, ICoreWebView2PermissionRequestedEventArgs2,
 };
 use webview2_com::{
     AddScriptToExecuteOnDocumentCreatedCompletedHandler, BasicAuthenticationRequestedEventHandler,
     BytesReceivedChangedEventHandler, CallDevToolsProtocolMethodCompletedHandler, CoTaskMemPWSTR,
-    CoreWebView2EnvironmentOptions, CreateCoreWebView2CompositionControllerCompletedHandler,
+    ContextMenuRequestedEventHandler, CoreWebView2EnvironmentOptions,
+    CreateCoreWebView2CompositionControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, DocumentTitleChangedEventHandler,
-    DownloadStartingEventHandler, ExecuteScriptCompletedHandler, GetCookiesCompletedHandler,
-    NavigationCompletedEventHandler, NavigationStartingEventHandler,
-    NewWindowRequestedEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler,
-    SourceChangedEventHandler, StateChangedEventHandler, WebMessageReceivedEventHandler,
-    WebResourceRequestedEventHandler,
+    DownloadStartingEventHandler, ExecuteScriptCompletedHandler, FindStartCompletedHandler,
+    GetCookiesCompletedHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler,
+    NewWindowRequestedEventHandler, PermissionRequestedEventHandler,
+    PrintToPdfStreamCompletedHandler, ProcessFailedEventHandler, SourceChangedEventHandler,
+    StateChangedEventHandler, WebMessageReceivedEventHandler, WebResourceRequestedEventHandler,
+    WebResourceResponseReceivedEventHandler,
 };
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
@@ -96,6 +100,8 @@ use crate::{
 
 const FIRST_FRAME_NUDGE_LABEL: &str = "WebView2CompositionProducer.first-frame";
 const COOKIE_CHANGE_BRIDGE_MESSAGE: &str = "\0scrying:cookie-change";
+const CONTEXT_MENU_BRIDGE_PREFIX: &str = "scrying:context-menu:";
+const MEDIA_CAPTURE_BRIDGE_PREFIX: &str = "scrying:media-capture:";
 
 pub type WebView2CookieChangeHandlerFn = Box<dyn Fn() + Send + Sync + 'static>;
 pub type WebView2DownloadHandlerFn =
@@ -104,6 +110,34 @@ pub type WebView2AuthHandlerFn =
     Box<dyn Fn(AuthChallenge) -> AuthDisposition + Send + Sync + 'static>;
 pub type WebView2PermissionHandlerFn =
     Box<dyn Fn(PermissionRequest) -> PermissionDecision + Send + Sync + 'static>;
+
+#[derive(Clone, Copy, Debug)]
+pub struct WebView2FindOptions {
+    pub case_sensitive: bool,
+    pub highlight_all_matches: bool,
+    pub match_word: bool,
+    pub suppress_default_find_dialog: bool,
+    pub backwards: bool,
+}
+
+impl Default for WebView2FindOptions {
+    fn default() -> Self {
+        Self {
+            case_sensitive: false,
+            highlight_all_matches: true,
+            match_word: false,
+            suppress_default_find_dialog: true,
+            backwards: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WebView2FindResult {
+    pub matched: bool,
+    pub active_match_index: i32,
+    pub match_count: i32,
+}
 
 /// Configuration for `WebView2CompositionProducer::new`.
 #[derive(Clone, Debug)]
@@ -247,13 +281,15 @@ pub struct WebView2CompositionProducer {
     web_message_queue: Arc<Mutex<VecDeque<String>>>,
     cursor_queue: Arc<Mutex<VecDeque<CursorShape>>>,
     pending_cookies: Arc<Mutex<Option<Vec<Cookie>>>>,
+    pending_find: Arc<Mutex<Option<Result<WebView2FindResult, String>>>>,
+    pending_pdf: Arc<Mutex<Option<Result<Vec<u8>, String>>>>,
     cookie_change_handler: Arc<Mutex<Option<WebView2CookieChangeHandlerFn>>>,
     download_handler: Arc<Mutex<Option<WebView2DownloadHandlerFn>>>,
     auth_handler: Arc<Mutex<Option<WebView2AuthHandlerFn>>>,
     permission_handler: Arc<Mutex<Option<WebView2PermissionHandlerFn>>>,
     download_registry: Arc<Mutex<WebView2DownloadRegistry>>,
-    download_id_allocator: Arc<DownloadIdAllocator>,
     resource_handlers: Arc<Mutex<HashMap<String, UrlSchemeHandlerFn>>>,
+    default_context_menus_enabled: Arc<Mutex<bool>>,
     nav_starting_token: i64,
     nav_completed_token: i64,
     source_changed_token: i64,
@@ -263,7 +299,9 @@ pub struct WebView2CompositionProducer {
     download_starting_token: i64,
     basic_auth_token: i64,
     permission_requested_token: i64,
+    context_menu_requested_token: i64,
     web_message_token: i64,
+    web_resource_response_received_token: i64,
     web_resource_requested_token: Option<i64>,
     cursor_changed_token: i64,
 }
@@ -298,6 +336,7 @@ unsafe impl Send for WebView2DownloadRegistry {}
 unsafe impl Sync for WebView2DownloadRegistry {}
 
 struct WebView2DownloadEntry {
+    url: String,
     destination_path: PathBuf,
     total_bytes_expected: Option<u64>,
     operation: ICoreWebView2DownloadOperation,
@@ -454,6 +493,8 @@ impl WebView2CompositionProducer {
         let web_message_queue: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
         let cursor_queue: Arc<Mutex<VecDeque<CursorShape>>> = Arc::new(Mutex::new(VecDeque::new()));
         let pending_cookies = Arc::new(Mutex::new(None));
+        let pending_find = Arc::new(Mutex::new(None));
+        let pending_pdf = Arc::new(Mutex::new(None));
         let cookie_change_handler = Arc::new(Mutex::new(None));
         let download_handler = Arc::new(Mutex::new(None));
         let auth_handler = Arc::new(Mutex::new(None));
@@ -461,8 +502,11 @@ impl WebView2CompositionProducer {
         let download_registry = Arc::new(Mutex::new(WebView2DownloadRegistry::default()));
         let download_id_allocator = Arc::new(DownloadIdAllocator::new());
         let resource_handlers = Arc::new(Mutex::new(HashMap::new()));
+        let default_context_menus_enabled = Arc::new(Mutex::new(false));
 
         install_cookie_change_bridge(&webview)?;
+        install_context_menu_bridge(&webview)?;
+        install_media_capture_bridge(&webview)?;
 
         let (
             nav_starting_token,
@@ -478,6 +522,11 @@ impl WebView2CompositionProducer {
             web_message_queue.clone(),
             cookie_change_handler.clone(),
         )?;
+        let context_menu_requested_token = register_context_menu_requested_handler(
+            &webview,
+            nav_event_queue.clone(),
+            default_context_menus_enabled.clone(),
+        )?;
         let cursor_changed_token =
             register_cursor_changed_handler(&composition_controller, cursor_queue.clone())?;
         let download_starting_token = register_download_starting_handler(
@@ -492,10 +541,13 @@ impl WebView2CompositionProducer {
             &webview,
             nav_event_queue.clone(),
             auth_handler.clone(),
+            download_registry.clone(),
         )?;
-        let permission_requested_token = register_permission_requested_handler(
+        let permission_requested_token =
+            register_permission_requested_handler(&webview, permission_handler.clone())?;
+        let web_resource_response_received_token = register_web_resource_response_received_handler(
             &webview,
-            permission_handler.clone(),
+            cookie_change_handler.clone(),
         )?;
 
         Ok(Self {
@@ -518,13 +570,15 @@ impl WebView2CompositionProducer {
             web_message_queue,
             cursor_queue,
             pending_cookies,
+            pending_find,
+            pending_pdf,
             cookie_change_handler,
             download_handler,
             auth_handler,
             permission_handler,
             download_registry,
-            download_id_allocator,
             resource_handlers,
+            default_context_menus_enabled,
             nav_starting_token,
             nav_completed_token,
             source_changed_token,
@@ -534,7 +588,9 @@ impl WebView2CompositionProducer {
             download_starting_token,
             basic_auth_token,
             permission_requested_token,
+            context_menu_requested_token,
             web_message_token,
+            web_resource_response_received_token,
             web_resource_requested_token: None,
             cursor_changed_token,
         })
@@ -952,6 +1008,144 @@ impl WebView2CompositionProducer {
         }
     }
 
+    pub fn find_in_page(
+        &self,
+        query: &str,
+        options: WebView2FindOptions,
+    ) -> Result<(), WebSurfaceError> {
+        if let Ok(mut slot) = self.pending_find.lock() {
+            *slot = None;
+        }
+        let environment15 = self
+            .environment
+            .cast::<ICoreWebView2Environment15>()
+            .map_err(platform("environment.cast<ICoreWebView2Environment15>"))?;
+        let find_options = unsafe { environment15.CreateFindOptions() }
+            .map_err(platform("Environment15.CreateFindOptions"))?;
+        let query = CoTaskMemPWSTR::from(query);
+        unsafe {
+            find_options
+                .SetFindTerm(*query.as_ref().as_pcwstr())
+                .map_err(platform("FindOptions.SetFindTerm"))?;
+            find_options
+                .SetIsCaseSensitive(options.case_sensitive)
+                .map_err(platform("FindOptions.SetIsCaseSensitive"))?;
+            find_options
+                .SetShouldHighlightAllMatches(options.highlight_all_matches)
+                .map_err(platform("FindOptions.SetShouldHighlightAllMatches"))?;
+            find_options
+                .SetShouldMatchWord(options.match_word)
+                .map_err(platform("FindOptions.SetShouldMatchWord"))?;
+            find_options
+                .SetSuppressDefaultFindDialog(options.suppress_default_find_dialog)
+                .map_err(platform("FindOptions.SetSuppressDefaultFindDialog"))?;
+        }
+
+        let webview28 = self
+            .webview
+            .cast::<ICoreWebView2_28>()
+            .map_err(platform("webview.cast<ICoreWebView2_28>"))?;
+        let find = unsafe { webview28.Find() }.map_err(platform("WebView2_28.Find"))?;
+        let pending = self.pending_find.clone();
+        let find_for_completion = find.clone();
+        let handler =
+            FindStartCompletedHandler::create(Box::new(move |result: windows::core::Result<()>| {
+                let next = result
+                    .map_err(|err| err.message().to_string())
+                    .and_then(|()| unsafe {
+                        let mut match_count = 0i32;
+                        let mut active_match_index = 0i32;
+                        find_for_completion
+                            .MatchCount(&mut match_count)
+                            .map_err(|err| err.message().to_string())?;
+                        find_for_completion
+                            .ActiveMatchIndex(&mut active_match_index)
+                            .map_err(|err| err.message().to_string())?;
+                        Ok(WebView2FindResult {
+                            matched: match_count > 0,
+                            active_match_index,
+                            match_count,
+                        })
+                    });
+                if let Ok(mut slot) = pending.lock() {
+                    *slot = Some(next);
+                }
+                Ok(())
+            }));
+        unsafe { find.Start(&find_options, &handler) }.map_err(platform("Find.Start"))?;
+        if options.backwards {
+            unsafe { find.FindPrevious() }.map_err(platform("Find.FindPrevious"))?;
+        }
+        Ok(())
+    }
+
+    pub fn poll_find_match(&self) -> Option<Result<WebView2FindResult, String>> {
+        self.pending_find
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+    }
+
+    pub fn stop_find(&self) -> Result<(), WebSurfaceError> {
+        let webview28 = self
+            .webview
+            .cast::<ICoreWebView2_28>()
+            .map_err(platform("webview.cast<ICoreWebView2_28>"))?;
+        let find = unsafe { webview28.Find() }.map_err(platform("WebView2_28.Find"))?;
+        unsafe { find.Stop() }.map_err(platform("Find.Stop"))
+    }
+
+    pub fn request_pdf(&self) -> Result<(), WebSurfaceError> {
+        if let Ok(mut slot) = self.pending_pdf.lock() {
+            *slot = None;
+        }
+        let environment6 = self
+            .environment
+            .cast::<ICoreWebView2Environment6>()
+            .map_err(platform("environment.cast<ICoreWebView2Environment6>"))?;
+        let print_settings = unsafe { environment6.CreatePrintSettings() }
+            .map_err(platform("Environment6.CreatePrintSettings"))?;
+        let webview16 = self
+            .webview
+            .cast::<ICoreWebView2_16>()
+            .map_err(platform("webview.cast<ICoreWebView2_16>"))?;
+        let pending = self.pending_pdf.clone();
+        let handler = PrintToPdfStreamCompletedHandler::create(Box::new(
+            move |result: windows::core::Result<()>, stream: Option<IStream>| {
+                let next = result
+                    .map_err(|err| err.message().to_string())
+                    .and_then(|()| {
+                        let stream = stream
+                            .ok_or_else(|| "PrintToPdfStream returned no stream".to_string())?;
+                        stream_to_bytes(&stream).map_err(|err| err.message().to_string())
+                    });
+                if let Ok(mut slot) = pending.lock() {
+                    *slot = Some(next);
+                }
+                Ok(())
+            },
+        ));
+        unsafe { webview16.PrintToPdfStream(&print_settings, &handler) }
+            .map_err(platform("WebView2_16.PrintToPdfStream"))
+    }
+
+    pub fn poll_pdf(&self) -> Option<Result<Vec<u8>, String>> {
+        self.pending_pdf
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+    }
+
+    pub fn print(&self) -> Result<bool, WebSurfaceError> {
+        let webview16 = self
+            .webview
+            .cast::<ICoreWebView2_16>()
+            .map_err(platform("webview.cast<ICoreWebView2_16>"))?;
+        unsafe { webview16.ShowPrintUI(COREWEBVIEW2_PRINT_DIALOG_KIND_BROWSER) }
+            .map_err(platform("WebView2_16.ShowPrintUI"))?;
+        Ok(true)
+    }
+
     /// Route requests for `https://{host}/...` through a host-provided
     /// resource handler.
     ///
@@ -1133,6 +1327,9 @@ impl WebView2CompositionProducer {
                 .map_err(platform("Settings.SetAreDevToolsEnabled"))?;
         }
         if let Some(enabled) = settings.default_context_menus_enabled {
+            if let Ok(mut slot) = self.default_context_menus_enabled.lock() {
+                *slot = enabled;
+            }
             unsafe { webview_settings.SetAreDefaultContextMenusEnabled(enabled) }
                 .map_err(platform("Settings.SetAreDefaultContextMenusEnabled"))?;
         }
@@ -1220,11 +1417,10 @@ impl WebView2CompositionProducer {
     }
 
     /// Register a best-effort cookie-change callback. This fires for host
-    /// `set_cookie` / `delete_cookie` calls and for page-side `document.cookie`
-    /// writes observed by scrying's document-start script. The WebView2
-    /// bindings used here do not expose a native `Set-Cookie` response-header
-    /// observer, so consumers that need network-cookie deltas should pair this
-    /// with periodic [`Self::request_all_cookies`] calls.
+    /// `set_cookie` / `delete_cookie` calls, page-side `document.cookie`
+    /// writes observed by scrying's document-start script, and native
+    /// `Set-Cookie` response headers observed through WebView2's
+    /// `WebResourceResponseReceived` event.
     pub fn set_cookie_change_handler(
         &mut self,
         handler: WebView2CookieChangeHandlerFn,
@@ -1280,6 +1476,58 @@ impl WebView2CompositionProducer {
             entry.operation.clone()
         };
         unsafe { operation.Cancel() }.map_err(platform("DownloadOperation.Cancel"))
+    }
+
+    pub fn pause_download(&mut self, id: DownloadId) -> Result<(), WebSurfaceError> {
+        let operation = {
+            let registry = self
+                .download_registry
+                .lock()
+                .map_err(|_| WebSurfaceError::Platform("download registry lock poisoned".into()))?;
+            let Some(entry) = registry.by_id.get(&id) else {
+                return Err(WebSurfaceError::NotReady("unknown WebView2 download id"));
+            };
+            entry.operation.clone()
+        };
+        unsafe { operation.Pause() }.map_err(platform("DownloadOperation.Pause"))
+    }
+
+    pub fn resume_download(&mut self, id: DownloadId) -> Result<bool, WebSurfaceError> {
+        let operation = {
+            let registry = self
+                .download_registry
+                .lock()
+                .map_err(|_| WebSurfaceError::Platform("download registry lock poisoned".into()))?;
+            let Some(entry) = registry.by_id.get(&id) else {
+                return Err(WebSurfaceError::NotReady("unknown WebView2 download id"));
+            };
+            entry.operation.clone()
+        };
+        let mut can_resume = windows::core::BOOL::default();
+        unsafe { operation.CanResume(&mut can_resume) }
+            .map_err(platform("DownloadOperation.CanResume"))?;
+        if !can_resume.as_bool() {
+            return Ok(false);
+        }
+        unsafe { operation.Resume() }.map_err(platform("DownloadOperation.Resume"))?;
+        Ok(true)
+    }
+
+    pub fn can_resume_download(&mut self, id: DownloadId) -> Result<bool, WebSurfaceError> {
+        let operation = {
+            let registry = self
+                .download_registry
+                .lock()
+                .map_err(|_| WebSurfaceError::Platform("download registry lock poisoned".into()))?;
+            let Some(entry) = registry.by_id.get(&id) else {
+                return Err(WebSurfaceError::NotReady("unknown WebView2 download id"));
+            };
+            entry.operation.clone()
+        };
+        let mut can_resume = windows::core::BOOL::default();
+        unsafe { operation.CanResume(&mut can_resume) }
+            .map_err(platform("DownloadOperation.CanResume"))?;
+        Ok(can_resume.as_bool())
     }
 
     pub fn set_auth_handler(
@@ -1867,15 +2115,41 @@ impl Drop for WebView2CompositionProducer {
                 .webview
                 .remove_NewWindowRequested(self.new_window_requested_token);
             let _ = self.webview.remove_ProcessFailed(self.process_failed_token);
+            if let Ok(webview4) = self.webview.cast::<ICoreWebView2_4>() {
+                let _ = webview4.remove_DownloadStarting(self.download_starting_token);
+            }
+            if let Ok(webview10) = self.webview.cast::<ICoreWebView2_10>() {
+                let _ = webview10.remove_BasicAuthenticationRequested(self.basic_auth_token);
+            }
+            let _ = self
+                .webview
+                .remove_PermissionRequested(self.permission_requested_token);
             if let Some(token) = self.web_resource_requested_token {
                 let _ = self.webview.remove_WebResourceRequested(token);
             }
             let _ = self
                 .webview
                 .remove_WebMessageReceived(self.web_message_token);
+            if let Ok(webview2) = self.webview.cast::<ICoreWebView2_2>() {
+                let _ = webview2
+                    .remove_WebResourceResponseReceived(self.web_resource_response_received_token);
+            }
+            if let Ok(webview11) = self.webview.cast::<ICoreWebView2_11>() {
+                let _ = webview11.remove_ContextMenuRequested(self.context_menu_requested_token);
+            }
             let _ = self
                 .composition_controller
                 .remove_CursorChanged(self.cursor_changed_token);
+            if let Ok(mut registry) = self.download_registry.lock() {
+                for (_, entry) in registry.by_id.drain() {
+                    let _ = entry
+                        .operation
+                        .remove_BytesReceivedChanged(entry.bytes_received_token);
+                    let _ = entry
+                        .operation
+                        .remove_StateChanged(entry.state_changed_token);
+                }
+            }
             let _ = self.controller.Close();
         }
     }
@@ -2001,6 +2275,13 @@ impl crate::WebSurfaceProducer for WebView2CompositionProducer {
 
     fn send_pointer_input(&mut self, event: crate::PointerInput) -> Result<(), WebSurfaceError> {
         WebView2CompositionProducer::send_pointer_input(self, event)
+    }
+
+    fn send_drag_input(&mut self, event: crate::DragInput) -> Result<(), WebSurfaceError> {
+        let _ = event;
+        Err(WebSurfaceError::Unsupported(
+            "WebView2 drag/drop requires the host's OLE IDataObject; use WebView2CompositionProducer::drag_enter, drag_over, drag_leave, and drop_data",
+        ))
     }
 }
 
@@ -2162,6 +2443,74 @@ fn install_cookie_change_bridge(webview: &ICoreWebView2) -> Result<(), WebSurfac
     add_script_to_execute_on_document_created_blocking(webview, script)
 }
 
+fn install_context_menu_bridge(webview: &ICoreWebView2) -> Result<(), WebSurfaceError> {
+    let script = format!(
+        r#"(() => {{
+            if (window.__scryingContextMenuBridgeInstalled) return;
+            Object.defineProperty(window, "__scryingContextMenuBridgeInstalled", {{ value: true }});
+            const prefix = {prefix:?};
+            const clean = value => String(value || "").replace(/[\t\r\n]/g, " ");
+            const closest = (node, selector) => {{
+                for (let current = node; current && current !== document; current = current.parentElement) {{
+                    if (current.matches && current.matches(selector)) return current;
+                }}
+                return null;
+            }};
+            window.addEventListener("contextmenu", event => {{
+                const target = event.target;
+                const link = closest(target, "a[href]");
+                const image = closest(target, "img[src]");
+                const payload = [
+                    clean(location.href),
+                    Math.round(event.clientX),
+                    Math.round(event.clientY),
+                    clean(link && link.href),
+                    clean(image && image.src),
+                ].join("\t");
+                try {{ window.chrome.webview.postMessage(prefix + payload); }} catch (_) {{}}
+            }}, true);
+        }})()"#,
+        prefix = CONTEXT_MENU_BRIDGE_PREFIX,
+    );
+    add_script_to_execute_on_document_created_blocking(webview, script)
+}
+
+fn install_media_capture_bridge(webview: &ICoreWebView2) -> Result<(), WebSurfaceError> {
+    let script = format!(
+        r#"(() => {{
+            if (window.__scryingMediaCaptureBridgeInstalled) return;
+            Object.defineProperty(window, "__scryingMediaCaptureBridgeInstalled", {{ value: true }});
+            const prefix = {prefix:?};
+            const tracks = new Set();
+            const publish = () => {{
+                let audio = 0;
+                let video = 0;
+                for (const track of Array.from(tracks)) {{
+                    if (!track || track.readyState === "ended") {{ tracks.delete(track); continue; }}
+                    if (track.kind === "audio") audio += 1;
+                    if (track.kind === "video") video += 1;
+                }}
+                try {{ window.chrome.webview.postMessage(`${{prefix}}audio:${{audio}},video:${{video}}`); }} catch (_) {{}}
+            }};
+            const attach = stream => {{
+                if (!stream || !stream.getTracks) return stream;
+                for (const track of stream.getTracks()) {{
+                    tracks.add(track);
+                    track.addEventListener("ended", publish, {{ once: true }});
+                }}
+                publish();
+                return stream;
+            }};
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {{
+                const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+                navigator.mediaDevices.getUserMedia = async constraints => attach(await originalGetUserMedia(constraints));
+            }}
+        }})()"#,
+        prefix = MEDIA_CAPTURE_BRIDGE_PREFIX,
+    );
+    add_script_to_execute_on_document_created_blocking(webview, script)
+}
+
 fn pump_messages_for(duration: Duration) {
     let deadline = Instant::now() + duration;
     while Instant::now() < deadline {
@@ -2280,6 +2629,49 @@ fn stream_from_bytes(bytes: &[u8]) -> windows::core::Result<IStream> {
     }
     unsafe { stream.Seek(0, STREAM_SEEK_SET, None)? };
     Ok(stream)
+}
+
+fn stream_to_bytes(stream: &IStream) -> windows::core::Result<Vec<u8>> {
+    unsafe { stream.Seek(0, STREAM_SEEK_SET, None)? };
+    let mut bytes = Vec::new();
+    loop {
+        let mut chunk = [0u8; 8192];
+        let mut read = 0u32;
+        unsafe {
+            stream
+                .Read(
+                    chunk.as_mut_ptr() as *mut std::ffi::c_void,
+                    chunk.len() as u32,
+                    Some(&mut read),
+                )
+                .ok()?;
+        }
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..read as usize]);
+    }
+    Ok(bytes)
+}
+
+unsafe fn read_pwstr_from<F>(read: F) -> String
+where
+    F: FnOnce(*mut PWSTR) -> windows::core::Result<()>,
+{
+    let mut value = PWSTR::null();
+    if read(&mut value).is_ok() {
+        unsafe { consume_pwstr(value) }
+    } else {
+        String::new()
+    }
+}
+
+unsafe fn read_bool_from<F>(read: F) -> bool
+where
+    F: FnOnce(*mut windows::core::BOOL) -> windows::core::Result<()>,
+{
+    let mut value = windows::core::BOOL::default();
+    read(&mut value).is_ok() && value.as_bool()
 }
 
 unsafe fn consume_pwstr(p: PWSTR) -> String {
@@ -2714,7 +3106,7 @@ fn register_persistent_handlers(
     }
 
     // ProcessFailed -> NavigationEvent::ContentProcessTerminated for page/render failures.
-    let queue = nav_queue;
+    let queue = nav_queue.clone();
     let process_failed_handler = ProcessFailedEventHandler::create(Box::new(move |_, args| {
         let should_emit = args
             .as_ref()
@@ -2739,6 +3131,7 @@ fn register_persistent_handlers(
 
     // WebMessageReceived -> string queue
     let queue = web_message_queue;
+    let nav_queue_for_messages = nav_queue.clone();
     let cookie_handler = cookie_change_handler;
     let web_message_handler = WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
         if let Some(args) = args {
@@ -2750,6 +3143,18 @@ fn register_persistent_handlers(
                         && let Some(handler) = slot.as_ref()
                     {
                         handler();
+                    }
+                    return Ok(());
+                }
+                if let Some(event) = parse_context_menu_bridge_message(&s) {
+                    if let Ok(mut q) = nav_queue_for_messages.lock() {
+                        q.push_back(event);
+                    }
+                    return Ok(());
+                }
+                if let Some(event) = parse_media_capture_bridge_message(&s) {
+                    if let Ok(mut q) = nav_queue_for_messages.lock() {
+                        q.push_back(event);
                     }
                     return Ok(());
                 }
@@ -2776,6 +3181,164 @@ fn register_persistent_handlers(
         process_failed_token,
         web_message_token,
     ))
+}
+
+fn register_context_menu_requested_handler(
+    webview: &ICoreWebView2,
+    nav_queue: Arc<Mutex<VecDeque<NavigationEvent>>>,
+    default_context_menus_enabled: Arc<Mutex<bool>>,
+) -> Result<i64, WebSurfaceError> {
+    let webview11 = webview
+        .cast::<ICoreWebView2_11>()
+        .map_err(platform("webview.cast<ICoreWebView2_11>"))?;
+    let handler = ContextMenuRequestedEventHandler::create(Box::new(move |_, args| {
+        if let Some(args) = args {
+            let mut point = POINT::default();
+            let _ = unsafe { args.Location(&mut point) };
+            let mut page_url = String::new();
+            let mut link_url = None;
+            let mut image_url = None;
+            if let Ok(target) = unsafe { args.ContextMenuTarget() } {
+                page_url = unsafe { read_pwstr_from(|out| target.PageUri(out)) };
+                if unsafe { read_bool_from(|out| target.HasLinkUri(out)) } {
+                    let uri = unsafe { read_pwstr_from(|out| target.LinkUri(out)) };
+                    if !uri.is_empty() {
+                        link_url = Some(uri);
+                    }
+                }
+                if unsafe { read_bool_from(|out| target.HasSourceUri(out)) } {
+                    let uri = unsafe { read_pwstr_from(|out| target.SourceUri(out)) };
+                    if !uri.is_empty() {
+                        image_url = Some(uri);
+                    }
+                }
+            }
+            let allow_default_menu = default_context_menus_enabled
+                .lock()
+                .map(|enabled| *enabled)
+                .unwrap_or(false);
+            unsafe { args.SetHandled(!allow_default_menu)? };
+            if let Ok(mut q) = nav_queue.lock() {
+                q.push_back(NavigationEvent::ContextMenuRequested {
+                    page_url,
+                    x: point.x as f64,
+                    y: point.y as f64,
+                    link_url,
+                    image_url,
+                });
+            }
+        }
+        Ok(())
+    }));
+    let mut token = 0i64;
+    unsafe { webview11.add_ContextMenuRequested(&handler, &mut token) }
+        .map_err(platform("add_ContextMenuRequested"))?;
+    Ok(token)
+}
+
+fn register_web_resource_response_received_handler(
+    webview: &ICoreWebView2,
+    cookie_change_handler: Arc<Mutex<Option<WebView2CookieChangeHandlerFn>>>,
+) -> Result<i64, WebSurfaceError> {
+    let webview2 = webview
+        .cast::<ICoreWebView2_2>()
+        .map_err(platform("webview.cast<ICoreWebView2_2>"))?;
+    let handler = WebResourceResponseReceivedEventHandler::create(Box::new(move |_, args| {
+        if let Some(args) = args
+            && let Ok(response) = unsafe { args.Response() }
+            && let Ok(headers) = unsafe { response.Headers() }
+        {
+            if response_headers_have_set_cookie(&headers)
+                && let Ok(slot) = cookie_change_handler.lock()
+                && let Some(handler) = slot.as_ref()
+            {
+                handler();
+            }
+        }
+        Ok(())
+    }));
+    let mut token = 0i64;
+    unsafe { webview2.add_WebResourceResponseReceived(&handler, &mut token) }
+        .map_err(platform("add_WebResourceResponseReceived"))?;
+    Ok(token)
+}
+
+fn response_headers_have_set_cookie(
+    headers: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2HttpResponseHeaders,
+) -> bool {
+    let name = CoTaskMemPWSTR::from("Set-Cookie");
+    let mut contains = windows::core::BOOL::default();
+    if unsafe { headers.Contains(*name.as_ref().as_pcwstr(), &mut contains) }.is_ok()
+        && contains.as_bool()
+    {
+        return true;
+    }
+    let Ok(iterator) = (unsafe { headers.GetIterator() }) else {
+        return false;
+    };
+    loop {
+        let mut has_current = windows::core::BOOL::default();
+        if unsafe { iterator.HasCurrentHeader(&mut has_current) }.is_err() || !has_current.as_bool()
+        {
+            return false;
+        }
+        let mut header_name = PWSTR::null();
+        let mut header_value = PWSTR::null();
+        if unsafe { iterator.GetCurrentHeader(&mut header_name, &mut header_value) }.is_err() {
+            return false;
+        }
+        let header_name = unsafe { consume_pwstr(header_name) };
+        let _ = unsafe { consume_pwstr(header_value) };
+        if header_name.eq_ignore_ascii_case("set-cookie") {
+            return true;
+        }
+        let mut has_next = windows::core::BOOL::default();
+        if unsafe { iterator.MoveNext(&mut has_next) }.is_err() || !has_next.as_bool() {
+            return false;
+        }
+    }
+}
+
+fn parse_media_capture_bridge_message(message: &str) -> Option<NavigationEvent> {
+    let payload = message.strip_prefix(MEDIA_CAPTURE_BRIDGE_PREFIX)?;
+    let mut audio_active_tracks = 0u32;
+    let mut video_active_tracks = 0u32;
+    for part in payload.split(',') {
+        if let Some(value) = part.strip_prefix("audio:") {
+            audio_active_tracks = value.parse().ok()?;
+        } else if let Some(value) = part.strip_prefix("video:") {
+            video_active_tracks = value.parse().ok()?;
+        }
+    }
+    Some(NavigationEvent::MediaCaptureStateChanged {
+        audio_active_tracks,
+        video_active_tracks,
+    })
+}
+
+fn parse_context_menu_bridge_message(message: &str) -> Option<NavigationEvent> {
+    let payload = message.strip_prefix(CONTEXT_MENU_BRIDGE_PREFIX)?;
+    let mut parts = payload.splitn(5, '\t');
+    let page_url = parts.next()?.to_string();
+    let x = parts.next()?.parse().ok()?;
+    let y = parts.next()?.parse().ok()?;
+    let link_url = optional_bridge_string(parts.next()?);
+    let image_url = optional_bridge_string(parts.next().unwrap_or_default());
+    Some(NavigationEvent::ContextMenuRequested {
+        page_url,
+        x,
+        y,
+        link_url,
+        image_url,
+    })
+}
+
+fn optional_bridge_string(value: &str) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 fn is_content_process_failure(kind: COREWEBVIEW2_PROCESS_FAILED_KIND) -> bool {
@@ -2811,6 +3374,522 @@ fn register_cursor_changed_handler(
             .map_err(platform("add_CursorChanged"))?;
     }
     Ok(token)
+}
+
+fn register_download_starting_handler(
+    webview: &ICoreWebView2,
+    nav_queue: Arc<Mutex<VecDeque<NavigationEvent>>>,
+    download_dir: PathBuf,
+    host_handler: Arc<Mutex<Option<WebView2DownloadHandlerFn>>>,
+    registry: Arc<Mutex<WebView2DownloadRegistry>>,
+    id_allocator: Arc<DownloadIdAllocator>,
+) -> Result<i64, WebSurfaceError> {
+    let webview4: ICoreWebView2_4 = webview
+        .cast()
+        .map_err(platform("webview cast to ICoreWebView2_4"))?;
+    let handler = DownloadStartingEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else { return Ok(()) };
+        let operation = unsafe { args.DownloadOperation()? };
+        let id = id_allocator.next();
+        let url =
+            unsafe { download_operation_string(&operation, ICoreWebView2DownloadOperation::Uri) };
+        let mime_type = unsafe {
+            download_operation_string(&operation, ICoreWebView2DownloadOperation::MimeType)
+        };
+        let total_bytes_expected = unsafe { download_total_bytes(&operation) };
+        let suggested_filename = suggested_download_filename(&operation, &args);
+        let request = DownloadDestinationRequest {
+            id,
+            url: url.clone(),
+            suggested_filename: suggested_filename.clone(),
+            mime_type,
+            total_bytes_expected,
+        };
+        let decision = host_handler
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|handler| handler(request)));
+        let (destination_path, cancelled_by_host) = match decision {
+            Some(DownloadDecision::AcceptAt(path)) => (path, false),
+            Some(DownloadDecision::Cancel) => (PathBuf::new(), true),
+            None => (
+                unique_destination(&download_dir, &suggested_filename),
+                false,
+            ),
+        };
+
+        if cancelled_by_host {
+            unsafe {
+                args.SetCancel(true)?;
+                args.SetHandled(true)?;
+            }
+            if let Ok(mut queue) = nav_queue.lock() {
+                queue.push_back(NavigationEvent::DownloadCancelled {
+                    id,
+                    destination_path,
+                    resume_data: None,
+                });
+            }
+            return Ok(());
+        }
+
+        if let Some(parent) = destination_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let destination = destination_path.to_string_lossy().into_owned();
+        let destination_w = CoTaskMemPWSTR::from(destination.as_str());
+        unsafe {
+            args.SetResultFilePath(*destination_w.as_ref().as_pcwstr())?;
+            args.SetHandled(true)?;
+        }
+
+        let progress_registry = registry.clone();
+        let progress_queue = nav_queue.clone();
+        let progress_handler =
+            BytesReceivedChangedEventHandler::create(Box::new(move |sender, _| {
+                let Some(operation) = sender else {
+                    return Ok(());
+                };
+                let bytes_written = unsafe { download_bytes_received(&operation) }.unwrap_or(0);
+                let total_bytes_expected = unsafe { download_total_bytes(&operation) };
+                let should_emit = {
+                    let mut registry = match progress_registry.lock() {
+                        Ok(registry) => registry,
+                        Err(_) => return Ok(()),
+                    };
+                    let Some(entry) = registry.by_id.get_mut(&id) else {
+                        return Ok(());
+                    };
+                    let now = Instant::now();
+                    let elapsed = now.duration_since(entry.last_progress_emit);
+                    let delta = bytes_written.saturating_sub(entry.last_progress_bytes);
+                    if elapsed < DOWNLOAD_PROGRESS_MIN_INTERVAL
+                        && delta < DOWNLOAD_PROGRESS_MIN_BYTES
+                    {
+                        false
+                    } else {
+                        entry.last_progress_emit = now;
+                        entry.last_progress_bytes = bytes_written;
+                        true
+                    }
+                };
+                if should_emit && let Ok(mut queue) = progress_queue.lock() {
+                    queue.push_back(NavigationEvent::DownloadProgress {
+                        id,
+                        bytes_written,
+                        total_bytes_expected,
+                    });
+                }
+                Ok(())
+            }));
+        let state_registry = registry.clone();
+        let state_queue = nav_queue.clone();
+        let state_handler = StateChangedEventHandler::create(Box::new(move |sender, _| {
+            let Some(operation) = sender else {
+                return Ok(());
+            };
+            let Some(state) = (unsafe { download_state(&operation) }) else {
+                return Ok(());
+            };
+            if state != COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED
+                && state != COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED
+            {
+                return Ok(());
+            }
+            let bytes_written = unsafe { download_bytes_received(&operation) }.unwrap_or(0);
+            let reason = unsafe { download_interrupt_reason(&operation) }
+                .unwrap_or(COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON(0));
+            if state == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED
+                && reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED
+            {
+                let total_bytes_expected = state_registry.lock().ok().and_then(|registry| {
+                    registry
+                        .by_id
+                        .get(&id)
+                        .and_then(|entry| entry.total_bytes_expected)
+                });
+                if let Ok(mut queue) = state_queue.lock() {
+                    queue.push_back(NavigationEvent::DownloadProgress {
+                        id,
+                        bytes_written,
+                        total_bytes_expected,
+                    });
+                }
+                return Ok(());
+            }
+            let entry = state_registry
+                .lock()
+                .ok()
+                .and_then(|mut registry| registry.by_id.remove(&id));
+            let Some(entry) = entry else { return Ok(()) };
+            if let Ok(mut queue) = state_queue.lock() {
+                queue.push_back(NavigationEvent::DownloadProgress {
+                    id,
+                    bytes_written,
+                    total_bytes_expected: entry.total_bytes_expected,
+                });
+                if state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED {
+                    queue.push_back(NavigationEvent::DownloadFinished {
+                        id,
+                        destination_path: entry.destination_path,
+                        error: None,
+                    });
+                } else {
+                    if entry.cancelled_by_host
+                        || reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED
+                    {
+                        queue.push_back(NavigationEvent::DownloadCancelled {
+                            id,
+                            destination_path: entry.destination_path,
+                            resume_data: None,
+                        });
+                    } else {
+                        queue.push_back(NavigationEvent::DownloadFinished {
+                            id,
+                            destination_path: entry.destination_path,
+                            error: Some(format!(
+                                "WebView2 download interrupted: {}",
+                                download_interrupt_reason_label(reason)
+                            )),
+                        });
+                    }
+                }
+            }
+            Ok(())
+        }));
+
+        let mut bytes_received_token = 0i64;
+        let mut state_changed_token = 0i64;
+        unsafe {
+            operation.add_BytesReceivedChanged(&progress_handler, &mut bytes_received_token)?;
+            operation.add_StateChanged(&state_handler, &mut state_changed_token)?;
+        }
+        if let Ok(mut registry) = registry.lock() {
+            registry.by_id.insert(
+                id,
+                WebView2DownloadEntry {
+                    url: url.clone(),
+                    destination_path: destination_path.clone(),
+                    total_bytes_expected,
+                    operation: operation.clone(),
+                    bytes_received_token,
+                    state_changed_token,
+                    last_progress_emit: Instant::now(),
+                    last_progress_bytes: 0,
+                    cancelled_by_host: false,
+                },
+            );
+        }
+        if let Ok(mut queue) = nav_queue.lock() {
+            queue.push_back(NavigationEvent::DownloadStarted {
+                id,
+                url,
+                suggested_filename,
+                destination_path,
+                total_bytes_expected,
+            });
+        }
+        Ok(())
+    }));
+    let mut token = 0i64;
+    unsafe { webview4.add_DownloadStarting(&handler, &mut token) }
+        .map_err(platform("add_DownloadStarting"))?;
+    Ok(token)
+}
+
+fn register_basic_auth_handler(
+    webview: &ICoreWebView2,
+    nav_queue: Arc<Mutex<VecDeque<NavigationEvent>>>,
+    host_handler: Arc<Mutex<Option<WebView2AuthHandlerFn>>>,
+    download_registry: Arc<Mutex<WebView2DownloadRegistry>>,
+) -> Result<i64, WebSurfaceError> {
+    let webview10: ICoreWebView2_10 = webview
+        .cast()
+        .map_err(platform("webview cast to ICoreWebView2_10"))?;
+    let handler = BasicAuthenticationRequestedEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else { return Ok(()) };
+        let mut uri = PWSTR::null();
+        unsafe { args.Uri(&mut uri)? };
+        let url = unsafe { consume_pwstr(uri) };
+        let mut challenge = PWSTR::null();
+        let realm = if unsafe { args.Challenge(&mut challenge) }.is_ok() {
+            unsafe { consume_pwstr(challenge) }
+        } else {
+            String::new()
+        };
+        let auth_method = "WebView2BasicAuthentication".to_string();
+        let host = origin_host_from_url(&url);
+        let source = auth_source_for_webview2_basic_auth(&url, &download_registry);
+        if let Ok(mut queue) = nav_queue.lock() {
+            queue.push_back(NavigationEvent::AuthChallenged {
+                url: url.clone(),
+                host: host.clone(),
+                auth_method: auth_method.clone(),
+                source,
+            });
+        }
+        let disposition = host_handler.lock().ok().and_then(|guard| {
+            guard.as_ref().map(|handler| {
+                handler(AuthChallenge {
+                    url,
+                    host,
+                    auth_method,
+                    realm,
+                    source,
+                })
+            })
+        });
+        match disposition {
+            Some(AuthDisposition::Cancel) | Some(AuthDisposition::RejectProtectionSpace) => {
+                unsafe { args.SetCancel(true)? };
+            }
+            Some(AuthDisposition::UseCredential { username, password }) => {
+                let response = unsafe { args.Response()? };
+                let username = CoTaskMemPWSTR::from(username.as_str());
+                let password = CoTaskMemPWSTR::from(password.as_str());
+                unsafe {
+                    response.SetUserName(*username.as_ref().as_pcwstr())?;
+                    response.SetPassword(*password.as_ref().as_pcwstr())?;
+                }
+            }
+            None | Some(AuthDisposition::PerformDefault) => {}
+        }
+        Ok(())
+    }));
+    let mut token = 0i64;
+    unsafe { webview10.add_BasicAuthenticationRequested(&handler, &mut token) }
+        .map_err(platform("add_BasicAuthenticationRequested"))?;
+    Ok(token)
+}
+
+fn register_permission_requested_handler(
+    webview: &ICoreWebView2,
+    host_handler: Arc<Mutex<Option<WebView2PermissionHandlerFn>>>,
+) -> Result<i64, WebSurfaceError> {
+    let handler = PermissionRequestedEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else { return Ok(()) };
+        let mut uri = PWSTR::null();
+        unsafe { args.Uri(&mut uri)? };
+        let frame_url = unsafe { consume_pwstr(uri) };
+        let mut kind = COREWEBVIEW2_PERMISSION_KIND(0);
+        unsafe { args.PermissionKind(&mut kind)? };
+        let Some(permission_kind) = permission_kind_from_webview2(kind) else {
+            return Ok(());
+        };
+        let request = PermissionRequest {
+            origin: origin_from_url(&frame_url),
+            frame_url,
+            kind: permission_kind,
+        };
+        let decision = host_handler
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|handler| handler(request)))
+            .unwrap_or(PermissionDecision::Prompt);
+        let state = permission_decision_to_webview2(decision);
+        unsafe { args.SetState(state)? };
+        if decision != PermissionDecision::Prompt
+            && let Ok(args2) = args.cast::<ICoreWebView2PermissionRequestedEventArgs2>()
+        {
+            unsafe { args2.SetHandled(true)? };
+        }
+        Ok(())
+    }));
+    let mut token = 0i64;
+    unsafe { webview.add_PermissionRequested(&handler, &mut token) }
+        .map_err(platform("add_PermissionRequested"))?;
+    Ok(token)
+}
+
+unsafe fn download_operation_string(
+    operation: &ICoreWebView2DownloadOperation,
+    read: unsafe fn(&ICoreWebView2DownloadOperation, *mut PWSTR) -> windows::core::Result<()>,
+) -> String {
+    let mut value = PWSTR::null();
+    if unsafe { read(operation, &mut value) }.is_ok() {
+        unsafe { consume_pwstr(value) }
+    } else {
+        String::new()
+    }
+}
+
+unsafe fn download_total_bytes(operation: &ICoreWebView2DownloadOperation) -> Option<u64> {
+    let mut total = -1i64;
+    if unsafe { operation.TotalBytesToReceive(&mut total) }.is_ok() && total >= 0 {
+        Some(total as u64)
+    } else {
+        None
+    }
+}
+
+unsafe fn download_bytes_received(operation: &ICoreWebView2DownloadOperation) -> Option<u64> {
+    let mut bytes = 0i64;
+    if unsafe { operation.BytesReceived(&mut bytes) }.is_ok() {
+        Some(bytes.max(0) as u64)
+    } else {
+        None
+    }
+}
+
+unsafe fn download_state(
+    operation: &ICoreWebView2DownloadOperation,
+) -> Option<COREWEBVIEW2_DOWNLOAD_STATE> {
+    let mut state = COREWEBVIEW2_DOWNLOAD_STATE(0);
+    if unsafe { operation.State(&mut state) }.is_ok() {
+        Some(state)
+    } else {
+        None
+    }
+}
+
+unsafe fn download_interrupt_reason(
+    operation: &ICoreWebView2DownloadOperation,
+) -> Option<COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON> {
+    let mut reason = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON(0);
+    if unsafe { operation.InterruptReason(&mut reason) }.is_ok() {
+        Some(reason)
+    } else {
+        None
+    }
+}
+
+fn suggested_download_filename(
+    operation: &ICoreWebView2DownloadOperation,
+    args: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2DownloadStartingEventArgs,
+) -> String {
+    let mut path = PWSTR::null();
+    let result_path = if unsafe { args.ResultFilePath(&mut path) }.is_ok() {
+        unsafe { consume_pwstr(path) }
+    } else {
+        String::new()
+    };
+    if let Some(name) = Path::new(&result_path).file_name().and_then(|n| n.to_str())
+        && !name.is_empty()
+    {
+        return sanitize_download_filename(name);
+    }
+
+    let url = unsafe { download_operation_string(operation, ICoreWebView2DownloadOperation::Uri) };
+    if let Some(name) = url
+        .split(['?', '#'])
+        .next()
+        .and_then(|path| path.rsplit('/').next())
+        .filter(|name| !name.is_empty())
+    {
+        return sanitize_download_filename(name);
+    }
+
+    "download.bin".to_string()
+}
+
+fn sanitize_download_filename(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            ch if ch.is_control() => '_',
+            ch => ch,
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches([' ', '.']);
+    if trimmed.is_empty() {
+        "download.bin".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn unique_destination(dir: &Path, name: &str) -> PathBuf {
+    let name = sanitize_download_filename(name);
+    let candidate = dir.join(&name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let stem;
+    let ext;
+    if let Some(dot) = name.rfind('.') {
+        stem = &name[..dot];
+        ext = &name[dot..];
+    } else {
+        stem = name.as_str();
+        ext = "";
+    }
+    for n in 1..u32::MAX {
+        let candidate = dir.join(format!("{stem}-{n}{ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    dir.join(name)
+}
+
+fn download_interrupt_reason_label(reason: COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON) -> String {
+    match reason {
+        COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED => "user canceled".to_string(),
+        COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED => "user paused".to_string(),
+        other => format!("reason {}", other.0),
+    }
+}
+
+fn auth_source_for_webview2_basic_auth(
+    url: &str,
+    download_registry: &Arc<Mutex<WebView2DownloadRegistry>>,
+) -> AuthSource {
+    let normalized = url.split('#').next().unwrap_or(url);
+    let is_download = download_registry
+        .lock()
+        .ok()
+        .map(|registry| {
+            registry.by_id.values().any(|entry| {
+                let entry_url = entry.url.split('#').next().unwrap_or(&entry.url);
+                entry_url == normalized
+            })
+        })
+        .unwrap_or(false);
+    if is_download {
+        AuthSource::Download
+    } else {
+        AuthSource::Page
+    }
+}
+
+fn permission_kind_from_webview2(kind: COREWEBVIEW2_PERMISSION_KIND) -> Option<PermissionKind> {
+    match kind {
+        COREWEBVIEW2_PERMISSION_KIND_CAMERA => Some(PermissionKind::Camera),
+        COREWEBVIEW2_PERMISSION_KIND_MICROPHONE => Some(PermissionKind::Microphone),
+        COREWEBVIEW2_PERMISSION_KIND_OTHER_SENSORS => Some(PermissionKind::DeviceOrientation),
+        _ => None,
+    }
+}
+
+fn permission_decision_to_webview2(decision: PermissionDecision) -> COREWEBVIEW2_PERMISSION_STATE {
+    match decision {
+        PermissionDecision::Grant => COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+        PermissionDecision::Deny => COREWEBVIEW2_PERMISSION_STATE_DENY,
+        PermissionDecision::Prompt => COREWEBVIEW2_PERMISSION_STATE_DEFAULT,
+    }
+}
+
+fn origin_host_from_url(url: &str) -> String {
+    let Some(rest) = url.split_once("://").map(|(_, rest)| rest) else {
+        return String::new();
+    };
+    rest.split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn origin_from_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return String::new();
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if host.is_empty() {
+        String::new()
+    } else {
+        format!("{scheme}://{host}")
+    }
 }
 
 fn hcursor_to_shape(cursor: HCURSOR) -> CursorShape {

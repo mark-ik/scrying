@@ -419,9 +419,9 @@ every row marked `—` is structurally not on that platform.
 | Mouse forwarding (buttons + move + leave) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | Scroll wheel forwarding | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | Touch + pen forwarding | ✅ | ✅ 0.4.x (mouse-shaped JS pointer events) | ? | ? |
-| Keyboard forwarding (basic) | ✅ | ✅ 0.4.0 | ? | ? |
-| IME (CJK / non-Latin) | ⏳ (raw `WM_IME*` forwarder wired; validation pending) | ✅ 0.4.0 (via NSTextInputClient) | ? | ? |
-| Drag-and-drop into webview | ✅ (OLE `IDataObject` helpers) | — capture (SPI-blocked) / ✅ overlay (auto) | ? | ? |
+| Keyboard forwarding (basic) | 🟡 (API wired; DOM smoke blocked) | ✅ 0.4.0 | ? | ? |
+| IME (CJK / non-Latin) | 🟡 (raw `WM_IME*` forwarder wired; bounded DOM smoke still times out) | ✅ 0.4.0 (via NSTextInputClient) | ? | ? |
+| Drag-and-drop into webview | ✅ (concrete OLE `IDataObject` helpers; trait reports data-object requirement) | — capture (SPI-blocked) / ✅ overlay (auto) | ? | ? |
 | Focus management | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | Cursor-change reporting | ✅ | ✅ 0.4.0 | ? | ? |
 | Navigation events (start/source/complete) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
@@ -430,10 +430,10 @@ every row marked `—` is structurally not on that platform.
 | PNG / CPU snapshot | ✅ 0.2.0 | ✅ 0.4.0 (CPU RGBA) | ? (`get_snapshot`) | ? |
 | Settings (zoom, UA, JS, devtools) | ✅ | ✅ | ? | ? |
 | Profile / cookie API / storage | ✅ | ✅ 0.4.0 (per-profile UUID + cookie API) | ? | ? |
-| Custom URL schemes | ⏳ | ✅ | ? | ? |
-| Downloads | ⏳ | ✅ | ? | ? |
-| New-window / popup intercept | ⏳ | ✅ | ? | ? |
-| Process-failure recovery | ⏳ | ✅ | ? | ? |
+| Custom URL schemes | ✅ (virtual hosts) | ✅ | ? | ? |
+| Downloads | 🟡 (live pause/resume; no portable resume-data blob) | ✅ | ? | ? |
+| New-window / popup intercept | ✅ | ✅ | ? | ? |
+| Process-failure recovery | ✅ | ✅ | ? | ? |
 | **Cross-API GPU sync** | explicit D3D12 fence when supplied; barrier fallback | MTLSharedEvent signal + producer wait | VkSemaphore (explicit) | wl_buffer (implicit) |
 | Pre-composition extraction | — | — | ✅ (only platform) | — |
 | Sub-iframe / sub-frame capture | — | — | — | — |

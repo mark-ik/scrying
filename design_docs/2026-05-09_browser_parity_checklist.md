@@ -48,7 +48,7 @@ yet.
 | New-window / popup intercept | ✅ | ✅ | ? | `NavigationEvent::NewWindowRequested { url }`; Windows covered by `demo-win --popup-test` |
 | Process-failure recovery | ✅ | ✅ | ? | `NavigationEvent::ContentProcessTerminated`; Windows covered by `demo-win --process-test` |
 | Tab-state serialize / restore | ✅ | ? | ? | `serialize_interaction_state` / `restore_interaction_state` (opaque bytes) |
-| Page Visibility / occlusion sync | ✅ | ✅ | ⏳ | `set_visible(bool)` cascades through `NSView::setHidden:` on macOS and `ICoreWebView2Controller::SetIsVisible` on Windows. Distinct from the SPI-only `_setSuspended:` / hard pause paths |
+| Page Visibility / occlusion sync | ✅ | ✅ | ⏳ | `set_visible(bool)` cascades through `NSView::setHidden:` on macOS and `ICoreWebView2Controller::SetIsVisible` on Windows. Windows page-observed state is covered by `demo-win --visibility-test`. Distinct from the SPI-only `_setSuspended:` / hard pause paths |
 | Throttling control (hard pause) | ✅ | ? | ⏳ | `WebSurfaceSettings::inactive_scheduling_policy` (`Suspend` / `Throttle` / `None`) → `WKPreferences.inactiveSchedulingPolicy` on macOS 14+ / iOS 17+. Older OS versions: silent no-op. Composes with `set_visible(false)` for browser-shape inactive-tab handling. SPI alternative (`_suspendPage:` for older macOS) and the wider SPI evaluation live in [`2026-05-09_spi_evaluation.md`](2026-05-09_spi_evaluation.md) |
 
 ## Input forwarding
@@ -57,9 +57,9 @@ yet.
 | --- | --- | --- | --- | --- |
 | Mouse + scroll wheel (with modifiers) | ✅ | ✅ | ? | Scroll wheel carries location + `CGEventFlags` |
 | Pointer / touch / pen synthesis | ✅ | ✅ | ? | macOS has no public direct-touch synthesis API — events arrive at JS as `pointerType: "mouse"`; Windows uses WebView2 `SendPointerInput` |
-| Keyboard + IME (composition) | ✅ | ⏳ | ? | Windows now has `send_keyboard_input` plus `forward_keyboard_message` for raw `WM_KEY*` / `WM_CHAR` / `WM_DEADCHAR` / `WM_IME*`; Korean / Japanese / Chinese composition round-trip still needs validation |
+| Keyboard + IME (composition) | ✅ | 🟡 | ? | Windows has `send_keyboard_input` plus `forward_keyboard_message` for raw `WM_KEY*` / `WM_CHAR` / `WM_DEADCHAR` / `WM_IME*`; bounded `demo-win --keyboard-test` still times out before DOM input, so host message-loop/focus routing remains blocked |
 | Cursor-change events (host mirrors WebKit cursor) | ✅ | ✅ | ? | macOS polls `NSCursor.currentSystemCursor`; Windows listens to WebView2 `CursorChanged` |
-| Drag-and-drop *in* (file / URL → page) | ✅ | ✅ | ⏳ | macOS has drop observability via JS; Windows has OLE `IDataObject` drag-enter / over / leave / drop helpers. Portable trait-level shape still wants cleanup |
+| Drag-and-drop *in* (file / URL → page) | ✅ | ✅ | ⏳ | macOS has drop observability via JS; Windows has OLE `IDataObject` drag-enter / over / leave / drop helpers. Trait-level `send_drag_input` now reports that Windows requires the concrete OLE data-object path |
 | Drag-and-drop *out* (page content → host) | 🚫 | ? | ⏳ | macOS path is `_WK*` SPI |
 | Context-menu interception | ✅ | ⏳ | ? | JS user-script + `WKScriptMessageHandler` always fires `NavigationEvent::ContextMenuRequested` (observability); engine-default menu suppression is gated on `window.__scryingSuppressContextMenu` and respects `WebSurfaceSettings::default_context_menus_enabled` via `evaluateJavaScript:` |
 
@@ -87,23 +87,24 @@ yet.
 | Custom URL schemes | ✅ | ✅ | ? | `WkWebViewProducer::new_with_url_schemes` on macOS; `WebView2CompositionProducer::register_virtual_host_handler` on Windows, covered by `demo-win --routing-test` |
 | Per-profile data store | ✅ | ✅ | ? | `WKWebsiteDataStore::dataStoreForIdentifier:` (macOS 14+) |
 | Incognito / non-persistent profile | ✅ | ✅ | ? | `WkWebViewProducerConfig::non_persistent` on macOS; `WebView2CompositionConfig::non_persistent` creates an InPrivate CompositionController on Windows and is covered by `demo-win --incognito-test` |
-| Multi-instance verification (cross-talk isolation) | ✅ | ⏳ | ? | Windows profile smoke proves sequential producer recreation with the same `user_data_dir`; simultaneous two-producer composition needs a separate-HWND or shared-composition-root strategy and runtime proof |
+| Multi-instance verification (cross-talk isolation) | ✅ | 🟡 | ? | Windows profile smoke proves sequential producer recreation with the same `user_data_dir`; `demo-win --multi-view-test` proves simultaneous two-producer composition on separate HWNDs. Same-HWND composition remains unsupported in the current demo setup |
 | Cookie store (read / write / delete) | ✅ | ✅ | ? | Wraps `WKHTTPCookieStore` on macOS and WebView2 `ICoreWebView2CookieManager` on Windows |
-| Cookie / storage *change events* | ✅ | ⏳ | ⏳ | macOS uses `cookiesDidChangeInCookieStore:` for page writes, `Set-Cookie` headers, and host writes. Windows currently fires best-effort pulses for host `set_cookie` / `delete_cookie` and page-side `document.cookie` writes; native `Set-Cookie` response observation remains open |
+| Cookie / storage *change events* | ✅ | 🟡 | ⏳ | macOS uses `cookiesDidChangeInCookieStore:` for page writes, `Set-Cookie` headers, and host writes. Windows fires pulses for host `set_cookie` / `delete_cookie`, page-side `document.cookie` writes, and native `Set-Cookie` response headers via `WebResourceResponseReceived`; broader storage-change observation remains open |
 
 ## Browser-shape UX
 
 | Capability | macOS | Windows | Linux | Notes |
 | --- | --- | --- | --- | --- |
-| Find-in-page (with options) | ✅ | ⏳ | ? | `find_in_page` + `poll_find_match`, async via completion blocks |
-| Page-to-PDF rendering | ✅ | ⏳ | ? | `request_pdf` + `poll_pdf` |
-| Print / `Cmd+P` (interactive) | ✅ | ⏳ | ⏳ | `print()` runs the standard `NSPrintOperation` modally with `NSPrintInfo::sharedPrintInfo`; returns `true` on print, `false` on cancel |
-| Auth challenges (events + host-driven disposition) | ✅ | ⏳ | ? | Option A (events) + Option B (`set_auth_handler`) both shipped on macOS; Windows needs the WebView2 challenge hooks wired |
-| Auth during downloads (mid-stream / post-promotion) | ✅ | ⏳ | ? | `WKDownloadDelegate::download:didReceiveAuthenticationChallenge:` routes through the same shared auth handler as page-load auth. New `AuthSource { Page, Download }` discriminator on `NavigationEvent::AuthChallenged` and `AuthChallenge` so hosts can route the two channels differently; download-channel events now carry the resource URL from `WKDownload::originalRequest` instead of an empty-string sentinel |
-| Permission handlers (camera / mic / orientation) | ✅ | ⏳ | ? | `set_permission_handler` returns `Allow` / `Deny` / `Prompt` |
-| WebRTC capture lifecycle observability | ✅ | ⏳ | ⏳ | JS user-script monkey-patches `navigator.mediaDevices.getUserMedia`, tracks `track.ended`; emits `NavigationEvent::MediaCaptureStateChanged { audio_active_tracks, video_active_tracks }`. Counters reset per top-level navigation |
+| Find-in-page (with options) | ✅ | ✅ | ? | macOS: `find_in_page` + `poll_find_match`; Windows: native `ICoreWebView2Find` with match count, covered by `demo-win --find-test` |
+| Page-to-PDF rendering | ✅ | ✅ | ? | macOS: `request_pdf` + `poll_pdf`; Windows: native `PrintToPdfStream`, covered by `demo-win --pdf-test` |
+| Print / `Cmd+P` (interactive) | ✅ | ✅ | ⏳ | macOS uses `NSPrintOperation`; Windows `print()` invokes WebView2's browser print UI via `ShowPrintUI`. Interactive cancellation is host/user driven and not smoke-tested |
+| Auth challenges (events + host-driven disposition) | ✅ | ✅ | ? | Option A (events) + Option B (`set_auth_handler`) both shipped; Windows covers WebView2 `BasicAuthenticationRequested` with `demo-win --auth-test` |
+| Auth during downloads (mid-stream / post-promotion) | ✅ | 🟡 | ? | `WKDownloadDelegate::download:didReceiveAuthenticationChallenge:` routes through the same shared auth handler as page-load auth. Windows WebView2 exposes Basic auth at the WebView level; active download URL matching reports `AuthSource::Download` when possible |
+| Permission handlers (camera / mic / orientation) | ✅ | ✅ | ? | `set_permission_handler` returns `Allow` / `Deny` / `Prompt`; Windows maps camera / microphone / sensor prompts and is covered by `demo-win --permission-test` |
+| WebRTC capture lifecycle observability | ✅ | ✅ | ⏳ | JS user-script monkey-patches `navigator.mediaDevices.getUserMedia`, tracks `track.ended`; emits `NavigationEvent::MediaCaptureStateChanged { audio_active_tracks, video_active_tracks }`. Windows bridge/event path is covered by `demo-win --media-test` |
 | Title-changed notifications | ✅ | ✅ | ? | KVO on `WKWebView::title` |
-| Downloads pipeline (id-correlated, host destination, cancel, resume) | ✅ | ⏳ | ? | `DownloadId`, `set_download_handler`, `cancel_download`, `resume_download` |
+| Downloads pipeline (id-correlated, host destination, cancel, resume) | ✅ | 🟡 | ? | Windows has `DownloadId`, `set_download_handler`, `cancel_download`, progress, finish/cancel events, and `demo-win --download-test`; resume data remains macOS-only |
+| Context-menu requested event | ✅ | ✅ | ? | macOS and Windows emit `NavigationEvent::ContextMenuRequested`; Windows registers native WebView2 `ContextMenuRequested` and a deterministic document bridge covered by `demo-win --context-test` |
 | Content blocking (`WKContentRuleList` / AdBlock-shape) | ✅ | ⏳ | ⏳ | `compile_and_apply_content_rule_list(id, json)` compiles via `WKContentRuleListStore::defaultStore` and attaches to the UCC on main-thread completion; `clear_all_content_rule_lists` detaches all |
 | Spellcheck / autocorrect controls | ✅ | ⏳ | ? | `WkWebViewProducerConfig::spellcheck_override: Option<bool>` injects a document-start user-script that forces `spellcheck="true"\|"false"` on `<input>` / `<textarea>` / `[contenteditable]` plus a `MutationObserver` for added nodes. Best-effort — WKWebView has no public engine-level toggle |
 | Autofill / Keychain integration | ✅ | ⏳ | ⏳ | System-driven on macOS — Apple's Keychain + AppKit's `NSSecureTextField` handle credential save / suggest transparently for `<input type="password">` and `autocomplete`-tagged fields when the WKWebView is in an active focused window. No producer-level code; documented in design notes. Per-profile credential isolation rides the `WKWebsiteDataStore` chosen via [`WkWebViewProducerConfig::data_dir`] / `non_persistent` |

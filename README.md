@@ -32,6 +32,15 @@ cargo run -p demo-win -- --incognito-test            # InPrivate profile isolati
 cargo run -p demo-win -- --popup-test                # host-owned target-blank / window.open routing
 cargo run -p demo-win -- --routing-test              # WebResourceRequested virtual-host app content
 cargo run -p demo-win -- --process-test              # ProcessFailed event + fresh navigation recovery
+cargo run -p demo-win -- --download-test             # WebView2 DownloadStarting + host destination
+cargo run -p demo-win -- --auth-test                 # BasicAuthenticationRequested + host credentials
+cargo run -p demo-win -- --permission-test           # PermissionRequested + host denial
+cargo run -p demo-win -- --visibility-test           # SetIsVisible -> Page Visibility state
+cargo run -p demo-win -- --find-test                 # native WebView2 find + match count
+cargo run -p demo-win -- --pdf-test                  # native PrintToPdfStream bytes
+cargo run -p demo-win -- --context-test              # ContextMenuRequested event bridge
+cargo run -p demo-win -- --media-test                # media-capture lifecycle event bridge
+cargo run -p demo-win -- --multi-view-test           # simultaneous WebView2 producers on separate HWNDs
 # macOS — overlay mode (default)
 cargo run -p demo-mac
 # macOS — automated runtime tests
