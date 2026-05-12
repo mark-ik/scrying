@@ -84,7 +84,11 @@ metrics, DPI-change handling, Display P3 / HDR color pipeline, and hard
 inactive-tab throttling. `set_visible` and WebView2 cookie CRUD are now
 wired; cookie-change callbacks are best-effort for host mutations and
 page-side `document.cookie` writes because `webview2-com` 0.39.1 does
-not expose a native cookie-change event.
+not expose a native cookie-change event. Runtime proof now lives in
+`demo-win`: `--scripted` covers JS message round-trip plus mouse /
+keyboard dispatch API acceptance, `--browser-test` covers history,
+reload / stop, title, settings, and visibility controls, and
+`--cookie-test` covers cookie set / read / delete round-trip.
 
 **Windows remaining-work lane:**
 

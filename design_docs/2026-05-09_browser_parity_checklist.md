@@ -119,7 +119,8 @@ yet.
   `⏳` rows are public-WebView2-shaped follow-ups; `?` rows are still
   unaudited or need a design call. Runtime assertions should land in
   [`demo-win`](../demo-win/) rather than the cross-platform selector
-  smoke.
+  smoke; it now has `--scripted`, `--browser-test`, and
+  `--cookie-test` one-shot modes for the shipped WebView2 slices.
 - **Linux** rows are largely "?" because the WPE producer is
   unstarted (out-of-band slice; see roadmap in
   [`2026-05-07_platform_ceilings.md`](2026-05-07_platform_ceilings.md)).

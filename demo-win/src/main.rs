@@ -7,8 +7,8 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 #[cfg(target_os = "windows")]
 use scrying::Dx12FenceSynchronizer;
 use scrying::{
-    Cookie, HostWgpuContext, ImportOptions, TextureImporter, WebSurfaceCapabilities,
-    WebSurfaceFrame, WgpuTextureImporter,
+    Cookie, HostWgpuContext, ImportOptions, NavigationEvent, TextureImporter,
+    WebSurfaceCapabilities, WebSurfaceFrame, WebSurfaceSettings, WgpuTextureImporter,
 };
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -27,6 +27,7 @@ struct Cli {
     probe_only: bool,
     scripted: bool,
     cookie_test: bool,
+    browser_test: bool,
 }
 
 impl Cli {
@@ -37,6 +38,7 @@ impl Cli {
                 "--probe-only" => cli.probe_only = true,
                 "--scripted" => cli.scripted = true,
                 "--cookie-test" => cli.cookie_test = true,
+                "--browser-test" => cli.browser_test = true,
                 _ => eprintln!("demo-win: unknown arg: {arg}"),
             }
         }
@@ -44,7 +46,7 @@ impl Cli {
     }
 
     fn one_shot(&self) -> bool {
-        self.probe_only || self.scripted || self.cookie_test
+        self.probe_only || self.scripted || self.cookie_test || self.browser_test
     }
 }
 
@@ -730,6 +732,9 @@ fn run_platform_composition_visual_probe(
     if cli.cookie_test {
         validate_platform_cookie_store(&mut producer)?;
     }
+    if cli.browser_test {
+        validate_platform_browser_controls(&mut producer)?;
+    }
     if keyboard_validate_enabled() {
         validate_platform_keyboard_smoke(&mut producer)?;
     }
@@ -777,6 +782,159 @@ fn run_platform_composition_visual_probe(
         producer,
         dispatcher_queue,
     }))
+}
+
+#[cfg(target_os = "windows")]
+fn validate_platform_browser_controls(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let first_ready = "browser-test:ready:first";
+    let second_ready = "browser-test:ready:second";
+
+    drain_web_messages(producer);
+    producer.navigate_to_string(
+        &browser_test_html("first"),
+        std::time::Duration::from_secs(5),
+    )?;
+    wait_for_web_message(producer, first_ready, std::time::Duration::from_secs(3))?;
+    drain_web_messages(producer);
+
+    producer.navigate_to_string(
+        &browser_test_html("second"),
+        std::time::Duration::from_secs(5),
+    )?;
+    wait_for_web_message(producer, second_ready, std::time::Duration::from_secs(3))?;
+    wait_for_title(
+        producer,
+        "Scrying Browser Test second",
+        std::time::Duration::from_secs(2),
+    )?;
+    drain_web_messages(producer);
+
+    if !producer.can_go_back() {
+        return Err("browser-test: WebView2 did not report a back-history entry".into());
+    }
+    if producer.can_go_forward() {
+        return Err(
+            "browser-test: WebView2 unexpectedly reported forward history before back".into(),
+        );
+    }
+
+    if !producer.go_back()? {
+        return Err("browser-test: go_back returned false despite can_go_back".into());
+    }
+    wait_for_web_message(producer, first_ready, std::time::Duration::from_secs(3))?;
+    drain_web_messages(producer);
+
+    if !producer.can_go_forward() {
+        return Err("browser-test: WebView2 did not report a forward-history entry".into());
+    }
+    if !producer.go_forward()? {
+        return Err("browser-test: go_forward returned false despite can_go_forward".into());
+    }
+    wait_for_web_message(producer, second_ready, std::time::Duration::from_secs(3))?;
+    drain_web_messages(producer);
+
+    producer.reload()?;
+    wait_for_web_message(producer, second_ready, std::time::Duration::from_secs(3))?;
+    producer.stop()?;
+
+    producer.apply_settings(&WebSurfaceSettings {
+        zoom_factor: Some(1.05),
+        user_agent: Some("scrying-demo-win-browser-test/1.0".into()),
+        devtools_enabled: Some(false),
+        javascript_enabled: Some(true),
+        default_context_menus_enabled: Some(false),
+        builtin_accelerator_keys_enabled: Some(false),
+        inactive_scheduling_policy: None,
+    })?;
+    producer.set_visible(false)?;
+    pump_windows_messages_for(std::time::Duration::from_millis(100));
+    producer.set_visible(true)?;
+    producer.apply_settings(&WebSurfaceSettings {
+        zoom_factor: Some(1.0),
+        user_agent: None,
+        devtools_enabled: Some(true),
+        javascript_enabled: Some(true),
+        default_context_menus_enabled: Some(true),
+        builtin_accelerator_keys_enabled: Some(true),
+        inactive_scheduling_policy: None,
+    })?;
+
+    println!(
+        "demo-win: browser-test: PASS - history, reload/stop, title, settings, and visibility controls verified"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn browser_test_html(label: &str) -> String {
+    format!(
+        r#"<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Scrying Browser Test {label}</title>
+    <style>
+        html, body {{
+            margin: 0;
+            width: 100%;
+            min-height: 100%;
+            background: #11242a;
+            color: #f6ead0;
+            font-family: system-ui, sans-serif;
+        }}
+        body {{
+            box-sizing: border-box;
+            padding: 18px;
+        }}
+        main {{
+            display: grid;
+            gap: 8px;
+        }}
+    </style>
+</head>
+<body>
+    <main>
+        <h1>Browser Test {label}</h1>
+        <p>WebView2 history and lifecycle probe.</p>
+    </main>
+    <script>
+        const post = value => window.chrome.webview.postMessage(value);
+        window.addEventListener("pageshow", () => post("browser-test:ready:{label}"));
+    </script>
+</body>
+</html>"#
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn drain_web_messages(producer: &mut scrying::PlatformWebSurfaceProducer) {
+    while producer.poll_web_message().is_some() {}
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_title(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    expected: &str,
+    timeout: std::time::Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last_event = String::new();
+    while std::time::Instant::now() < deadline {
+        pump_windows_messages_for(std::time::Duration::from_millis(16));
+        while let Some(event) = producer.poll_navigation_event() {
+            match event {
+                NavigationEvent::TitleChanged { title } if title == expected => return Ok(()),
+                other => last_event = format!("{other:?}"),
+            }
+        }
+    }
+
+    Err(
+        format!("timed out waiting for title {expected:?}; last navigation event {last_event:?}")
+            .into(),
+    )
 }
 
 #[cfg(target_os = "windows")]
