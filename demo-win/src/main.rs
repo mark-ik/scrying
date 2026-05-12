@@ -28,6 +28,7 @@ struct Cli {
     scripted: bool,
     cookie_test: bool,
     browser_test: bool,
+    profile_test: bool,
 }
 
 impl Cli {
@@ -39,6 +40,7 @@ impl Cli {
                 "--scripted" => cli.scripted = true,
                 "--cookie-test" => cli.cookie_test = true,
                 "--browser-test" => cli.browser_test = true,
+                "--profile-test" => cli.profile_test = true,
                 _ => eprintln!("demo-win: unknown arg: {arg}"),
             }
         }
@@ -46,7 +48,11 @@ impl Cli {
     }
 
     fn one_shot(&self) -> bool {
-        self.probe_only || self.scripted || self.cookie_test || self.browser_test
+        self.probe_only
+            || self.scripted
+            || self.cookie_test
+            || self.browser_test
+            || self.profile_test
     }
 }
 
@@ -710,7 +716,7 @@ fn run_platform_composition_visual_probe(
             COMPOSITION_PROBE_WIDTH as u32,
             COMPOSITION_PROBE_HEIGHT as u32,
         ),
-        user_data_dir,
+        user_data_dir.clone(),
     )
     .with_offset(COMPOSITION_PROBE_X, COMPOSITION_PROBE_Y)
     .with_diagnostic_backdrop((27, 86, 96));
@@ -734,6 +740,10 @@ fn run_platform_composition_visual_probe(
     }
     if cli.browser_test {
         validate_platform_browser_controls(&mut producer)?;
+    }
+    if cli.profile_test {
+        validate_platform_profile_store(producer, parent_hwnd, user_data_dir)?;
+        return Ok(None);
     }
     if keyboard_validate_enabled() {
         validate_platform_keyboard_smoke(&mut producer)?;
@@ -782,6 +792,114 @@ fn run_platform_composition_visual_probe(
         producer,
         dispatcher_queue,
     }))
+}
+
+#[cfg(target_os = "windows")]
+fn validate_platform_profile_store(
+    mut producer: scrying::PlatformWebSurfaceProducer,
+    parent_hwnd: *mut std::ffi::c_void,
+    user_data_dir: std::path::PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cookie_name = format!("demo_win_profile_cookie_{}", std::process::id());
+    let cookie = Cookie {
+        name: cookie_name.clone(),
+        value: "shared-profile".into(),
+        domain: "example.com".into(),
+        path: "/".into(),
+        expires_at: Some(4_102_444_800.0),
+        is_secure: false,
+        is_http_only: false,
+    };
+
+    let _ = producer.delete_cookie(&cookie.name, &cookie.domain, &cookie.path);
+    producer.set_cookie(&cookie)?;
+    pump_windows_messages_for(std::time::Duration::from_millis(250));
+
+    let primary_cookies = request_cookies(&mut producer, std::time::Duration::from_secs(3))?;
+    require_cookie(
+        &primary_cookies,
+        &cookie,
+        "profile-test: primary producer did not report the cookie after set_cookie",
+    )?;
+    drop(producer);
+    pump_windows_messages_for(std::time::Duration::from_millis(250));
+
+    let secondary_config = scrying::PlatformWebSurfaceConfig::new(
+        winit::dpi::PhysicalSize::new(
+            COMPOSITION_PROBE_WIDTH as u32,
+            COMPOSITION_PROBE_HEIGHT as u32,
+        ),
+        user_data_dir,
+    )
+    .with_offset(
+        COMPOSITION_PROBE_X + COMPOSITION_PROBE_WIDTH + 24.0,
+        COMPOSITION_PROBE_Y,
+    )
+    .with_diagnostic_backdrop((67, 61, 89));
+    let mut secondary =
+        unsafe { scrying::PlatformWebSurfaceProducer::new(parent_hwnd, secondary_config)? };
+    secondary.navigate_to_string(
+        &browser_test_html("profile-secondary"),
+        std::time::Duration::from_secs(5),
+    )?;
+
+    let secondary_cookies = request_cookies(&mut secondary, std::time::Duration::from_secs(3))?;
+    require_cookie(
+        &secondary_cookies,
+        &cookie,
+        "profile-test: secondary producer with the same user_data_dir did not see the cookie",
+    )?;
+
+    secondary.delete_cookie(&cookie.name, &cookie.domain, &cookie.path)?;
+    pump_windows_messages_for(std::time::Duration::from_millis(250));
+    let secondary_after_delete =
+        request_cookies(&mut secondary, std::time::Duration::from_secs(3))?;
+    if contains_cookie(&secondary_after_delete, &cookie) {
+        return Err(format!(
+            "profile-test: secondary producer still saw {:?} after delete_cookie",
+            cookie.name
+        )
+        .into());
+    }
+
+    println!(
+        "demo-win: profile-test: PASS - persistent cookie store survived producer recreation with the same user_data_dir"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn require_cookie(
+    cookies: &[Cookie],
+    expected: &Cookie,
+    context: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let observed = cookies
+        .iter()
+        .find(|candidate| cookie_identity_matches(candidate, expected))
+        .ok_or_else(|| format!("{context} ({} cookies observed)", cookies.len()))?;
+    if observed.value != expected.value {
+        return Err(format!(
+            "{context}: cookie value mismatch: expected {:?}, got {:?}",
+            expected.value, observed.value
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn contains_cookie(cookies: &[Cookie], expected: &Cookie) -> bool {
+    cookies
+        .iter()
+        .any(|candidate| cookie_identity_matches(candidate, expected))
+}
+
+#[cfg(target_os = "windows")]
+fn cookie_identity_matches(candidate: &Cookie, expected: &Cookie) -> bool {
+    candidate.name == expected.name
+        && candidate.domain.trim_start_matches('.') == expected.domain
+        && candidate.path == expected.path
 }
 
 #[cfg(target_os = "windows")]
@@ -959,11 +1077,7 @@ fn validate_platform_cookie_store(
     let cookies = request_cookies(producer, std::time::Duration::from_secs(3))?;
     let observed = cookies
         .iter()
-        .find(|candidate| {
-            candidate.name == cookie.name
-                && candidate.domain.trim_start_matches('.') == cookie.domain
-                && candidate.path == cookie.path
-        })
+        .find(|candidate| cookie_identity_matches(candidate, &cookie))
         .ok_or_else(|| {
             format!(
                 "cookie-test: cookie {:?} was not visible after set_cookie ({} cookies observed)",
@@ -986,11 +1100,7 @@ fn validate_platform_cookie_store(
     producer.delete_cookie(&cookie.name, &cookie.domain, &cookie.path)?;
     pump_windows_messages_for(std::time::Duration::from_millis(250));
     let cookies_after_delete = request_cookies(producer, std::time::Duration::from_secs(3))?;
-    let still_present = cookies_after_delete.iter().any(|candidate| {
-        candidate.name == cookie.name
-            && candidate.domain.trim_start_matches('.') == cookie.domain
-            && candidate.path == cookie.path
-    });
+    let still_present = contains_cookie(&cookies_after_delete, &cookie);
     if still_present {
         return Err(format!(
             "cookie-test: cookie {:?} was still visible after delete_cookie",

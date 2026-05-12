@@ -120,7 +120,10 @@ yet.
   unaudited or need a design call. Runtime assertions should land in
   [`demo-win`](../demo-win/) rather than the cross-platform selector
   smoke; it now has `--scripted`, `--browser-test`, and
-  `--cookie-test` one-shot modes for the shipped WebView2 slices.
+  `--cookie-test` / `--profile-test` one-shot modes for the shipped
+  WebView2 slices. The Windows profile smoke recreates the producer
+  because one CompositionController target can be attached to a given
+  HWND at a time.
 - **Linux** rows are largely "?" because the WPE producer is
   unstarted (out-of-band slice; see roadmap in
   [`2026-05-07_platform_ceilings.md`](2026-05-07_platform_ceilings.md)).

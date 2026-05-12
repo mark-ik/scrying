@@ -89,6 +89,8 @@ not expose a native cookie-change event. Runtime proof now lives in
 keyboard dispatch API acceptance, `--browser-test` covers history,
 reload / stop, title, settings, and visibility controls, and
 `--cookie-test` covers cookie set / read / delete round-trip.
+`--profile-test` covers persistent cookie-store survival across
+producer recreation with the same WebView2 `user_data_dir`.
 
 **Windows remaining-work lane:**
 
