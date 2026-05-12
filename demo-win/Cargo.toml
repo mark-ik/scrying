@@ -1,19 +1,18 @@
 [package]
-name = "demo-wry-winit"
+name = "demo-win"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Minimal winit + wgpu host probe for scrying"
+description = "Windows WebView2 composition runtime probe for scrying"
 
 [dependencies]
 pollster = "0.4.0"
-raw-window-handle = "0.6"
-webview2-com = "0.39.1"
 wgpu = { version = "29.0.1", features = ["metal"] }
 winit = "0.30.12"
-windows-numerics = "0.3"
-wry = "0.55.0"
 scrying = { path = "../scrying" }
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"

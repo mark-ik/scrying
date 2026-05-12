@@ -27,8 +27,8 @@ use objc2_foundation::NSKeyValueObservingOptions;
 
 use crate::native_frame;
 use crate::{
-    CursorShape, SystemWebviewBackend, WebSurfaceMode, WryWebSurfaceCapabilities,
-    WryWebSurfaceError,
+    CursorShape, SystemWebviewBackend, WebSurfaceMode, WebSurfaceCapabilities,
+    WebSurfaceError,
 };
 
 use super::capture::{CaptureState, PendingCaptureSlot};
@@ -62,9 +62,9 @@ use super::ui_delegate::{PermissionHandlerFn, UiDelegate};
 /// Slice A: real WKWebView lifecycle, no GPU capture (output is
 /// `OverlayOnly`). Slice B will wire ScreenCaptureKit → IOSurface →
 /// `MetalTextureRef` and flip `acquire_frame` to
-/// `WryWebSurfaceFrame::Native(...)`.
+/// `WebSurfaceFrame::Native(...)`.
 pub struct WkWebViewProducer {
-    pub(super) capabilities: WryWebSurfaceCapabilities,
+    pub(super) capabilities: WebSurfaceCapabilities,
     pub(super) webview: Retained<WKWebView>,
     /// The host's parent `NSView`. Retained so the WKWebView's
     /// superview cannot vanish from under us; the caller is also
@@ -228,13 +228,13 @@ impl WkWebViewProducer {
     /// # Safety
     ///
     /// - Must be called on the main thread (AppKit / WebKit are main-
-    ///   thread-only). Returns [`WryWebSurfaceError::Platform`] if not.
+    ///   thread-only). Returns [`WebSurfaceError::Platform`] if not.
     /// - `parent_view` must be a valid `NSView *` that outlives the
     ///   producer.
     pub unsafe fn new(
         parent_view: *mut std::ffi::c_void,
         config: WkWebViewProducerConfig,
-    ) -> Result<Self, WryWebSurfaceError> {
+    ) -> Result<Self, WebSurfaceError> {
         // SAFETY: parent_view contract delegated to the public
         // `new_with_url_schemes` form below.
         unsafe { Self::new_with_url_schemes(parent_view, config, Vec::new()) }
@@ -260,19 +260,19 @@ impl WkWebViewProducer {
         parent_view: *mut std::ffi::c_void,
         config: WkWebViewProducerConfig,
         schemes: Vec<(String, UrlSchemeHandlerFn)>,
-    ) -> Result<Self, WryWebSurfaceError> {
-        let mtm = MainThreadMarker::new().ok_or(WryWebSurfaceError::Platform(
+    ) -> Result<Self, WebSurfaceError> {
+        let mtm = MainThreadMarker::new().ok_or(WebSurfaceError::Platform(
             "WkWebViewProducer::new must be called on the main thread".into(),
         ))?;
 
         let parent_view: Retained<NSView> = {
             let ptr = NonNull::new(parent_view as *mut NSView).ok_or(
-                WryWebSurfaceError::Platform("parent_view pointer was null".into()),
+                WebSurfaceError::Platform("parent_view pointer was null".into()),
             )?;
             // SAFETY: caller-asserted: parent_view is a valid NSView*
             // that outlives this call.
             unsafe { Retained::retain(ptr.as_ptr()) }.ok_or(
-                WryWebSurfaceError::Platform("failed to retain parent NSView".into()),
+                WebSurfaceError::Platform("failed to retain parent NSView".into()),
             )?
         };
 
@@ -543,7 +543,7 @@ impl WkWebViewProducer {
         };
 
         Ok(Self {
-            capabilities: WryWebSurfaceCapabilities {
+            capabilities: WebSurfaceCapabilities {
                 backend: SystemWebviewBackend::WkWebView,
                 // The capture pipeline isn't wired yet, so we still
                 // advertise NativeChildOverlay as the preferred mode.
@@ -627,7 +627,7 @@ impl WkWebViewProducer {
     pub(super) fn resize_internal(
         &mut self,
         size: PhysicalSize<u32>,
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         let scale = self.current_backing_scale();
         let ns_size = NSSize::new(
             f64::from(size.width) / scale,
@@ -716,11 +716,11 @@ impl WkWebViewProducer {
     /// Clear the navigation-result slot before kicking off a new load.
     /// The `events` queue is *not* cleared — consumers may still want
     /// to drain pending events from a prior navigation.
-    pub(super) fn reset_nav_result(&self) -> Result<(), WryWebSurfaceError> {
+    pub(super) fn reset_nav_result(&self) -> Result<(), WebSurfaceError> {
         let mut state = self
             .nav_state
             .lock()
-            .map_err(|_| WryWebSurfaceError::Platform("nav_state lock poisoned".into()))?;
+            .map_err(|_| WebSurfaceError::Platform("nav_state lock poisoned".into()))?;
         state.result = None;
         Ok(())
     }
@@ -732,15 +732,15 @@ impl WkWebViewProducer {
         &self,
         timeout: std::time::Duration,
         op_name: &'static str,
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         super::helpers::pump_until(timeout, || {
             let state = self.nav_state.lock().ok()?;
             state.result.clone()
         })
         .map_err(|_| {
-            WryWebSurfaceError::Platform(format!("{op_name} timed out after {timeout:?}"))
+            WebSurfaceError::Platform(format!("{op_name} timed out after {timeout:?}"))
         })?
-        .map_err(WryWebSurfaceError::Platform)
+        .map_err(WebSurfaceError::Platform)
     }
 
     /// Used by the `navigate_to_string` trait method to refer to a

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use scrying::{
     HostWgpuContext, ImportOptions, ImportedTexture, NativeFrame, TextureImporter,
-    WgpuTextureImporter, WryWebSurfaceFrame,
+    WgpuTextureImporter, WebSurfaceFrame,
 };
 use scrying::WkWebViewProducer;
 use winit::window::Window;
@@ -344,7 +344,7 @@ impl WgpuRender {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let frame_result = producer.try_acquire_frame();
         let new_imported = match frame_result {
-            Ok(Some(WryWebSurfaceFrame::Native(NativeFrame::MetalTextureRef(frame)))) => {
+            Ok(Some(WebSurfaceFrame::Native(NativeFrame::MetalTextureRef(frame)))) => {
                 let native = NativeFrame::MetalTextureRef(frame);
                 match self.importer.import_frame(&native, &ImportOptions::default()) {
                     Ok(imported) => Some(imported),

@@ -1,6 +1,6 @@
 # Platform ceilings and parity roadmap
 
-**Status:** living document. Last refreshed 2026-05-07 against scrying 0.2.0.
+**Status:** living document. Last refreshed 2026-05-11 against post-0.4.x source.
 
 This records, for each of the three target platforms, the **upper bound of
 what the platform's native webview can deliver to a host wgpu pipeline**,
@@ -23,8 +23,8 @@ The intent is not "implement everything everywhere", it's:
 
 **Capture path (what we ship):** ICoreWebView2CompositionController →
 Windows.UI.Composition.Visual → Windows.Graphics.Capture →
-shared D3D11 keyed-mutex NT-handle texture → wgpu D3D12 `OpenSharedHandle`
-import.
+shared D3D11 NT-handle texture → wgpu D3D12 `OpenSharedHandle`
+import, with optional shared D3D12 fence sync.
 
 **Ceiling:**
 
@@ -37,37 +37,74 @@ import.
 - **Pixel quality**: post-DComp composited output. Pixel-exact under
   the WebView's own rasterization. Cannot get pre-composition raw
   layer textures.
-- **GPU sync** (today): keyed-mutex on the producer side, transition-
-  barrier flush on the consumer side (wgpu D3D12). Empirically stable
-  but the consumer-side cache flush rides on driver behavior, not
-  contract. **Upgrade target: explicit `D3D12_FENCE_FLAG_SHARED`
-  fence** — see "GPU synchronization upgrades" below.
+- **GPU sync** (today): explicit `D3D12_FENCE_FLAG_SHARED` sync is
+  wired when the host passes a fence handle through
+  `WebView2CompositionConfig::with_fence_shared_handle`. The older
+  keyed-mutex / transition-barrier path remains the fallback when no
+  fence is supplied.
 - **Input**: full mouse + scroll (`SendMouseInput`), full touch + pen
-  (`SendPointerInput`), full focus management (`MoveFocus` +
-  `add_GotFocus` / `add_LostFocus`), drag-and-drop forwarding
+  (`SendPointerInput`), focus entry (`MoveFocus`) with focus-event
+  hooks available at the WebView2 ceiling, drag-and-drop forwarding
   (`DragEnter`/`DragOver`/`DragLeave`/`Drop`), cursor-change reporting
-  (`add_CursorChanged`). Keyboard requires a window-subclass message
-  forwarder — fully solvable, fiddly with winit. **IME** for non-Latin
-  input is the genuine sharp edge; achievable but a separate work
-  item.
+  (`add_CursorChanged`), trait-level `send_keyboard_input`, and a raw
+  Win32 `WM_KEY*` / `WM_CHAR` / `WM_DEADCHAR` / `WM_IME*` forwarding
+  helper for hosts that can tap the parent HWND message stream. **IME**
+  for non-Latin input still needs real CJK round-trip validation.
 - **Navigation / lifecycle**: complete. URL + HTML, back/forward/
   stop/reload, NavigationStarting/SourceChanged/NavigationCompleted/
   DocumentTitleChanged events, ProcessFailed for crash recovery.
-- **JS interop**: full (`PostWebMessageAsString` + `WebMessageReceived`
-  + `AddScriptToExecuteOnDocumentCreated`).
-- **Settings / environment**: zoom, user agent, IsVisible (throttling
-  control), profile + cookie store (`WKWebsiteDataStore` analog),
-  custom URL schemes via `WebResourceRequested`, downloads,
-  permissions, new-window interception, DevTools, print + print-to-PDF.
+- **JS interop**: full (`PostWebMessageAsString`, `WebMessageReceived`,
+  and `AddScriptToExecuteOnDocumentCreated`).
+- **Settings / environment ceiling**: zoom, user agent, IsVisible
+  (Page Visibility / throttling control), profile + cookie store
+  (`WKWebsiteDataStore` analog), custom URL schemes via
+  `WebResourceRequested`, downloads, auth / permissions, new-window
+  interception, DevTools, print + print-to-PDF.
 - **Snapshots**: `CapturePreview` (PNG/JPEG) — already wired in 0.2.0.
 - **Out of reach without MSFT API additions**: pre-composition
   extraction, sub-iframe capture, capture while visual is hidden
   from the composition tree, sub-frame latency.
 
-**Current scrying state (0.2.0):** frame production complete. Embeddable
-surface (mouse + focus + nav + JS messaging + snapshots) shipped.
-Keyboard, IME, touch/pen, drag-and-drop, cursor-change, settings, profile,
-custom schemes, downloads, devtools, back/forward — not yet implemented.
+**Current scrying state (post-0.4.x):** frame production complete.
+Embeddable surface shipped for imported GPU frames, resize / offset,
+URL + HTML navigation, mouse + scroll, pointer / touch / pen, focus,
+navigation + title events, JS messaging, PNG snapshots, history controls,
+settings, DevTools, per-profile user-data directory, OLE drag-in helpers,
+cursor-change reporting, keyboard forwarding, and optional explicit D3D12
+fence sync.
+
+The remaining Windows work is no longer "make the WebView2 producer
+real"; it is a browser-shape completion lane. The code still lacks a
+native `Set-Cookie` response-header observation, validated CJK IME
+round-trips, tab-state serialize / restore, auth and
+permission handlers, downloads, find / PDF / print, new-window /
+process-failure events, context-menu and drop observability events,
+media-capture observation, content rules / spellcheck controls, capture
+metrics, DPI-change handling, Display P3 / HDR color pipeline, and hard
+inactive-tab throttling. `set_visible` and WebView2 cookie CRUD are now
+wired; cookie-change callbacks are best-effort for host mutations and
+page-side `document.cookie` writes because `webview2-com` 0.39.1 does
+not expose a native cookie-change event.
+
+**Windows remaining-work lane:**
+
+| Slice | Scope | Cost | Done condition |
+| --- | --- | --- | --- |
+| W1 — input + inactive tab baseline | Validate the wired `send_keyboard_input` path plus the parent-HWND `forward_keyboard_message` helper for `WM_KEY*`, `WM_CHAR`, dead-key, and `WM_IME*` traffic; extend cookie observation if / when WebView2 exposes native `Set-Cookie` response-header pulses. `set_visible`, cookie request / set / delete, and best-effort change callbacks are wired. | medium | Keyboard text entry and CJK composition round-trip in a focused composition WebView; hidden tabs report Page Visibility and throttle; host can enumerate, mutate, and observe profile cookies. |
+| W2 — session and shell controls | Best-effort tab-state serialize / restore; new-window and process-failure events; auth and permission handler closures; downloads with ids, destinations, cancel / resume, and download-channel auth source. | medium | A tabbed shell can restore useful navigation / scroll state, own popup creation and crash recovery, prompt for credentials / permissions, and manage downloads without reaching around scrying. |
+| W3 — browser conveniences | Find-in-page, request-PDF, interactive print, context-menu interception, drop observability event, media-capture lifecycle event, content-rule list, spellcheck override. | small-to-medium | Windows matches the macOS browser-class API rows that are visible to app chrome. |
+| W4 — capture polish | CaptureMetrics atomics, resize dim-match / stale-frame guard, DPI-change observer, Display P3 / HDR16f pipeline, hard inactive scheduling policy. | medium | Capture behavior remains diagnosable and color / DPI correct under monitor moves and advanced displays; hard throttling is explicitly documented as public WebView2 API or out of scope. |
+
+Keyboard-forwarder shape for the remaining W1 validation work: keep
+`WebSurfaceProducer::send_keyboard_input` as the portable host API for
+basic key/text events. Windows also exposes
+`WebView2CompositionProducer::forward_keyboard_message` so a host-side
+subclass / message filter can post the real `WM_KEYDOWN`, `WM_KEYUP`,
+`WM_CHAR`, `WM_DEADCHAR`, and `WM_IME_*` composition messages that arrive
+while the WebView has focus; this is the path for preserving native IME
+payloads instead of trying to synthesize text in JS. Done-condition tests
+should cover plain ASCII, accelerator-modified keys, dead keys, and at
+least one CJK IME composition round-trip.
 
 ---
 
@@ -153,7 +190,7 @@ where `texture_from_raw` now takes
   `try_acquire_frame` then takes the latest `CMSampleBuffer`,
   extracts `IOSurfaceRef` via `CVPixelBufferGetIOSurface`, wraps it
   as `MTLTexture` on the host device, and emits
-  `WryWebSurfaceFrame::Native(NativeFrame::MetalTextureRef(...))`.
+  `WebSurfaceFrame::Native(NativeFrame::MetalTextureRef(...))`.
   A small `SendCFRetained<T>` newtype wraps the dispatch-queue →
   main-thread sample handoff. `acquire_frame` is blocking — pumps
   the run loop until a sample arrives or `frame_timeout` elapses.
@@ -189,7 +226,7 @@ where `texture_from_raw` now takes
   loop until the NSImage arrives or `config.frame_timeout` elapses,
   and decodes the `NSImage::TIFFRepresentation` through the `image`
   crate's TIFF decoder into an `RgbaImage` returned as
-  `WryWebSurfaceFrame::CpuRgba`. Independent of `start_capture` —
+  `WebSurfaceFrame::CpuRgba`. Independent of `start_capture` —
   works as a fallback diagnostic path, useful for thumbnails or for
   verifying the WebView is rendering before standing up the SCK
   pipeline.
@@ -235,7 +272,7 @@ where `texture_from_raw` now takes
   without SPI. **Overlay mode** is automatic — AppKit's drag manager
   delivers drags to the WKWebView through the responder chain
   without producer involvement, so the host doesn't need to forward.
-  Producer returns `WryWebSurfaceError::Unsupported` with a message
+  Producer returns `WebSurfaceError::Unsupported` with a message
   that explains both branches.
 - **Slice L — per-profile `WKWebsiteDataStore`.** When
   `config.data_dir` is non-empty, the producer derives a stable
@@ -373,13 +410,16 @@ CPU upload.
 
 **Strategic position:** WPE is the load-bearing path. WebKitGTK fallback
 matters only for distributions where WPE isn't readily packaged.
-*Wry forces the WebKitGTK path*, which is one of the reasons scrying
-the library doesn't depend on wry.
+Wrapper-driven GTK embedding tends to force the WebKitGTK path, which is
+one of the reasons scrying keeps WPE as the primary Linux target.
 
-**Current scrying state (0.2.0):** [`webkitgtk_producer`](../scrying/src/webkitgtk_producer.rs)
-is a planning skeleton named for the WebKitGTK fallback. The WPE
-producer doesn't exist yet (likely lives in `wpe_producer.rs` once
-implemented). All Tier-1 trait methods return `Unsupported`.
+**Current scrying state:** [`wpe_producer`](../scrying/src/wpe_producer.rs)
+is now the selected Linux primary scaffold and carries the DMABUF
+native-frame contract. [`webkitgtk_producer`](../scrying/src/webkitgtk_producer.rs)
+remains the fallback planning skeleton behind the `webkitgtk-fallback`
+feature. Linux `WebSurfaceCapabilities` still reports unsupported
+capture until the WPE FFI callback bridge and Vulkan DMABUF importer
+are wired and checked on Linux.
 
 ---
 
@@ -394,26 +434,26 @@ every row marked `—` is structurally not on that platform.
 | Imported GPU texture per frame | ✅ 0.1.0 | ✅ 0.4.0 | ? | ? (degraded) |
 | Resize / offset | ✅ | ✅ 0.4.0 | ? | ? |
 | Navigate (URL + HTML) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
-| Reload / Stop / Back / Forward | ? | ? | ? | ? |
+| Reload / Stop / Back / Forward | ✅ | ✅ | ? | ? |
 | Mouse forwarding (buttons + move + leave) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | Scroll wheel forwarding | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
-| Touch + pen forwarding | ? | ? | ? | ? |
-| Keyboard forwarding (basic) | ? | ✅ 0.4.0 | ? | ? |
-| IME (CJK / non-Latin) | ? | ✅ 0.4.0 (via NSTextInputClient) | ? | ? |
-| Drag-and-drop into webview | ? | — capture (SPI-blocked) / ✅ overlay (auto) | ? | ? |
+| Touch + pen forwarding | ✅ | ✅ 0.4.x (mouse-shaped JS pointer events) | ? | ? |
+| Keyboard forwarding (basic) | ✅ | ✅ 0.4.0 | ? | ? |
+| IME (CJK / non-Latin) | ⏳ (raw `WM_IME*` forwarder wired; validation pending) | ✅ 0.4.0 (via NSTextInputClient) | ? | ? |
+| Drag-and-drop into webview | ✅ (OLE `IDataObject` helpers) | — capture (SPI-blocked) / ✅ overlay (auto) | ? | ? |
 | Focus management | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
-| Cursor-change reporting | ? | ✅ 0.4.0 | ? | ? |
+| Cursor-change reporting | ✅ | ✅ 0.4.0 | ? | ? |
 | Navigation events (start/source/complete) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | Title-changed event | ✅ 0.2.0 | ✅ 0.4.0 (KVO) | ? | ? |
 | JS messaging (bidirectional) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | PNG / CPU snapshot | ✅ 0.2.0 | ✅ 0.4.0 (CPU RGBA) | ? (`get_snapshot`) | ? |
-| Settings (zoom, UA, JS, devtools) | ? | ? | ? | ? |
-| Profile / cookies / storage | ? | ✅ 0.4.0 (per-profile UUID) | ? | ? |
-| Custom URL schemes | ? | ? | ? | ? |
-| Downloads | ? | ? | ? | ? |
-| New-window / popup intercept | ? | ? | ? | ? |
-| Process-failure recovery | ? | ? | ? | ? |
-| **Cross-API GPU sync** | barrier (empirical) | IOSurface (implicit) | VkSemaphore (explicit) | wl_buffer (implicit) |
+| Settings (zoom, UA, JS, devtools) | ✅ | ✅ | ? | ? |
+| Profile / cookie API / storage | ✅ | ✅ 0.4.0 (per-profile UUID + cookie API) | ? | ? |
+| Custom URL schemes | ⏳ | ✅ | ? | ? |
+| Downloads | ⏳ | ✅ | ? | ? |
+| New-window / popup intercept | ⏳ | ✅ | ? | ? |
+| Process-failure recovery | ⏳ | ✅ | ? | ? |
+| **Cross-API GPU sync** | explicit D3D12 fence when supplied; barrier fallback | MTLSharedEvent signal + producer wait | VkSemaphore (explicit) | wl_buffer (implicit) |
 | Pre-composition extraction | — | — | ✅ (only platform) | — |
 | Sub-iframe / sub-frame capture | — | — | — | — |
 
@@ -427,16 +467,16 @@ possible without upstream API additions". Everything else is just work.
 The cross-API sync story is the only place where the platforms
 differ in how *contractual* the producer→consumer ordering is today.
 
-### Windows — explicit D3D12 fence (the "fence" work)
+### Windows — explicit D3D12 fence (shipped, fallback still present)
 
-Today scrying uses keyed-mutex on the producer side and a throwaway
-`copy_texture_to_buffer` on the consumer side to force a
+The original path used keyed-mutex on the producer side and a
+throwaway `copy_texture_to_buffer` on the consumer side to force a
 `SHADER_RESOURCE → COPY_SRC → SHADER_RESOURCE` transition barrier,
-which on D3D12 happens to flush shader caches that would otherwise
-hold a stale view of the externally-written shared texture. Works
-empirically; not a contract.
+which on D3D12 happened to flush shader caches that would otherwise
+hold a stale view of the externally-written shared texture. That path
+remains available as a fallback.
 
-The contractual upgrade is a `D3D12_FENCE_FLAG_SHARED` fence:
+The contractual path is now a `D3D12_FENCE_FLAG_SHARED` fence:
 
 1. Create the fence on the wgpu D3D12 device, export an NT handle
    via `ID3D12Device::CreateSharedHandle`.
@@ -448,16 +488,12 @@ The contractual upgrade is a `D3D12_FENCE_FLAG_SHARED` fence:
    render submit.
 5. Bump `n` per frame.
 
-Cost: ~150–250 lines crossing the wgpu-hal escape hatch
-(`device.as_hal::<Dx12>()` for the queue), `ID3D11Device5` /
-`ID3D11DeviceContext4` plumbing, fence-value tracking, and a
-pre-submit injection point (probably a tiny no-op command buffer that
-runs `Wait` before the real submit).
-
-Worth doing when (a) scrying ships beyond the development box and a
-driver gives someone stale frames, (b) downstream interop expands
-beyond WebView2 capture, or (c) the code wants to be canonically
-correct rather than empirically correct.
+The host creates the synchronizer, passes the shared handle into
+`WebView2CompositionConfig::with_fence_shared_handle`, and imports
+frames carrying `SyncMechanism::ExplicitFence` plus a monotonic
+`fence_value`. If no handle is supplied, the producer uses the older
+fallback sync path and the consumer can still force a fresh resource
+with `invalidate_persistent_dest` if a driver ever shows stale pixels.
 
 ### macOS — MTLSharedEvent (real producer signal + producer-side wait)
 
@@ -527,10 +563,13 @@ WPE producer.
 
 ---
 
-## Roadmap to parity
+## Historical roadmap to parity
 
-Three releases get scrying to **the parity baseline** across all three
-platforms. Naming aspirational, not committed.
+The version-named roadmap below is historical context for the original
+cross-platform push. macOS has advanced past most of it, Windows now has
+the current W1–W4 lane above, and Linux still needs the WPE producer
+scaffold. Treat the release labels as old planning names, not the
+current schedule.
 
 ### 0.3.0 — input completeness
 
@@ -544,7 +583,7 @@ without going around it for input.
 Per-platform: settings (zoom, UA, JS, devtools), reload/back/forward/
 stop, profile + cookies, custom URL schemes, downloads, new-window
 interception, process-failure recovery. Turns scrying into a complete
-"we replace wry on every platform" deliverable.
+standalone system-webview surface deliverable.
 
 ### 0.5.0 — robustness + parity QA
 
@@ -634,7 +673,7 @@ limitations.
   data) as opaque bytes. Verified by
   `demo-mac --interaction-state-test`.
 - ✅ Touch / pen / pointer input —
-  `WryWebSurfaceProducer::send_pointer_input` synthesizes
+  `WebSurfaceProducer::send_pointer_input` synthesizes
   `NSEvent`s through the same path as `send_mouse_input`. WebKit's
   pointer-events JS API observes them as
   `pointerType: "mouse"` (macOS has no public direct-touch
@@ -703,7 +742,7 @@ limitations.
   `CMSampleBuffer`s (every `SCFrameStatus` except `Complete`)
   as "no frame ready" rather than a fatal error.
 - ✅ Capability-probe parity for macOS —
-  `WryWebSurfaceCapabilities::probe` now mirrors the Windows
+  `WebSurfaceCapabilities::probe` now mirrors the Windows
   shape: a Metal-backed host wgpu device gets
   `imported_texture: Supported`,
   `preferred_mode: ImportedTexture`, and
@@ -828,7 +867,7 @@ checklist deliberately omits.
   the public-API path and probably sufficient for most
   consumers.
 - ✅ Page Visibility / occlusion sync —
-  `WryWebSurfaceProducer::set_visible(bool)` cascades through
+  `WebSurfaceProducer::set_visible(bool)` cascades through
   `NSView::setHidden:`. WebKit observes the
   `viewDidHide` / `viewDidUnhide` chain and pushes
   `visibilitychange` events page-side so `document.hidden` /
@@ -1011,19 +1050,15 @@ checklist deliberately omits.
   is `_WK*` SPI today. Likely a long-term Linux-WPE-first
   story (WPE exposes per-view buffers natively).
 
-**Reference implementations.** [`tauri-apps/wry`](https://github.com/tauri-apps/wry)
-is a useful reference even though scrying doesn't depend on it. Its
-[`wkwebview/`](https://github.com/tauri-apps/wry/tree/dev/src/wkwebview)
-producer has solved many of the same Cocoa / objc2 lifetime and
-threading footguns ahead of us — when adding a follow-up slice
-above, skim wry's matching subsystem first; it'll often have a
-ready-made answer to "does this delegate method retain its
-arguments?" or "is `_setX:` actually reachable via objc2-web-kit?"
+**Reference implementations.** Established Cocoa/WebKit hosts remain useful
+references for objc2 lifetime, delegate retain, policy-decision, and
+responder-chain questions when adding follow-up macOS slices.
 
 ---
 
-- **Linux WPE producer scaffold**: WPE + DMABUF + VkSemaphore
-  pipeline alone.
+- **Linux WPE producer completion**: WPE FFI callback bridge,
+  DMABUF + VkSemaphore acquire path, Vulkan importer, plus
+  input/event model.
 - **Linux WebKitGTK fallback**: probably ships only if a downstream
   consumer needs it; otherwise WPE-only is the cleaner story.
 
@@ -1067,9 +1102,10 @@ What lands here as the macOS / Linux producers come online:
 - `IoSurfaceTexture` variant on `NativeFrame` + `import_io_surface_texture`
   (macOS). Optional `MetalSharedEventSynchronizer` if implicit
   IOSurface coherence ever fails.
-- `DmaBufImage` variant on `NativeFrame` + `import_dma_buf_image`
-  (Linux WPE). `VulkanSemaphoreSynchronizer` for the per-frame
-  `VkSemaphore` the WPE DMABUF protocol carries.
+- Complete `DmaBufImage` import in `import_dmabuf_image` (Linux WPE)
+  and replace the placeholder external-semaphore synchronizer with a
+  real Vulkan wait for the per-frame `VkSemaphore` the WPE DMABUF
+  protocol carries.
 
 These are scrying-internal additions. No cross-crate coordination
 required.
@@ -1078,16 +1114,16 @@ required.
 
 ## Open questions
 
-- **Linux producer naming**: rename `webkitgtk_producer` →
-  `wpe_producer` once the WPE backend is the load-bearing one, and
-  introduce `webkitgtk_producer` as a separate fallback module? Or
-  keep both modules and let `WryWebSurfaceCapabilities::probe`
-  pick at runtime?
+- **Linux fallback packaging**: `wpe_producer` is now the primary module
+  and `webkitgtk_producer` remains the fallback skeleton. Decide whether
+  WebKitGTK should stay in-tree behind the `webkitgtk-fallback` feature
+  or move to a separate fallback crate.
 - **Windows runtime distribution**: do we document the WebView2
   Evergreen runtime requirement, or also support fixed-version
   bundling? Affects producer construction (different
   `CoreWebView2EnvironmentOptions`).
-- **Macro-level: does scrying eventually subsume the demo's wry
-  probe?** The demo currently keeps a wry HWND-WebView for sanity
-  checking. Once scrying covers input + lifecycle on every platform,
-  the wry path inside the demo is just legacy ballast.
+- **Macro-level demo split:** `demo-scrying-winit` is the small
+  cross-platform backend-selection smoke. `demo-win` and `demo-mac`
+  are the platform-specific runtime benches where heavier behavioral
+  assertions live. Add `demo-linux-wpe` once the WPE/DMABUF path can
+  be exercised on Linux hardware.

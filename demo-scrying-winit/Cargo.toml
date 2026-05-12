@@ -1,0 +1,12 @@
+[package]
+name = "demo-scrying-winit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal winit + wgpu host probe for scrying"
+
+[dependencies]
+pollster = "0.4.0"
+wgpu = { version = "29.0.1", features = ["metal"] }
+winit = "0.30.12"
+scrying = { path = "../scrying" }

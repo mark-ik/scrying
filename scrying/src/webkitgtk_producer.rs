@@ -1,10 +1,10 @@
-//! Linux WebKitGTK / WPE capture producer (planning skeleton).
+//! Linux WebKitGTK fallback producer (planning skeleton).
 //!
 //! This is the Linux counterpart to
 //! [`crate::webview2_composition_producer::WebView2CompositionProducer`].
-//! Of the three platforms this is the most speculative: Linux has no
-//! ergonomic public API for capturing a `WebKitGTK` widget's compositor
-//! output as a GPU surface today.
+//! WPE is the primary Linux path in [`crate::wpe_producer`]. This module is
+//! kept as a fallback sketch for distributions or hosts that need a GTK widget
+//! surface instead of a WPE view backend.
 //!
 //! ## System packages required
 //!
@@ -33,16 +33,9 @@
 //!    [`WebKitGtkProducer::capture_cpu_snapshot`] will hook up.
 //!
 //! 2. **WPE WebKit + `WPEViewBackendDMABuf` → DMABUF → Vulkan external
-//!    memory → wgpu Vulkan.** `WebKit2GTK` and `WPEWebKit` share a
-//!    backend; `WPEViewBackendDMABuf` publishes the page's compositor
-//!    output as a sequence of DMABUF file descriptors. On the consumer
-//!    side, Vulkan's `VK_KHR_external_memory_fd` +
-//!    `VK_EXT_image_drm_format_modifier` can import them as `VkImage`s,
-//!    and wgpu's Vulkan backend can wrap the `VkImage` via wgpu-hal's
-//!    `Device::texture_from_raw`. **This is the intended
-//!    `ImportedTexture` path** — directly analogous to what we do on
-//!    Windows with NT-handle shared D3D textures, but using DMABUF +
-//!    `VkSemaphore` instead of NT handles + keyed mutex.
+//!    memory → wgpu Vulkan.** This now lives in [`crate::wpe_producer`]
+//!    as the Linux primary scaffold. The WPE FFI callback bridge and
+//!    Vulkan import implementation are still pending.
 //!
 //!    Cost: meaningful. The DMABUF backend is still considered an
 //!    extension API by upstream WebKit and the public Rust bindings
@@ -78,15 +71,15 @@
 //!   no `IOSurface`-style "OS handles cache coherence" fallback on
 //!   Linux/Vulkan — explicit sync via semaphores is the only path.
 //!
-//! ## Producer lifecycle
+//! ## Fallback producer lifecycle
 //!
 //! Identical shape to the Windows / macOS producers:
 //!
 //! - `new(parent_widget, config)` builds a `WebKitWebView` and packs
 //!   it into the parent `GtkContainer`.
 //! - `navigate_to_string(html, timeout)` for inline HTML.
-//! - `start_capture()` brings up the chosen capture path (DMABUF or
-//!   wlroots screencopy).
+//! - `start_capture()` brings up the fallback capture path (CPU snapshot
+//!   or wlroots screencopy).
 //! - `try_acquire_frame()` returns the next imported frame, or `None`.
 //! - `resize(size)` adjusts the `GtkWidget` allocation and capture
 //!   buffer size.
@@ -105,14 +98,9 @@
 //!
 //! ## Status
 //!
-//! This module is a **planning skeleton with Linux deps locked in**.
-//! `cargo build -p scrying` on a Linux box with the
-//! apt packages installed should succeed: the type satisfies
-//! `WryWebSurfaceProducer` via the crate-level default impls
-//! (`Unsupported` for navigate/resize/offset, `OverlayOnly` from
-//! `acquire_frame`). The actual WebKitWebView host, DMABUF capture
-//! backend, and Vulkan external-memory handoff are the next milestones
-//! for the Linux producer slice.
+//! This module is a **fallback planning skeleton**. The GTK/WebKitGTK
+//! dependencies are behind the `webkitgtk-fallback` feature; default Linux
+//! builds select the WPE scaffold instead.
 
 #![cfg(target_os = "linux")]
 
@@ -121,8 +109,8 @@ use std::path::PathBuf;
 use dpi::PhysicalSize;
 
 use crate::{
-    SystemWebviewBackend, WebSurfaceMode, WryWebSurfaceCapabilities, WryWebSurfaceError,
-    WryWebSurfaceFrame, WryWebSurfaceProducer,
+    SystemWebviewBackend, WebSurfaceMode, WebSurfaceCapabilities, WebSurfaceError,
+    WebSurfaceFrame, WebSurfaceProducer,
 };
 
 /// Configuration for `WebKitGtkProducer::new`. Mirrors the Windows /
@@ -162,15 +150,13 @@ impl WebKitGtkProducerConfig {
     }
 }
 
-/// Skeleton WebKitGTK / WPE capture producer.
+/// Skeleton WebKitGTK fallback producer.
 ///
-/// See the module-level docs for the intended capture path (WPE
-/// DMABUF + Vulkan external memory, or wlroots screencopy as a
-/// compositor-restricted fallback). The current implementation is a
-/// stub that satisfies `WryWebSurfaceProducer` via the trait's
-/// default impls.
+/// See the module-level docs for the fallback capture paths. The current
+/// implementation is a stub that satisfies `WebSurfaceProducer` via the
+/// trait's default impls.
 pub struct WebKitGtkProducer {
-    capabilities: WryWebSurfaceCapabilities,
+    capabilities: WebSurfaceCapabilities,
     // Real producer state (`WebKitWebView`, GTK container, DMABUF
     // import context, current `VkImage` + semaphore, etc.) lives here
     // once the Linux implementer fills it in.
@@ -203,9 +189,9 @@ impl WebKitGtkProducer {
     pub unsafe fn new(
         _parent_widget: *mut std::ffi::c_void,
         _config: WebKitGtkProducerConfig,
-    ) -> Result<Self, WryWebSurfaceError> {
+    ) -> Result<Self, WebSurfaceError> {
         Ok(Self {
-            capabilities: WryWebSurfaceCapabilities {
+            capabilities: WebSurfaceCapabilities {
                 backend: SystemWebviewBackend::WebKitGtk,
                 preferred_mode: WebSurfaceMode::NativeChildOverlay,
                 imported_texture: crate::native_frame::CapabilityStatus::Unsupported(
@@ -216,7 +202,7 @@ impl WebKitGtkProducer {
                     crate::native_frame::UnsupportedReason::NativeImportNotYetImplemented,
                 ),
                 supported_frames: Vec::new(),
-                reason: "WebKitGtkProducer is a planning skeleton; the WPE DMABUF / wlroots screencopy paths are not yet wired.",
+                reason: "WebKitGtkProducer is a fallback planning skeleton; CPU snapshot / wlroots screencopy paths are not yet wired.",
             },
         })
     }
@@ -234,53 +220,32 @@ impl WebKitGtkProducer {
     ///    analog of `pump_messages_for`).
     /// 4. `surface.with_data(...)` to get the BGRA32 pixels, swizzle
     ///    to RGBA, return as
-    ///    `WryWebSurfaceFrame::CpuRgba { size, pixels: image::RgbaImage::from_raw(...), generation }`.
-    pub fn capture_cpu_snapshot(
-        &mut self,
-    ) -> Result<WryWebSurfaceFrame, WryWebSurfaceError> {
-        Err(WryWebSurfaceError::Unsupported(
+    ///    `WebSurfaceFrame::CpuRgba { size, pixels: image::RgbaImage::from_raw(...), generation }`.
+    pub fn capture_cpu_snapshot(&mut self) -> Result<WebSurfaceFrame, WebSurfaceError> {
+        Err(WebSurfaceError::Unsupported(
             "WebKitGtkProducer::capture_cpu_snapshot is not implemented yet",
         ))
     }
 
-    /// Non-blocking acquire. Once implemented this returns
-    /// `Some(WryWebSurfaceFrame::Native(NativeFrame::VulkanExternalImage(...)))`
-    /// when the next DMABUF frame has landed; otherwise `None`.
+    /// Non-blocking acquire for fallback capture frames.
     ///
-    /// **Implementation outline (DMABUF path):**
+    /// **Implementation outline (fallback path):**
     ///
-    /// 1. The WPE backend exposes a buffer-export callback. Each
-    ///    callback delivers `(dma_buf_fd, drm_format_modifier,
-    ///    vk_semaphore_fd, width, height)`. Stash the latest in a
-    ///    `Mutex<Option<...>>` (drop older buffers — we only render
-    ///    the most recent).
-    /// 2. `try_acquire_frame` `take()`s the latest. If `None`, return
-    ///    `Ok(None)`.
-    /// 3. Build a `VkImage` via `VkImportMemoryFdInfoKHR` +
-    ///    `VkExternalMemoryImageCreateInfo` +
-    ///    `VkImageDrmFormatModifierExplicitCreateInfoEXT`.
-    /// 4. Wrap as a wgpu texture via wgpu-hal's
-    ///    `vulkan::Device::texture_from_raw`.
-    /// 5. Build a `crate::native_frame::VulkanExternalImage`
-    ///    pointing at the wgpu texture, return as
-    ///    `WryWebSurfaceFrame::Native(NativeFrame::Vulkan(...))`.
-    /// 6. The consumer's render must `vkQueueSubmit` with
-    ///    `waitSemaphores = [imported_acquire_sem]` so the GPU waits
-    ///    for the producer's writes before sampling.
-    pub fn try_acquire_frame(
-        &mut self,
-    ) -> Result<Option<WryWebSurfaceFrame>, WryWebSurfaceError> {
+    /// This will eventually poll either a CPU snapshot request or a
+    /// compositor-level wlroots screencopy request. The DMABUF primary path
+    /// lives in [`crate::wpe_producer::WpeProducer`].
+    pub fn try_acquire_frame(&mut self) -> Result<Option<WebSurfaceFrame>, WebSurfaceError> {
         Ok(None)
     }
 }
 
-impl WryWebSurfaceProducer for WebKitGtkProducer {
-    fn capabilities(&self) -> WryWebSurfaceCapabilities {
+impl WebSurfaceProducer for WebKitGtkProducer {
+    fn capabilities(&self) -> WebSurfaceCapabilities {
         self.capabilities.clone()
     }
 
-    fn acquire_frame(&mut self) -> Result<WryWebSurfaceFrame, WryWebSurfaceError> {
-        Ok(WryWebSurfaceFrame::OverlayOnly)
+    fn acquire_frame(&mut self) -> Result<WebSurfaceFrame, WebSurfaceError> {
+        Ok(WebSurfaceFrame::OverlayOnly)
     }
 
     /// Navigate to inline HTML.
@@ -296,8 +261,8 @@ impl WryWebSurfaceProducer for WebKitGtkProducer {
         &mut self,
         _html: &str,
         _timeout: std::time::Duration,
-    ) -> Result<(), WryWebSurfaceError> {
-        Err(WryWebSurfaceError::Unsupported(
+    ) -> Result<(), WebSurfaceError> {
+        Err(WebSurfaceError::Unsupported(
             "WebKitGtkProducer::navigate_to_string is not implemented yet",
         ))
     }
@@ -312,8 +277,8 @@ impl WryWebSurfaceProducer for WebKitGtkProducer {
     ///    re-creating the backend, since the DMABUF protocol's
     ///    resolution is set at construction time). Or, if on the
     ///    wlroots fallback, update the screencopy frame request size.
-    fn resize(&mut self, _size: PhysicalSize<u32>) -> Result<(), WryWebSurfaceError> {
-        Err(WryWebSurfaceError::Unsupported(
+    fn resize(&mut self, _size: PhysicalSize<u32>) -> Result<(), WebSurfaceError> {
+        Err(WebSurfaceError::Unsupported(
             "WebKitGtkProducer::resize is not implemented yet",
         ))
     }
@@ -326,8 +291,8 @@ impl WryWebSurfaceProducer for WebKitGtkProducer {
     /// pack/attach order rather than free positioning, so this is a
     /// no-op for those layouts. Match the parent layout choice in
     /// `new`.
-    fn set_offset(&mut self, _x: f32, _y: f32) -> Result<(), WryWebSurfaceError> {
-        Err(WryWebSurfaceError::Unsupported(
+    fn set_offset(&mut self, _x: f32, _y: f32) -> Result<(), WebSurfaceError> {
+        Err(WebSurfaceError::Unsupported(
             "WebKitGtkProducer::set_offset is not implemented yet",
         ))
     }

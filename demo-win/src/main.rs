@@ -1,4 +1,4 @@
-//! Minimal winit + wgpu host probe for Wry/system-webview texture interop.
+//! Minimal winit + wgpu host probe for scrying system-webview texture interop.
 
 use std::sync::Arc;
 
@@ -6,15 +6,14 @@ use std::sync::Arc;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 #[cfg(target_os = "windows")]
 use scrying::Dx12FenceSynchronizer;
-use scrying::{HostWgpuContext, ImportOptions, TextureImporter, WgpuTextureImporter};
+use scrying::{
+    HostWgpuContext, ImportOptions, TextureImporter, WebSurfaceCapabilities, WebSurfaceFrame,
+    WgpuTextureImporter,
+};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::Window;
-use wry::{Rect, WebViewBuilder};
-use scrying::{
-    OverlayOnlyProducer, WebSurfaceMode, WryWebSurfaceFrame, WryWebSurfaceProducer,
-};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
@@ -33,7 +32,6 @@ struct App {
 
 struct AppState {
     window: Arc<Window>,
-    _webview: wry::WebView,
     _device: wgpu::Device,
     _queue: wgpu::Queue,
     #[cfg(target_os = "windows")]
@@ -63,7 +61,7 @@ impl ApplicationHandler for App {
                 }
             }
             Err(error) => {
-                eprintln!("demo-wry-winit: initialization failed: {error}");
+                eprintln!("demo-win: initialization failed: {error}");
                 event_loop.exit();
             }
         }
@@ -90,7 +88,7 @@ impl ApplicationHandler for App {
                 if let Some(state) = self.state.as_mut() {
                     if let Some(renderer) = state.renderer.as_mut() {
                         if let Err(error) = renderer.render() {
-                            eprintln!("demo-wry-winit: render failed: {error}");
+                            eprintln!("demo-win: render failed: {error}");
                         }
                         drain_composition_events(renderer);
                     }
@@ -104,7 +102,11 @@ impl ApplicationHandler for App {
                 }
             }
             #[cfg(target_os = "windows")]
-            WindowEvent::MouseInput { state: btn_state, button, .. } => {
+            WindowEvent::MouseInput {
+                state: btn_state,
+                button,
+                ..
+            } => {
                 if let Some(state) = self.state.as_mut() {
                     use winit::event::{ElementState, MouseButton};
                     let pressed = matches!(btn_state, ElementState::Pressed);
@@ -138,8 +140,7 @@ impl ApplicationHandler for App {
                     if pressed {
                         // Click into the composition WebView region also
                         // hands keyboard focus to it.
-                        if let (Some(pos), Some(renderer)) =
-                            (state.cursor, state.renderer.as_mut())
+                        if let (Some(pos), Some(renderer)) = (state.cursor, state.renderer.as_mut())
                             && composition_contains(pos)
                         {
                             let _ = renderer
@@ -199,14 +200,14 @@ impl AppState {
         let window = Arc::new(
             event_loop.create_window(
                 Window::default_attributes()
-                    .with_title("demo-wry-winit")
+                    .with_title("demo-win")
                     .with_inner_size(winit::dpi::PhysicalSize::new(900, 600)),
             )?,
         );
 
         let (instance, device, queue, adapter_info) = pollster::block_on(create_host_device())?;
         let host = HostWgpuContext::new(device.clone(), queue.clone());
-        let capabilities = scrying::WryWebSurfaceCapabilities::probe(Some(&host));
+        let capabilities = WebSurfaceCapabilities::probe(Some(&host));
 
         println!("wgpu adapter: {}", adapter_info.name);
         println!("wgpu backend: {:?}", host.backend);
@@ -223,20 +224,8 @@ impl AppState {
         println!("CPU snapshot support: {:?}", capabilities.cpu_snapshot);
         println!("reason: {}", capabilities.reason);
 
-        let mut producer = OverlayOnlyProducer::new(capabilities);
-        let frame = producer.acquire_frame()?;
-        println!("initial producer frame: {}", frame_label(&frame));
-
-        let webview = WebViewBuilder::new()
-            .with_html(WEBVIEW_PROBE_HTML)
-            .with_bounds(Rect {
-                position: wry::dpi::LogicalPosition::new(WRY_PROBE_X, PROBE_Y).into(),
-                size: wry::dpi::LogicalSize::new(WRY_PROBE_WIDTH, WRY_PROBE_HEIGHT).into(),
-            })
-            .build_as_child(&window)?;
-
         #[cfg(target_os = "windows")]
-        run_windows_shared_texture_probe(&window, &webview, &host)?;
+        run_windows_shared_texture_probe(&window, &host)?;
 
         // Opt into the explicit-fence cross-API sync path
         // (wgpu D3D12 `Wait` on a `D3D12_FENCE_FLAG_SHARED` fence the WebView2
@@ -280,7 +269,7 @@ impl AppState {
             .map(|s| s.shared_handle().0 as *mut std::ffi::c_void);
 
         #[cfg(target_os = "windows")]
-        let captured = run_webview2_composition_visual_probe(&window, &host, fence_handle)?;
+        let captured = run_platform_composition_visual_probe(&window, &host, fence_handle)?;
 
         #[cfg(target_os = "windows")]
         let renderer = match captured {
@@ -299,7 +288,6 @@ impl AppState {
 
         Ok(Self {
             window,
-            _webview: webview,
             _device: device,
             _queue: queue,
             #[cfg(target_os = "windows")]
@@ -358,7 +346,7 @@ fn forward_mouse_to_composition(
         point: (local_x, local_y),
     };
     if let Err(error) = renderer.captured.producer.send_mouse_input(event) {
-        eprintln!("demo-wry-winit: send_mouse_input failed: {error}");
+        eprintln!("demo-win: send_mouse_input failed: {error}");
     }
 }
 
@@ -388,55 +376,6 @@ fn drain_composition_events(renderer: &mut WebViewRenderer) {
         println!("[cursor] {shape:?}");
     }
 }
-
-const PROBE_Y: i32 = 48;
-const WRY_PROBE_X: i32 = 24;
-const WRY_PROBE_WIDTH: u32 = 360;
-const WRY_PROBE_HEIGHT: u32 = 360;
-
-const WEBVIEW_PROBE_HTML: &str = r#"<!doctype html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <style>
-        html, body {
-            margin: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background: #101820;
-            color: #f3efe0;
-            font-family: system-ui, sans-serif;
-        }
-        body {
-            display: grid;
-            place-items: center;
-        }
-        main {
-            display: grid;
-            gap: 12px;
-            text-align: center;
-        }
-        h1 {
-            margin: 0;
-            font-size: 28px;
-            font-weight: 650;
-            letter-spacing: 0;
-        }
-        p {
-            margin: 0;
-            color: #8fd2c7;
-            font-size: 15px;
-        }
-    </style>
-</head>
-<body>
-    <main>
-        <h1>Wry WebView2 Probe</h1>
-        <p>Rendered by a real system webview child surface.</p>
-    </main>
-</body>
-</html>"#;
 
 #[cfg(target_os = "windows")]
 const COMPOSITION_WEBVIEW_PROBE_HTML: &str = r#"<!doctype html>
@@ -475,6 +414,18 @@ const COMPOSITION_WEBVIEW_PROBE_HTML: &str = r#"<!doctype html>
             color: #ffbe70;
             font-size: 14px;
         }
+        input {
+            width: 220px;
+            justify-self: center;
+            box-sizing: border-box;
+            border: 1px solid #8fd2c7;
+            border-radius: 4px;
+            background: #0f1720;
+            color: #f8f1d8;
+            padding: 6px 8px;
+            font: 15px system-ui, sans-serif;
+            letter-spacing: 0;
+        }
         #tick {
             position: absolute;
             top: 8px;
@@ -511,13 +462,19 @@ const COMPOSITION_WEBVIEW_PROBE_HTML: &str = r#"<!doctype html>
 <body>
     <div id="tick">frame 0</div>
     <main>
-        <h1>CompositionController Probe</h1>
-        <p>Rendered through a WebView2 composition visual.</p>
+        <h1>Scrying Composition Probe</h1>
+        <p>Rendered through the selected system-webview producer.</p>
+        <input id="keyboard-smoke" autofocus autocomplete="off" spellcheck="false" aria-label="keyboard smoke input">
     </main>
     <div id="bar"></div>
     <script>
         let n = 0;
         const tick = document.getElementById("tick");
+        const input = document.getElementById("keyboard-smoke");
+        input.focus();
+        input.addEventListener("input", () => {
+            window.chrome.webview.postMessage("keyboard-smoke:" + input.value);
+        });
         function loop() {
             n++;
             tick.textContent = "frame " + n;
@@ -531,10 +488,8 @@ const COMPOSITION_WEBVIEW_PROBE_HTML: &str = r#"<!doctype html>
 #[cfg(target_os = "windows")]
 fn run_windows_shared_texture_probe(
     window: &Window,
-    webview: &wry::WebView,
     host: &HostWgpuContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use wry::WebViewExtWindows;
     use scrying::windows_capture::{
         D3D11SharedTextureFactory, DxgiSharedHandleBridge, capture_window_frame_once,
         close_shared_handle, probe_graphics_capture_prerequisites,
@@ -559,7 +514,7 @@ fn run_windows_shared_texture_probe(
     println!("D3D11 shared texture probe: exported NT handle {handle:p}");
 
     let surface_frame = dx12_frame.into_surface_frame();
-    let WryWebSurfaceFrame::Native(native_frame) = surface_frame else {
+    let WebSurfaceFrame::Native(native_frame) = surface_frame else {
         return Err("D3D11 shared texture bridge did not produce a native frame".into());
     };
     let importer = WgpuTextureImporter::new(host.clone());
@@ -578,7 +533,7 @@ fn run_windows_shared_texture_probe(
     let captured_handle = captured.shared_frame.shared_handle;
     let captured_dx12 = DxgiSharedHandleBridge.bridge_shared_handle(captured.shared_frame)?;
     let captured_surface_frame = captured_dx12.into_surface_frame();
-    let WryWebSurfaceFrame::Native(captured_native_frame) = captured_surface_frame else {
+    let WebSurfaceFrame::Native(captured_native_frame) = captured_surface_frame else {
         return Err("captured window bridge did not produce a native frame".into());
     };
     let captured_imported =
@@ -594,47 +549,6 @@ fn run_windows_shared_texture_probe(
     );
     unsafe {
         close_shared_handle(captured_handle)?;
-    }
-
-    let controller = webview.controller();
-    let mut webview_hwnd = unsafe { std::mem::zeroed() };
-    unsafe {
-        controller.ParentWindow(&mut webview_hwnd)?;
-    }
-    match unsafe {
-        capture_window_frame_once(
-            webview_hwnd.0 as *mut std::ffi::c_void,
-            std::time::Duration::from_secs(2),
-        )
-    } {
-        Ok(captured) => {
-            let captured_handle = captured.shared_frame.shared_handle;
-            let captured_dx12 =
-                DxgiSharedHandleBridge.bridge_shared_handle(captured.shared_frame)?;
-            let captured_surface_frame = captured_dx12.into_surface_frame();
-            let WryWebSurfaceFrame::Native(captured_native_frame) = captured_surface_frame else {
-                return Err("captured Wry WebView2 bridge did not produce a native frame".into());
-            };
-            let captured_imported =
-                importer.import_frame(&captured_native_frame, &ImportOptions::default())?;
-            println!(
-                "GraphicsCapture Wry WebView2 probe: captured child HWND {webview_hwnd:?} {}x{}, imported {:?} {}x{} generation {}",
-                captured.content_size.width,
-                captured.content_size.height,
-                captured_imported.format,
-                captured_imported.size.width,
-                captured_imported.size.height,
-                captured_imported.generation
-            );
-            unsafe {
-                close_shared_handle(captured_handle)?;
-            }
-        }
-        Err(error) => {
-            println!(
-                "GraphicsCapture Wry WebView2 child HWND probe: capture failed for {webview_hwnd:?}: {error}"
-            );
-        }
     }
 
     Ok(())
@@ -655,25 +569,22 @@ struct CapturedComposition {
     /// first `try_acquire_frame` lands a frame. The probe path no longer
     /// blocks on an initial acquire (it was an intermittent pump-hang).
     imported: Option<scrying::ImportedTexture>,
-    producer: scrying::webview2_composition_producer::WebView2CompositionProducer,
+    producer: scrying::PlatformWebSurfaceProducer,
     #[allow(dead_code)]
     dispatcher_queue: Option<windows::System::DispatcherQueueController>,
 }
 
 #[cfg(target_os = "windows")]
-fn run_webview2_composition_visual_probe(
+fn run_platform_composition_visual_probe(
     window: &Window,
     host: &HostWgpuContext,
     fence_shared_handle: Option<*mut std::ffi::c_void>,
 ) -> Result<Option<CapturedComposition>, Box<dyn std::error::Error>> {
+    use scrying::windows_capture::close_shared_handle;
     use windows::Win32::System::WinRT::{
         CreateDispatcherQueueController, DQTAT_COM_STA, DQTYPE_THREAD_CURRENT,
         DispatcherQueueOptions,
     };
-    use scrying::webview2_composition_producer::{
-        WebView2CompositionConfig, WebView2CompositionProducer,
-    };
-    use scrying::windows_capture::close_shared_handle;
 
     let parent_hwnd = hwnd_from_window(window)?;
     let dispatcher_queue = match unsafe {
@@ -692,9 +603,12 @@ fn run_webview2_composition_visual_probe(
         }
     };
 
-    let user_data_dir = std::env::temp_dir().join("demo-wry-winit-composition-controller-webview2");
-    let mut config = WebView2CompositionConfig::new(
-        winit::dpi::PhysicalSize::new(COMPOSITION_PROBE_WIDTH as u32, COMPOSITION_PROBE_HEIGHT as u32),
+    let user_data_dir = std::env::temp_dir().join("demo-win-composition-webview2");
+    let mut config = scrying::PlatformWebSurfaceConfig::new(
+        winit::dpi::PhysicalSize::new(
+            COMPOSITION_PROBE_WIDTH as u32,
+            COMPOSITION_PROBE_HEIGHT as u32,
+        ),
         user_data_dir,
     )
     .with_offset(COMPOSITION_PROBE_X, COMPOSITION_PROBE_Y)
@@ -703,9 +617,17 @@ fn run_webview2_composition_visual_probe(
         config = config.with_fence_shared_handle(handle);
     }
 
-    let producer = unsafe { WebView2CompositionProducer::new(parent_hwnd, config)? };
-    producer.navigate_to_string(COMPOSITION_WEBVIEW_PROBE_HTML, std::time::Duration::from_secs(5))?;
+    let producer = unsafe { scrying::PlatformWebSurfaceProducer::new(parent_hwnd, config)? };
+    producer.navigate_to_string(
+        COMPOSITION_WEBVIEW_PROBE_HTML,
+        std::time::Duration::from_secs(5),
+    )?;
     println!("CompositionController visual probe: navigation completed");
+
+    let mut producer = producer;
+    if keyboard_validate_enabled() {
+        validate_platform_keyboard_smoke(&mut producer)?;
+    }
 
     let imported = if std::env::var("WEBVIEW_READBACK_VALIDATE")
         .ok()
@@ -715,7 +637,7 @@ fn run_webview2_composition_visual_probe(
         let mut producer_for_readback = producer;
         let captured = producer_for_readback.acquire_full_frame()?;
         let importer = WgpuTextureImporter::new(host.clone());
-        let WryWebSurfaceFrame::Native(ref native_frame) = captured.frame else {
+        let WebSurfaceFrame::Native(ref native_frame) = captured.frame else {
             return Err("WebView2 composition producer did not emit a native frame".into());
         };
         let imported = importer.import_frame(native_frame, &ImportOptions::default())?;
@@ -750,6 +672,90 @@ fn run_webview2_composition_visual_probe(
         producer,
         dispatcher_queue,
     }))
+}
+
+#[cfg(target_os = "windows")]
+fn keyboard_validate_enabled() -> bool {
+    std::env::var("WEBVIEW_KEYBOARD_VALIDATE")
+        .ok()
+        .filter(|v| !v.is_empty() && v != "0")
+        .is_some()
+}
+
+#[cfg(target_os = "windows")]
+fn validate_platform_keyboard_smoke(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const EXPECTED: &str = "scry42";
+
+    producer.move_focus(scrying::FocusReason::Programmatic)?;
+    pump_windows_messages_for(std::time::Duration::from_millis(150));
+
+    for ch in EXPECTED.chars() {
+        let virtual_key_code = match ch {
+            'a'..='z' => ch.to_ascii_uppercase() as u32,
+            'A'..='Z' => ch as u32,
+            '0'..='9' => ch as u32,
+            _ => return Err(format!("unsupported keyboard smoke character: {ch:?}").into()),
+        };
+        let characters = ch.to_string();
+        producer.send_keyboard_input(scrying::KeyboardInput {
+            kind: scrying::KeyEventKind::Down,
+            virtual_key_code,
+            characters: characters.clone(),
+            characters_ignoring_modifiers: characters,
+            modifiers: scrying::KeyModifierFlags::default(),
+            is_repeat: false,
+        })?;
+        producer.send_keyboard_input(scrying::KeyboardInput {
+            kind: scrying::KeyEventKind::Up,
+            virtual_key_code,
+            characters: String::new(),
+            characters_ignoring_modifiers: String::new(),
+            modifiers: scrying::KeyModifierFlags::default(),
+            is_repeat: false,
+        })?;
+        pump_windows_messages_for(std::time::Duration::from_millis(30));
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut last_value = String::new();
+    while std::time::Instant::now() < deadline {
+        pump_windows_messages_for(std::time::Duration::from_millis(16));
+        while let Some(message) = producer.poll_web_message() {
+            if let Some(value) = message.strip_prefix("keyboard-smoke:") {
+                last_value = value.to_string();
+                if value == EXPECTED {
+                    println!("WebView2 keyboard smoke: typed {value:?} via send_keyboard_input");
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "WebView2 keyboard smoke timed out: expected {EXPECTED:?}, last observed {last_value:?}"
+    )
+    .into())
+}
+
+#[cfg(target_os = "windows")]
+fn pump_windows_messages_for(duration: std::time::Duration) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
+    };
+
+    let deadline = std::time::Instant::now() + duration;
+    while std::time::Instant::now() < deadline {
+        unsafe {
+            let mut message = MSG::default();
+            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(4));
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -822,14 +828,24 @@ fn validate_imported_pixels(
     let row_stride = padded_bytes_per_row as usize;
     let sample = |x: u32, y: u32| -> [u8; 4] {
         let offset = (y as usize) * row_stride + (x as usize) * 4;
-        [data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]
+        [
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]
     };
 
-    let inset = 4u32.min(width.saturating_sub(1)).min(height.saturating_sub(1));
+    let inset = 4u32
+        .min(width.saturating_sub(1))
+        .min(height.saturating_sub(1));
     let tl = sample(inset, inset);
     let tr = sample(width.saturating_sub(1 + inset), inset);
     let bl = sample(inset, height.saturating_sub(1 + inset));
-    let br = sample(width.saturating_sub(1 + inset), height.saturating_sub(1 + inset));
+    let br = sample(
+        width.saturating_sub(1 + inset),
+        height.saturating_sub(1 + inset),
+    );
     let center = sample(width / 2, height / 2);
 
     drop(data);
@@ -852,8 +868,10 @@ fn validate_imported_pixels(
             && (g as i32 - eg as i32).abs() <= tolerance
             && (r as i32 - er as i32).abs() <= tolerance
     };
-    let corners_match =
-        close_to_background(tl) && close_to_background(tr) && close_to_background(bl) && close_to_background(br);
+    let corners_match = close_to_background(tl)
+        && close_to_background(tr)
+        && close_to_background(bl)
+        && close_to_background(br);
     println!(
         "WebView readback: corner pixels match background within ±{tolerance}: {corners_match}"
     );
@@ -869,7 +887,8 @@ fn validate_imported_pixels(
     let nonzero_alpha = tl[3] > 0 || tr[3] > 0 || bl[3] > 0 || br[3] > 0 || center[3] > 0;
     if !nonzero_alpha {
         return Err(
-            "WebView readback: every sampled alpha is zero; capture is likely uninitialized.".into(),
+            "WebView readback: every sampled alpha is zero; capture is likely uninitialized."
+                .into(),
         );
     }
 
@@ -900,7 +919,7 @@ async fn create_host_device() -> Result<
     let adapter_info = adapter.get_info();
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
-            label: Some("demo-wry-winit"),
+            label: Some("demo-win"),
             ..Default::default()
         })
         .await
@@ -914,16 +933,6 @@ fn preferred_backends() -> wgpu::Backends {
         wgpu::Backends::DX12
     } else {
         wgpu::Backends::PRIMARY
-    }
-}
-
-fn frame_label(frame: &WryWebSurfaceFrame) -> &'static str {
-    match frame.mode() {
-        WebSurfaceMode::ImportedTexture => "imported texture",
-        WebSurfaceMode::NativeChildOverlay => "native child overlay",
-        WebSurfaceMode::CpuSnapshot => "CPU snapshot",
-        WebSurfaceMode::Unsupported => "unsupported",
-        _ => "unknown",
     }
 }
 
@@ -1008,9 +1017,7 @@ impl WebViewRenderer {
         let device = host.device.clone();
         let queue = host.queue.clone();
         let importer = match fence_synchronizer {
-            Some(sync) => {
-                WgpuTextureImporter::with_synchronizer(host.clone(), Box::new(sync))
-            }
+            Some(sync) => WgpuTextureImporter::with_synchronizer(host.clone(), Box::new(sync)),
             None => WgpuTextureImporter::new(host.clone()),
         };
         let surface = instance.create_surface(window.clone())?;
@@ -1124,9 +1131,7 @@ impl WebViewRenderer {
             view_formats: &[],
         });
         let bind_group = match captured.imported.as_ref() {
-            Some(imported) => {
-                build_bind_group(&device, &bind_group_layout, &sampler, imported)
-            }
+            Some(imported) => build_bind_group(&device, &bind_group_layout, &sampler, imported),
             None => build_bind_group_for_texture(
                 &device,
                 &bind_group_layout,
@@ -1179,7 +1184,6 @@ impl WebViewRenderer {
     /// needs to be re-rendered. Only when the producer (re-)allocates (first
     /// frame, post-resize) do we re-import and rebuild the bind group.
     fn refresh_captured_texture(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
-        use scrying::WryWebSurfaceFrame;
         use scrying::windows_capture::close_shared_handle;
 
         // Diagnostic: if FORCE_REIMPORT_EVERY_FRAME=1 in the env, drop the
@@ -1204,7 +1208,7 @@ impl WebViewRenderer {
                     self.capture_restarts = self.capture_restarts.saturating_add(1);
                     self.consecutive_empty_polls = 0;
                     eprintln!(
-                        "demo-wry-winit: capture stalled after >=1s of empty polls; restarting capture session (restart #{})",
+                        "demo-win: capture stalled after >=1s of empty polls; restarting capture session (restart #{})",
                         self.capture_restarts
                     );
                 }
@@ -1212,7 +1216,7 @@ impl WebViewRenderer {
                 return Ok(false);
             }
             Err(error) => {
-                eprintln!("demo-wry-winit: try_acquire_frame failed: {error}");
+                eprintln!("demo-win: try_acquire_frame failed: {error}");
                 return Ok(false);
             }
         };
@@ -1221,7 +1225,7 @@ impl WebViewRenderer {
         self.consecutive_empty_polls = 0;
 
         if new_frame.resource_is_new {
-            let WryWebSurfaceFrame::Native(ref native_frame) = new_frame.frame else {
+            let WebSurfaceFrame::Native(ref native_frame) = new_frame.frame else {
                 return Err("WebView2 producer did not emit a native frame".into());
             };
             let imported = self
@@ -1313,13 +1317,11 @@ impl WebViewRenderer {
         );
         let _ = elapsed;
         if let Err(error) = self.captured.producer.set_offset(offset_x, offset_y) {
-            eprintln!(
-                "demo-wry-winit: producer.set_offset({offset_x}, {offset_y}) failed: {error}"
-            );
+            eprintln!("demo-win: producer.set_offset({offset_x}, {offset_y}) failed: {error}");
         }
         if let Err(error) = self.captured.producer.resize(capture_size) {
             eprintln!(
-                "demo-wry-winit: producer.resize({}x{}) failed: {error}",
+                "demo-win: producer.resize({}x{}) failed: {error}",
                 capture_size.width, capture_size.height
             );
         }

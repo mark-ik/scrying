@@ -1,7 +1,8 @@
 [workspace]
 members = [
     "scrying",
-    "demo-wry-winit",
+    "demo-scrying-winit",
+    "demo-win",
     "demo-mac",
 ]
 resolver = "3"

@@ -23,7 +23,10 @@ mod sync_metal;
 use dpi::PhysicalSize;
 
 pub use error::{InteropError, UnsupportedReason};
-pub use sync::{ImplicitOnlySynchronizer, InteropSynchronizer, NoopSynchronizer, SyncMechanism};
+pub use sync::{
+    ExplicitExternalSemaphoreSynchronizer, ImplicitOnlySynchronizer, InteropSynchronizer,
+    NoopSynchronizer, SyncMechanism,
+};
 
 #[cfg(target_os = "windows")]
 pub use sync_dx12::Dx12FenceSynchronizer;
@@ -52,8 +55,10 @@ pub enum NativeFrameKind {
     /// `[MTLDevice newTextureWithDescriptor:iosurface:plane:]` — and
     /// hands the resulting `*mut MTLTexture` to the importer.
     MetalTextureRef,
-    // Reserved for future producers:
-    //   DmaBufImage (Linux WPE)
+    /// Linux WPE DMABUF frame. The producer exports one or more DMABUF
+    /// plane file descriptors plus a DRM format/modifier and optional
+    /// external semaphore fd for explicit Vulkan ordering.
+    DmaBufImage,
 }
 
 /// Whether a particular interop capability is available on this device.
@@ -174,12 +179,41 @@ pub struct MetalTextureRef {
     pub signal_value: u64,
 }
 
+/// One plane of a Linux DMABUF image.
+///
+/// File descriptor ownership is transferred with the frame. The eventual
+/// Vulkan importer must duplicate or consume the fd, then close it after
+/// `vkImportMemoryFdKHR` / image creation has taken ownership as required by
+/// the Vulkan external-memory contract.
+#[derive(Clone, Copy, Debug)]
+pub struct DmaBufPlane {
+    pub fd: i32,
+    pub offset: u32,
+    pub stride: u32,
+}
+
+/// A Linux WPE frame exported as DMABUF planes.
+#[derive(Clone, Debug)]
+pub struct DmaBufImage {
+    pub size: PhysicalSize<u32>,
+    pub format: wgpu::TextureFormat,
+    pub drm_format: u32,
+    pub drm_modifier: u64,
+    pub planes: Vec<DmaBufPlane>,
+    pub generation: u64,
+    pub producer_sync: SyncMechanism,
+    /// Optional opaque fd for a Vulkan external semaphore signalled by the
+    /// producer when the frame is ready. Ownership transfers with the frame.
+    pub semaphore_fd: Option<i32>,
+}
+
 /// A native frame from a producer, ready to be imported by a
 /// [`TextureImporter`].
 #[non_exhaustive]
 pub enum NativeFrame {
     Dx12SharedTexture(Dx12SharedTexture),
     MetalTextureRef(MetalTextureRef),
+    DmaBufImage(DmaBufImage),
 }
 
 impl NativeFrame {
@@ -187,6 +221,7 @@ impl NativeFrame {
         match self {
             NativeFrame::Dx12SharedTexture(_) => NativeFrameKind::Dx12SharedTexture,
             NativeFrame::MetalTextureRef(_) => NativeFrameKind::MetalTextureRef,
+            NativeFrame::DmaBufImage(_) => NativeFrameKind::DmaBufImage,
         }
     }
 
@@ -194,6 +229,7 @@ impl NativeFrame {
         match self {
             NativeFrame::Dx12SharedTexture(frame) => frame.producer_sync,
             NativeFrame::MetalTextureRef(frame) => frame.producer_sync,
+            NativeFrame::DmaBufImage(frame) => frame.producer_sync,
         }
     }
 }
@@ -230,9 +266,11 @@ impl WgpuTextureImporter {
     /// - **Other platforms**: [`ImplicitOnlySynchronizer`].
     pub fn new(host: HostWgpuContext) -> Self {
         #[cfg(target_os = "macos")]
+        let synchronizer: Box<dyn InteropSynchronizer> = Box::new(MetalSharedEventSynchronizer);
+        #[cfg(target_os = "linux")]
         let synchronizer: Box<dyn InteropSynchronizer> =
-            Box::new(MetalSharedEventSynchronizer);
-        #[cfg(not(target_os = "macos"))]
+            Box::new(ExplicitExternalSemaphoreSynchronizer);
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let synchronizer: Box<dyn InteropSynchronizer> = Box::new(ImplicitOnlySynchronizer);
         Self { host, synchronizer }
     }
@@ -262,12 +300,37 @@ impl TextureImporter for WgpuTextureImporter {
         let imported = match frame {
             NativeFrame::Dx12SharedTexture(frame) => import_dx12_shared_texture(frame, &self.host),
             NativeFrame::MetalTextureRef(frame) => import_metal_texture_ref(frame, &self.host),
+            NativeFrame::DmaBufImage(frame) => import_dmabuf_image(frame, &self.host),
         }?;
 
         self.synchronizer
             .consumer_ready(&imported, imported.consumer_sync)?;
         Ok(imported)
     }
+}
+
+fn import_dmabuf_image(
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] frame: &DmaBufImage,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] host: &HostWgpuContext,
+) -> Result<ImportedTexture, InteropError> {
+    #[cfg(target_os = "linux")]
+    {
+        if host.backend != InteropBackend::Vulkan {
+            return Err(InteropError::BackendMismatch {
+                expected: "Vulkan",
+                actual: "non-Vulkan",
+            });
+        }
+        let _ = frame;
+        return Err(InteropError::Unsupported(
+            UnsupportedReason::NativeImportNotYetImplemented,
+        ));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    Err(InteropError::Unsupported(
+        UnsupportedReason::HostBackendMismatch,
+    ))
 }
 
 fn import_dx12_shared_texture(
@@ -402,5 +465,29 @@ mod tests {
                 SyncMechanism::ExplicitFence
             ))
         ));
+    }
+
+    #[test]
+    fn dmabuf_frame_reports_kind_and_sync() {
+        let frame = NativeFrame::DmaBufImage(DmaBufImage {
+            size: PhysicalSize::new(16, 16),
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            drm_format: 0x34325241,
+            drm_modifier: 0,
+            planes: vec![DmaBufPlane {
+                fd: -1,
+                offset: 0,
+                stride: 64,
+            }],
+            generation: 1,
+            producer_sync: SyncMechanism::ExplicitExternalSemaphore,
+            semaphore_fd: Some(-1),
+        });
+
+        assert_eq!(frame.kind(), NativeFrameKind::DmaBufImage);
+        assert_eq!(
+            frame.producer_sync(),
+            SyncMechanism::ExplicitExternalSemaphore
+        );
     }
 }

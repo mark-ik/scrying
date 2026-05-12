@@ -1,6 +1,6 @@
 # scrying
 
-Capability-driven system-webview adapter — scry into WebView2/WKWebView/WebKitGTK and surface frames the host renderer can consume.
+Capability-driven system-webview adapter — scry into WebView2/WKWebView/WPE/WebKitGTK and surface frames the host renderer can consume.
 
 The name comes from *scrying* — gazing into a reflective surface for visions. The webview is the surface; the captured frame is the vision; this crate is the lens.
 
@@ -11,12 +11,19 @@ This crate is the home for system-webview-backed frame production. It is deliber
 The shared contract:
 
 - `WebSurfaceMode` — imported texture, native child overlay, CPU snapshot, or unsupported.
-- `WryWebSurfaceCapabilities` — platform/backend capability reporting.
-- `WryWebSurfaceFrame` — imported native frame, CPU RGBA frame, PNG snapshot, or overlay-only state.
-- `WryWebSurfaceProducer` — producer trait that platform implementations satisfy.
+- `WebSurfaceCapabilities` — platform/backend capability reporting.
+- `WebSurfaceFrame` — imported native frame, CPU RGBA frame, PNG snapshot, or overlay-only state.
+- `WebSurfaceProducer` — producer trait that platform implementations satisfy.
+- `PlatformWebSurfaceProducer` / `PlatformWebSurfaceConfig` — cfg-selected aliases for the current target platform's primary concrete producer and config. Linux selects the WPE scaffold; it reports unsupported capture until the WPE FFI callback bridge and Vulkan DMABUF importer are wired.
 - `OverlayOnlyProducer` — conservative fallback when no capture backend is available.
 
-`WryWebSurfaceProducer` covers the full embeddable-webview surface, not just frame production:
+Platform selection is intentionally split:
+
+- **scrying owns backend selection.** Platform modules, concrete producer aliases, and engine dependencies are `cfg(target_os = ...)` gated, so a Windows build selects WebView2, a macOS build selects WKWebView, and a Linux build selects the WPE producer scaffold without compiling the other engine paths. WebKitGTK remains opt-in fallback planning, not the canonical Linux backend.
+- **the host owns embedding.** The host still creates the window/event loop, supplies the native parent handle, chooses size/data-dir policy, and forwards native input/lifecycle events. Those responsibilities are application-specific and cannot be guessed reliably inside the library.
+- **runtime capability probing stays layered on top.** `WebSurfaceCapabilities::probe` answers which surface modes are viable for the current GPU/OS/runtime after the target backend has been selected at compile time.
+
+`WebSurfaceProducer` covers the full embeddable-webview surface, not just frame production:
 
 - **Frame acquisition** — `acquire_frame`, plus producer-specific fast paths.
 - **Layout** — `resize`, `set_offset`.
@@ -30,15 +37,15 @@ The shared contract:
 - **Settings** — `apply_settings(&WebSurfaceSettings)` accepts a partial update of zoom factor, user-agent string, JS-enabled, devtools-enabled, default-context-menus, and built-in accelerator keys. `None` fields are left at the producer's current value.
 - **Snapshots** — `capture_snapshot_png` returns encoded PNG bytes via the underlying engine's preview API.
 
-Methods that aren't yet implemented on a given platform return [`WryWebSurfaceError::Unsupported`] rather than panicking, so consumers can probe the surface incrementally.
+Methods that aren't yet implemented on a given platform return [`WebSurfaceError::Unsupported`] rather than panicking, so consumers can probe the surface incrementally.
 
 Per-platform producer modules:
 
 | Platform | Module | Status | Capture path |
 | --- | --- | --- | --- |
-| Windows | [`webview2_composition_producer`] | **Implemented.** Reference implementation; runtime-driven by [`demo-wry-winit`]. | WebView2 CompositionController → `Windows.UI.Composition.Visual` → `Windows.Graphics.Capture` → shared D3D11 NT-handle texture → `wgpu` D3D12 import. |
+| Windows | [`webview2_composition_producer`] | **Implemented.** Reference implementation; runtime-driven by [`demo-scrying-winit`]. | WebView2 CompositionController → `Windows.UI.Composition.Visual` → `Windows.Graphics.Capture` → shared D3D11 NT-handle texture → `wgpu` D3D12 import. |
 | macOS | [`wkwebview_producer`] | **Implemented.** Runtime-driven by [`demo-mac`]. Slices A–N + the `MetalTextureRef` import path all exercised end-to-end. See [`design_docs/2026-05-07_platform_ceilings.md`](../design_docs/2026-05-07_platform_ceilings.md). | `WKWebView` hosted in NSView → `ScreenCaptureKit` stream bound to the host window → `CMSampleBuffer` → `IOSurfaceRef` → `MTLTexture` (via `MTLDevice::newTextureWithDescriptor:iosurface:plane:`) → `wgpu` Metal import (via `wgpu::hal::metal::Device::texture_from_raw`). |
-| Linux | [`webkitgtk_producer`] | **Skeleton.** Module exists, returns `OverlayOnly`; the actual capture path isn't yet wired. | `WebKitWebView` (or WPE) → `WPEViewBackendDMABuf` DMABUF + `VkSemaphore` → `wgpu` Vulkan import. wlroots `zwlr_screencopy_manager_v1` is a possible coarser fallback. |
+| Linux | [`wpe_producer`], [`webkitgtk_producer`] fallback | **Scaffold.** WPE is selected as the primary Linux producer and carries the DMABUF frame contract; WebKitGTK is an opt-in fallback/planning scaffold. | `WPEWebView` + `WPEViewBackendDMABuf` → DMABUF + `VkSemaphore` → `wgpu` Vulkan import. The WPE FFI callback bridge and Vulkan importer still need a Linux implementation pass; WebKitGTK + wlroots `zwlr_screencopy_manager_v1` remains a possible coarser fallback. |
 
 Both implemented producers cover the producer/consumer split, lazy capture standup, lifecycle teardown, and platform-appropriate cross-API sync (D3D11 keyed-mutex on Windows; implicit IOSurface coherence + `MTLSharedEvent` scaffolding on macOS).
 
@@ -59,11 +66,11 @@ The lower-level building blocks live in [`windows_capture`]:
 - `D3D11SharedTextureFactory::create_shared_texture_frame(...)` allocates an NT-handle-shareable D3D11 texture.
 - `D3D11SharedTextureFactory::copy_capture_into_existing_target(...)` writes a `Direct3D11CaptureFrame` into the persistent shared destination with proper keyed-mutex + GPU-completion synchronization.
 - `capture_graphics_item_frame_once(...)` and `capture_visual_frame_once(...)` are one-shot capture helpers used by the demo's startup probes.
-- `DxgiSharedHandleBridge` wraps the `WebView2DxgiSharedHandleFrame` → `WebView2Dx12SharedFrame` → `WryWebSurfaceFrame::Native(NativeFrame::Dx12SharedTexture)` handoff.
+- `DxgiSharedHandleBridge` wraps the `WebView2DxgiSharedHandleFrame` → `WebView2Dx12SharedFrame` → `WebSurfaceFrame::Native(NativeFrame::Dx12SharedTexture)` handoff.
 
 ## Fallbacks
 
-`NativeChildOverlay` remains the normal Wry fallback on every platform. macOS supports `CpuSnapshot` end-to-end via `WKWebView.takeSnapshot` (synchronous via `capture_cpu_snapshot`, non-blocking via `request_snapshot` / `poll_snapshot`); the Linux skeleton does not yet (`webkit_web_view_get_snapshot` would work but no consumer yet wants it).
+`NativeChildOverlay` remains the normal native-overlay fallback on every platform. macOS supports `CpuSnapshot` end-to-end via `WKWebView.takeSnapshot` (synchronous via `capture_cpu_snapshot`, non-blocking via `request_snapshot` / `poll_snapshot`); the Linux skeleton does not yet (`webkit_web_view_get_snapshot` would work but no consumer yet wants it).
 
 `CpuSnapshot` is useful for diagnostics, thumbnails, and low-frequency preview paths, but it is not the target for interactive composited web surfaces.
 
@@ -73,7 +80,7 @@ The lower-level building blocks live in [`windows_capture`]:
 
 The macOS producer ([`wkwebview_producer::WkWebViewProducer`]) was developed in slice-by-slice fashion. Slices A–N cover the core surface (lifecycle, SCK pipeline, navigation, mouse / scroll / keyboard, JS messaging, snapshots, KVO, cursor reporting, profile data store, MTLSharedEvent scaffolding, resize-applies-to-stream). Items 1–9 of the browser-class roadmap (history controls, new-window intercept, settings, custom URL schemes, process-failure recovery, auth pass-through, multi-instance, downloads, find + PDF) build on top to make scrying usable for browser-shape consumers. Both rosters are tracked in [`design_docs/2026-05-07_platform_ceilings.md`](../design_docs/2026-05-07_platform_ceilings.md) with API hooks and known limitations.
 
-Browser-class additions on top of `WryWebSurfaceProducer`:
+Browser-class additions on top of `WebSurfaceProducer`:
 
 - **History.** `reload`, `stop`, `go_back`, `go_forward`, `can_go_back`, `can_go_forward` — straight `WKWebView` mappings.
 - **New-window intercept.** `NavigationEvent::NewWindowRequested { url }` fires when a page tries to open a popup; the producer suppresses the engine-level popup so browser-shape consumers can route the URL into a new tab.
@@ -89,7 +96,7 @@ Browser-class additions on top of `WryWebSurfaceProducer`:
 - **Find / PDF.** `find_in_page(query, FindOptions)` + `poll_find_match() -> Option<bool>` and `request_pdf()` + `poll_pdf() -> Option<Result<Vec<u8>, String>>` are async, mirroring the snapshot pattern.
 - **DPI awareness.** An `NSWindowDidChangeBackingPropertiesNotification` observer re-applies `config.size` on the next `try_acquire_frame` / `resize` so points/pixels stay coherent across monitor moves. No host-side wiring needed.
 - **Cursors.** `set_cursor_handler` registers a `Fn(CursorShape) + Send + Sync` callback invoked synchronously on every system-cursor change observed after a forwarded input event. Coexists with the pull-model `poll_cursor_shape` queue — both fire on the same change so hosts can mix push and pull.
-- **Pointer input.** `WryWebSurfaceProducer::send_pointer_input` synthesizes touch / pen events through the same path as `send_mouse_input`; WebKit's pointer-events JS API observes them as `pointerType: "mouse"` because macOS has no public direct-touch synthesis API.
+- **Pointer input.** `WebSurfaceProducer::send_pointer_input` synthesizes touch / pen events through the same path as `send_mouse_input`; WebKit's pointer-events JS API observes them as `pointerType: "mouse"` because macOS has no public direct-touch synthesis API.
 
 Key cross-API GPU-sync notes:
 
@@ -97,8 +104,6 @@ Key cross-API GPU-sync notes:
 - IOSurface has implicit cross-API cache coherence on Apple silicon and via IOSurface locks on Intel, so today's correctness model doesn't require an explicit fence. A `MetalSharedEventSynchronizer` (parallel to `Dx12FenceSynchronizer`) is scaffolded but inert; ScreenCaptureKit doesn't expose its render queue, so there's no producer-side hook to drive a signal from. The infrastructure is ready for when SCK extends or a downstream consumer wires manual signal points.
 
 Critical caveat for event-loop hosts: blocking entry points (`navigate_to_url`, `navigate_to_string`, `start_capture`, `capture_cpu_snapshot`) pump the main `NSRunLoop` and **must not be called from inside a host event-loop callback** (winit's `resumed` / `window_event` etc.) — the pump re-enters the host's dispatch and panics. Each blocking method's docstring carries a `⚠️` warning and a pointer to the non-blocking equivalent (`load_url` / `load_html`, `start_capture_async` + `capture_status`, `request_snapshot` + `poll_snapshot`).
-
-Reference implementations: [`tauri-apps/wry`](https://github.com/tauri-apps/wry) is a useful reference for the Cocoa / objc2 lifetime and threading footguns even though scrying doesn't depend on it. When adding a follow-up slice on macOS, skim wry's [`wkwebview/`](https://github.com/tauri-apps/wry/tree/dev/src/wkwebview) producer first.
 
 ## Cross-API GPU sync (Windows)
 
@@ -120,6 +125,6 @@ A more rigorous alternative is to share a `D3D12_FENCE_FLAG_SHARED` fence across
 
 **What this buys:** standards-correct ordering between the producer's writes and the consumer's reads (today's design relies on the consumer-side transition barrier flushing caches, which is not contractual); robustness against future driver changes; reusable for D3D12↔Vulkan / cross-process interop.
 
-**Cost:** ~150–250 lines crossing the wgpu-hal escape hatch (`device.as_hal::<Dx12>()` for the queue), `ID3D11Device5` / `ID3D11DeviceContext4` plumbing, fence-value tracking, and a pre-submit injection point (probably a tiny no-op command buffer that runs `Wait` before the real submit). As of 0.2.0 this crate is unified on `windows 0.62` (via `webview2-com 0.39.1`), so the typed-COM bridge is a single-version path; the `demo-wry-winit` host still pulls `windows 0.61` transitively from wry until wry bumps its own webview2-com pin, but that's a demo-side artifact, not a contract on consumers.
+**Cost:** ~150–250 lines crossing the wgpu-hal escape hatch (`device.as_hal::<Dx12>()` for the queue), `ID3D11Device5` / `ID3D11DeviceContext4` plumbing, fence-value tracking, and a pre-submit injection point (probably a tiny no-op command buffer that runs `Wait` before the real submit). As of 0.2.0 this crate is unified on `windows 0.62` (via `webview2-com 0.39.1`), so the typed-COM bridge is a single-version path rather than a demo-side compatibility artifact.
 
 Worth doing when (a) the adapter ships beyond this development box and a driver gives someone stale frames, (b) GraphShell's interop story expands beyond WebView2 capture, or (c) the code wants to be canonically correct rather than empirically correct.

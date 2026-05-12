@@ -21,7 +21,7 @@ use objc2_web_kit::{
 
 use crate::{
     AuthChallenge, AuthDisposition, ColorPipeline, Cookie, DownloadDecision,
-    DownloadDestinationRequest, PermissionDecision, PermissionRequest, WryWebSurfaceError,
+    DownloadDestinationRequest, PermissionDecision, PermissionRequest, WebSurfaceError,
 };
 
 use super::cookies::{cookie_from_ns, ns_cookie_from};
@@ -42,21 +42,21 @@ impl WkWebViewProducer {
     /// completes asynchronously and surfaces through
     /// [`Self::poll_navigation_event`].
     ///
-    /// **Use this** instead of [`navigate_to_url`](crate::WryWebSurfaceProducer::navigate_to_url)
+    /// **Use this** instead of [`navigate_to_url`](crate::WebSurfaceProducer::navigate_to_url)
     /// when calling from inside a host event-loop callback (e.g.
     /// winit's `resumed` / `window_event`). The blocking variant
     /// pumps the main `NSRunLoop` to wait for completion, which
     /// re-enters the event loop and panics under winit's
     /// "no nested event handling" guard.
-    pub fn load_url(&self, url: &str) -> Result<(), WryWebSurfaceError> {
+    pub fn load_url(&self, url: &str) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "load_url must be called on the main thread".into(),
             ));
         }
         let url_ns = NSString::from_str(url);
         let ns_url = NSURL::URLWithString(&url_ns).ok_or_else(|| {
-            WryWebSurfaceError::Platform(format!("could not parse URL: {url}"))
+            WebSurfaceError::Platform(format!("could not parse URL: {url}"))
         })?;
         let request = NSURLRequest::requestWithURL(&ns_url);
         unsafe { self.webview().loadRequest(&request) };
@@ -69,7 +69,7 @@ impl WkWebViewProducer {
     ///
     /// See [`Self::load_url`] for when to prefer this over the
     /// blocking trait method.
-    pub fn load_html(&self, html: &str) -> Result<(), WryWebSurfaceError> {
+    pub fn load_html(&self, html: &str) -> Result<(), WebSurfaceError> {
         self.load_html_inner(html, None)
     }
 
@@ -84,10 +84,10 @@ impl WkWebViewProducer {
         &self,
         html: &str,
         base_url: &str,
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         let url_ns = NSString::from_str(base_url);
         let parsed = NSURL::URLWithString(&url_ns).ok_or_else(|| {
-            WryWebSurfaceError::Platform(format!("could not parse base URL: {base_url}"))
+            WebSurfaceError::Platform(format!("could not parse base URL: {base_url}"))
         })?;
         self.load_html_inner(html, Some(&parsed))
     }
@@ -96,9 +96,9 @@ impl WkWebViewProducer {
         &self,
         html: &str,
         base_url: Option<&NSURL>,
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "load_html must be called on the main thread".into(),
             ));
         }
@@ -117,9 +117,9 @@ impl WkWebViewProducer {
         &mut self,
         query: &str,
         options: FindOptions,
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         let mtm = MainThreadMarker::new().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "find_in_page must be called on the main thread".into(),
             )
         })?;
@@ -159,9 +159,9 @@ impl WkWebViewProducer {
     /// bytes arrive via [`Self::poll_pdf`] when WebKit's
     /// `createPDFWithConfiguration:` completes. Useful for "save as
     /// PDF" / "export" / mere's print-preview path.
-    pub fn request_pdf(&mut self) -> Result<(), WryWebSurfaceError> {
+    pub fn request_pdf(&mut self) -> Result<(), WebSurfaceError> {
         let mtm = MainThreadMarker::new().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "request_pdf must be called on the main thread".into(),
             )
         })?;
@@ -345,15 +345,15 @@ impl WkWebViewProducer {
     /// `DownloadCancelled` events fire normally and a fresh
     /// [`crate::DownloadId`] is allocated when `decideDestination`
     /// runs.
-    pub fn start_download(&mut self, url: &str) -> Result<(), WryWebSurfaceError> {
+    pub fn start_download(&mut self, url: &str) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "start_download must be called on the main thread".into(),
             ));
         }
         let url_ns = NSString::from_str(url);
         let ns_url = NSURL::URLWithString(&url_ns).ok_or_else(|| {
-            WryWebSurfaceError::Platform(format!("could not parse URL: {url}"))
+            WebSurfaceError::Platform(format!("could not parse URL: {url}"))
         })?;
         let request = NSURLRequest::requestWithURL(&ns_url);
 
@@ -409,14 +409,14 @@ impl WkWebViewProducer {
         &mut self,
         resume_data: &[u8],
         destination_path: std::path::PathBuf,
-    ) -> Result<crate::DownloadId, WryWebSurfaceError> {
+    ) -> Result<crate::DownloadId, WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "resume_download must be called on the main thread".into(),
             ));
         }
         if resume_data.is_empty() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "resume_download called with empty resume_data".into(),
             ));
         }
@@ -542,15 +542,15 @@ impl WkWebViewProducer {
     pub fn cancel_download(
         &mut self,
         id: crate::DownloadId,
-    ) -> Result<bool, WryWebSurfaceError> {
+    ) -> Result<bool, WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "cancel_download must be called on the main thread".into(),
             ));
         }
         let (download, destination_path) = {
             let mut registry = self.download_registry.lock().map_err(|_| {
-                WryWebSurfaceError::Platform(
+                WebSurfaceError::Platform(
                     "download registry lock poisoned".into(),
                 )
             })?;
@@ -612,9 +612,9 @@ impl WkWebViewProducer {
     /// Useful for browser-shape consumers running an "import from
     /// Safari" / "show all cookies" / "sync cookies to native
     /// password manager" flow.
-    pub fn request_all_cookies(&mut self) -> Result<(), WryWebSurfaceError> {
+    pub fn request_all_cookies(&mut self) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "request_all_cookies must be called on the main thread".into(),
             ));
         }
@@ -645,14 +645,14 @@ impl WkWebViewProducer {
     /// no value; we don't expose a poll for it. The cookie is
     /// visible to subsequent network requests once the data-store
     /// has committed it.
-    pub fn set_cookie(&mut self, cookie: &Cookie) -> Result<(), WryWebSurfaceError> {
+    pub fn set_cookie(&mut self, cookie: &Cookie) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "set_cookie must be called on the main thread".into(),
             ));
         }
         let ns_cookie = ns_cookie_from(cookie).ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "could not construct NSHTTPCookie — required field (name/value/domain/path) was rejected by the cookie parser".into(),
             )
         })?;
@@ -670,9 +670,9 @@ impl WkWebViewProducer {
         name: &str,
         domain: &str,
         path: &str,
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "delete_cookie must be called on the main thread".into(),
             ));
         }
@@ -686,7 +686,7 @@ impl WkWebViewProducer {
             is_http_only: false,
         };
         let ns_cookie = ns_cookie_from(&placeholder).ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "could not construct NSHTTPCookie for deletion".into(),
             )
         })?;
@@ -712,14 +712,14 @@ impl WkWebViewProducer {
     pub fn set_cookie_change_handler(
         &mut self,
         handler: super::cookie_observer::CookieChangeHandlerFn,
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "set_cookie_change_handler must be called on the main thread".into(),
             ));
         }
         let mut slot = self.cookie_change_handler.lock().map_err(|_| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "cookie_change_handler lock poisoned".into(),
             )
         })?;
@@ -756,15 +756,15 @@ impl WkWebViewProducer {
         &mut self,
         identifier: &str,
         encoded_json: &str,
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         let mtm = MainThreadMarker::new().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "compile_and_apply_content_rule_list must be called on the main thread"
                     .into(),
             )
         })?;
         let store = unsafe { WKContentRuleListStore::defaultStore(mtm) }.ok_or_else(
-            || WryWebSurfaceError::Platform(
+            || WebSurfaceError::Platform(
                 "WKContentRuleListStore::defaultStore returned nil".into(),
             ),
         )?;
@@ -828,9 +828,9 @@ impl WkWebViewProducer {
     pub fn set_color_pipeline(
         &mut self,
         pipeline: ColorPipeline,
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "set_color_pipeline must be called on the main thread".into(),
             ));
         }
@@ -865,9 +865,9 @@ impl WkWebViewProducer {
     /// `NSPrintInfo` can shadow this method by calling
     /// `webview.printOperationWithPrintInfo:` directly via the
     /// objc2-web-kit binding.
-    pub fn print(&mut self) -> Result<bool, WryWebSurfaceError> {
+    pub fn print(&mut self) -> Result<bool, WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "print must be called on the main thread".into(),
             ));
         }
@@ -882,9 +882,9 @@ impl WkWebViewProducer {
     /// immediately. Apple's content-rule-list *store* keeps the
     /// compiled blobs on disk regardless; this only undoes the
     /// per-WKWebView attachment.
-    pub fn clear_all_content_rule_lists(&mut self) -> Result<(), WryWebSurfaceError> {
+    pub fn clear_all_content_rule_lists(&mut self) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "clear_all_content_rule_lists must be called on the main thread".into(),
             ));
         }
@@ -898,14 +898,14 @@ impl WkWebViewProducer {
     /// (cheap to keep around for the producer's lifetime); this
     /// just unsets the closure so subsequent
     /// `cookiesDidChangeInCookieStore:` callbacks are no-ops.
-    pub fn clear_cookie_change_handler(&mut self) -> Result<(), WryWebSurfaceError> {
+    pub fn clear_cookie_change_handler(&mut self) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "clear_cookie_change_handler must be called on the main thread".into(),
             ));
         }
         let mut slot = self.cookie_change_handler.lock().map_err(|_| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "cookie_change_handler lock poisoned".into(),
             )
         })?;
@@ -941,9 +941,9 @@ impl WkWebViewProducer {
     pub fn restore_interaction_state(
         &mut self,
         bytes: &[u8],
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "restore_interaction_state must be called on the main thread".into(),
             ));
         }
@@ -953,7 +953,7 @@ impl WkWebViewProducer {
         #[allow(deprecated)]
         let obj = unsafe { NSKeyedUnarchiver::unarchiveObjectWithData(&data) }
             .ok_or_else(|| {
-                WryWebSurfaceError::Platform(
+                WebSurfaceError::Platform(
                     "could not unarchive interaction state — blob may be corrupt or from an incompatible WebKit version".into(),
                 )
             })?;

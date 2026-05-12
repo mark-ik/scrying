@@ -6,6 +6,10 @@ license = "MPL-2.0"
 repository = "https://github.com/mark-ik/scrying"
 description = "Capability-driven system-webview frame adapter — scry into WebView2/WKWebView/WebKitGTK and produce wgpu-importable frames"
 
+[features]
+default = []
+webkitgtk-fallback = ["dep:gdk", "dep:glib", "dep:gtk", "dep:webkit2gtk"]
+
 [dependencies]
 dpi = "0.1.2"
 image = "0.25"
@@ -28,10 +32,10 @@ wgpu-hal = "29.0"
 # `v2_40` selects the feature gate for the symbols available in
 # libwebkit2gtk-4.1 ≥ 2.40 (Ubuntu 24.04 LTS ships 2.44, so this is
 # the safe baseline). Bump if newer APIs are needed.
-webkit2gtk = { version = "2.0", features = ["v2_40"] }
-gtk = "0.18"
-gdk = "0.18"
-glib = "0.18"
+webkit2gtk = { version = "2.0", features = ["v2_40"], optional = true }
+gtk = { version = "0.18", optional = true }
+gdk = { version = "0.18", optional = true }
+glib = { version = "0.18", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Single objc2 0.6.x line. Default features kept on all of these — slim

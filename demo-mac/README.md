@@ -1,7 +1,7 @@
 # demo-mac
 
 Minimal winit + wgpu host probe for scrying's macOS WKWebView producer.
-Counterpart to [`../demo-wry-winit`](../demo-wry-winit/) on Windows.
+Counterpart to [`../demo-win`](../demo-win/) on Windows.
 
 The demo's job is to **drive scrying's runtime paths from a real
 event loop** so the producer's many slices (lifecycle, navigation,

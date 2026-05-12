@@ -15,7 +15,7 @@ use objc2_app_kit::NSImage;
 use objc2_foundation::{MainThreadMarker, NSError};
 use objc2_web_kit::WKSnapshotConfiguration;
 
-use crate::{WryWebSurfaceError, WryWebSurfaceFrame};
+use crate::{WebSurfaceError, WebSurfaceFrame};
 
 use super::helpers::pump_until;
 use super::producer::{PendingSnapshot, SendRetainedNSImage, WkWebViewProducer};
@@ -34,9 +34,9 @@ impl WkWebViewProducer {
     /// Multiple calls in flight are allowed; only the most recent
     /// completion is preserved (older completions overwrite each
     /// other before the consumer polls).
-    pub fn request_snapshot(&mut self) -> Result<(), WryWebSurfaceError> {
+    pub fn request_snapshot(&mut self) -> Result<(), WebSurfaceError> {
         let mtm = MainThreadMarker::new().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "request_snapshot must be called on the main thread".into(),
             )
         })?;
@@ -73,17 +73,17 @@ impl WkWebViewProducer {
 
     /// Drain the most recently completed [`Self::request_snapshot`]
     /// result. Returns `None` until a snapshot is ready,
-    /// `Some(Ok(WryWebSurfaceFrame::CpuRgba {..}))` once decoded, or
+    /// `Some(Ok(WebSurfaceFrame::CpuRgba {..}))` once decoded, or
     /// `Some(Err(...))` on snapshot or decode failure.
     ///
     /// Decoding is performed lazily here (not in the completion
     /// handler) so the main-thread completion callback finishes fast.
     pub fn poll_snapshot(
         &mut self,
-    ) -> Option<Result<WryWebSurfaceFrame, WryWebSurfaceError>> {
+    ) -> Option<Result<WebSurfaceFrame, WebSurfaceError>> {
         let pending = self.pending_snapshot.lock().ok().and_then(|mut s| s.take())?;
         match pending {
-            PendingSnapshot::Failed(msg) => Some(Err(WryWebSurfaceError::Platform(format!(
+            PendingSnapshot::Failed(msg) => Some(Err(WebSurfaceError::Platform(format!(
                 "snapshot failed: {msg}"
             )))),
             PendingSnapshot::Image(SendRetainedNSImage(ns_image)) => {
@@ -95,20 +95,20 @@ impl WkWebViewProducer {
     fn decode_ns_image(
         &mut self,
         ns_image: &NSImage,
-    ) -> Result<WryWebSurfaceFrame, WryWebSurfaceError> {
+    ) -> Result<WebSurfaceFrame, WebSurfaceError> {
         let tiff_data = ns_image.TIFFRepresentation().ok_or_else(|| {
-            WryWebSurfaceError::Platform("NSImage has no TIFF representation".into())
+            WebSurfaceError::Platform("NSImage has no TIFF representation".into())
         })?;
         let tiff_bytes = tiff_data.to_vec();
         let rgba = image::load_from_memory_with_format(&tiff_bytes, image::ImageFormat::Tiff)
             .map_err(|e| {
-                WryWebSurfaceError::Platform(format!("failed to decode TIFF snapshot: {e}"))
+                WebSurfaceError::Platform(format!("failed to decode TIFF snapshot: {e}"))
             })?
             .to_rgba8();
         let size = PhysicalSize::new(rgba.width(), rgba.height());
         let generation = self.snapshot_generation;
         self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
-        Ok(WryWebSurfaceFrame::CpuRgba {
+        Ok(WebSurfaceFrame::CpuRgba {
             size,
             pixels: rgba,
             generation,
@@ -136,9 +136,9 @@ impl WkWebViewProducer {
     /// from event-loop contexts.
     pub fn capture_cpu_snapshot(
         &mut self,
-    ) -> Result<WryWebSurfaceFrame, WryWebSurfaceError> {
+    ) -> Result<WebSurfaceFrame, WebSurfaceError> {
         let mtm = MainThreadMarker::new().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "capture_cpu_snapshot must be called on the main thread".into(),
             )
         })?;
@@ -192,34 +192,34 @@ impl WkWebViewProducer {
 
         let result = pump_until(timeout, || signal.lock().ok().and_then(|mut s| s.take()))
             .map_err(|()| {
-                WryWebSurfaceError::Platform(format!(
+                WebSurfaceError::Platform(format!(
                     "takeSnapshot did not resolve within {:?}",
                     timeout
                 ))
             })?;
 
         if let Some(msg) = result.error {
-            return Err(WryWebSurfaceError::Platform(format!(
+            return Err(WebSurfaceError::Platform(format!(
                 "takeSnapshot failed: {msg}"
             )));
         }
         let ns_image = result.image.ok_or_else(|| {
-            WryWebSurfaceError::Platform("snapshot returned no image".into())
+            WebSurfaceError::Platform("snapshot returned no image".into())
         })?;
         let tiff_data = ns_image.TIFFRepresentation().ok_or_else(|| {
-            WryWebSurfaceError::Platform("NSImage has no TIFF representation".into())
+            WebSurfaceError::Platform("NSImage has no TIFF representation".into())
         })?;
         let tiff_bytes = tiff_data.to_vec();
         let rgba = image::load_from_memory_with_format(&tiff_bytes, image::ImageFormat::Tiff)
             .map_err(|e| {
-                WryWebSurfaceError::Platform(format!("failed to decode TIFF snapshot: {e}"))
+                WebSurfaceError::Platform(format!("failed to decode TIFF snapshot: {e}"))
             })?
             .to_rgba8();
 
         let size = PhysicalSize::new(rgba.width(), rgba.height());
         let generation = self.snapshot_generation;
         self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
-        Ok(WryWebSurfaceFrame::CpuRgba {
+        Ok(WebSurfaceFrame::CpuRgba {
             size,
             pixels: rgba,
             generation,

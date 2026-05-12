@@ -3,7 +3,7 @@
 //! This is the macOS counterpart to
 //! [`crate::webview2_composition_producer::WebView2CompositionProducer`].
 //! The shape mirrors the Windows producer so consumers can program
-//! against a single trait surface (`WryWebSurfaceProducer`); the
+//! against a single trait surface (`WebSurfaceProducer`); the
 //! *internals* are entirely different because macOS has no public
 //! composition-capture API directly analogous to
 //! `Windows.Graphics.Capture::CreateFromVisual`.
@@ -55,7 +55,7 @@
 //! - [`api`] — non-trait, non-capture inherent public methods:
 //!   non-blocking loads, snapshot/PDF/find rendering, cookie-store
 //!   API, auth/permission handlers, interaction-state round-trip.
-//! - [`trait_impl`] — the [`crate::WryWebSurfaceProducer`] trait
+//! - [`trait_impl`] — the [`crate::WebSurfaceProducer`] trait
 //!   implementation.
 //! - [`nav_delegate`] / [`ui_delegate`] / [`title_observer`] /
 //!   [`download_handler`] / [`scheme_handler`] / [`script_message`]

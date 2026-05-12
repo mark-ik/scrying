@@ -27,7 +27,7 @@ use scrying::wkwebview_producer::{
 use scrying::{
     AuthDisposition, Cookie, DownloadDecision, DownloadId, KeyEventKind, KeyModifierFlags,
     KeyboardInput, MouseEventKind, MouseInput, MouseVirtualKeys, NavigationEvent, PointerDevice,
-    PointerEventKind, PointerInput, WryWebSurfaceProducer,
+    PointerEventKind, PointerInput, WebSurfaceProducer,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -1217,7 +1217,7 @@ impl ApplicationHandler for App {
             if probe.requested
                 && let Some(result) = state.producer.poll_snapshot() {
                     match result {
-                        Ok(scrying::WryWebSurfaceFrame::CpuRgba { pixels, .. }) => {
+                        Ok(scrying::WebSurfaceFrame::CpuRgba { pixels, .. }) => {
                             if let Err(error) = pixels.save("demo-mac-snapshot.png") {
                                 eprintln!("demo-mac: snapshot save failed: {error}");
                             } else {
@@ -1618,7 +1618,7 @@ fn drain_events(state: &mut AppState) {
         // snapshot the probe is waiting on.
         if let Some(result) = state.producer.poll_snapshot() {
             match result {
-                Ok(scrying::WryWebSurfaceFrame::CpuRgba { pixels, .. }) => {
+                Ok(scrying::WebSurfaceFrame::CpuRgba { pixels, .. }) => {
                     match pixels.save("demo-mac-snapshot.png") {
                         Ok(()) => println!(
                             "demo-mac: snapshot saved to demo-mac-snapshot.png"
@@ -2944,7 +2944,7 @@ fn advance_capture_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
     test.saw_live = true;
 
     match state.producer.try_acquire_frame() {
-        Ok(Some(scrying::WryWebSurfaceFrame::Native(
+        Ok(Some(scrying::WebSurfaceFrame::Native(
             scrying::NativeFrame::MetalTextureRef(frame),
         ))) => {
             let dims = (frame.size.width, frame.size.height);

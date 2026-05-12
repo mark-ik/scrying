@@ -5,13 +5,13 @@ pub mod native_frame;
 use dpi::PhysicalSize;
 use thiserror::Error;
 
+#[cfg(target_os = "windows")]
+pub use native_frame::Dx12FenceSynchronizer;
 pub use native_frame::{
     CapabilityStatus, Dx12SharedTexture, HostWgpuContext, ImportOptions, ImportedTexture,
     InteropBackend, InteropError, MetalTextureRef, NativeFrame, NativeFrameKind,
     ProducerCapabilities, SyncMechanism, TextureImporter, UnsupportedReason, WgpuTextureImporter,
 };
-#[cfg(target_os = "windows")]
-pub use native_frame::Dx12FenceSynchronizer;
 
 #[cfg(target_os = "windows")]
 pub mod windows_capture;
@@ -19,8 +19,20 @@ pub mod windows_capture;
 #[cfg(target_os = "windows")]
 pub mod webview2_composition_producer;
 
+#[cfg(target_os = "windows")]
+pub use webview2_composition_producer::{
+    WebView2CompositionConfig as PlatformWebSurfaceConfig,
+    WebView2CompositionProducer as PlatformWebSurfaceProducer,
+};
+
 #[cfg(target_os = "macos")]
 pub mod wkwebview_producer;
+
+#[cfg(target_os = "macos")]
+pub use wkwebview_producer::{
+    WkWebViewProducer as PlatformWebSurfaceProducer,
+    WkWebViewProducerConfig as PlatformWebSurfaceConfig,
+};
 
 #[cfg(target_os = "macos")]
 pub use wkwebview_producer::{
@@ -32,7 +44,15 @@ pub use wkwebview_producer::{
 // = "macos")` re-exports stay together. It's already public here.
 
 #[cfg(target_os = "linux")]
+pub mod wpe_producer;
+
+#[cfg(target_os = "linux")]
 pub mod webkitgtk_producer;
+
+#[cfg(target_os = "linux")]
+pub use wpe_producer::{
+    WpeProducer as PlatformWebSurfaceProducer, WpeProducerConfig as PlatformWebSurfaceConfig,
+};
 
 /// How a system webview can participate in a host compositor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,12 +68,13 @@ pub enum WebSurfaceMode {
     Unsupported,
 }
 
-/// The system webview backend behind Wry on the current platform.
+/// The selected system-webview backend on the current platform.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum SystemWebviewBackend {
     WebView2,
     WkWebView,
+    Wpe,
     WebKitGtk,
     Unknown,
 }
@@ -65,16 +86,16 @@ impl SystemWebviewBackend {
         } else if cfg!(target_os = "macos") {
             Self::WkWebView
         } else if cfg!(target_os = "linux") {
-            Self::WebKitGtk
+            Self::Wpe
         } else {
             Self::Unknown
         }
     }
 }
 
-/// Probe result for a Wry/system-webview surface.
+/// Probe result for a system-webview surface.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WryWebSurfaceCapabilities {
+pub struct WebSurfaceCapabilities {
     pub backend: SystemWebviewBackend,
     pub preferred_mode: WebSurfaceMode,
     pub imported_texture: CapabilityStatus,
@@ -84,7 +105,7 @@ pub struct WryWebSurfaceCapabilities {
     pub reason: &'static str,
 }
 
-impl WryWebSurfaceCapabilities {
+impl WebSurfaceCapabilities {
     pub fn probe(host: Option<&HostWgpuContext>) -> Self {
         match SystemWebviewBackend::detect() {
             SystemWebviewBackend::WebView2 => probe_webview2(host),
@@ -115,6 +136,7 @@ impl WryWebSurfaceCapabilities {
                     reason: "WKWebView producer: ScreenCaptureKit → IOSurface → MTLTexture path is wired (requires Screen Recording permission and a Metal-backed host wgpu device); falls back to NativeChildOverlay if the host isn't on Metal, and CpuSnapshot via takeSnapshot: is always available.",
                 }
             }
+            SystemWebviewBackend::Wpe => linux_wpe_capabilities(),
             SystemWebviewBackend::WebKitGtk => Self {
                 backend: SystemWebviewBackend::WebKitGtk,
                 preferred_mode: WebSurfaceMode::NativeChildOverlay,
@@ -126,7 +148,7 @@ impl WryWebSurfaceCapabilities {
                     crate::native_frame::UnsupportedReason::NativeImportNotYetImplemented,
                 ),
                 supported_frames: Vec::new(),
-                reason: "WebKitGTK has internal DMABUF presentation paths, but Wry does not expose them as a frame producer.",
+                reason: "WebKitGTK is a Linux fallback skeleton; the load-bearing WPE DMABUF producer is selected by default on Linux.",
             },
             SystemWebviewBackend::Unknown => Self {
                 backend: SystemWebviewBackend::Unknown,
@@ -141,7 +163,7 @@ impl WryWebSurfaceCapabilities {
                     crate::native_frame::UnsupportedReason::HostBackendUnavailable,
                 ),
                 supported_frames: Vec::new(),
-                reason: "No Wry/system-webview backend is defined for this platform.",
+                reason: "No system-webview backend is defined for this platform.",
             },
         }
     }
@@ -153,7 +175,31 @@ impl WryWebSurfaceCapabilities {
     }
 }
 
-fn probe_webview2(host: Option<&HostWgpuContext>) -> WryWebSurfaceCapabilities {
+#[cfg(target_os = "linux")]
+fn linux_wpe_capabilities() -> WebSurfaceCapabilities {
+    wpe_producer::linux_wpe_capabilities()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_wpe_capabilities() -> WebSurfaceCapabilities {
+    WebSurfaceCapabilities {
+        backend: SystemWebviewBackend::Wpe,
+        preferred_mode: WebSurfaceMode::Unsupported,
+        imported_texture: CapabilityStatus::Unsupported(
+            crate::native_frame::UnsupportedReason::PlatformNotImplemented,
+        ),
+        native_child_overlay: CapabilityStatus::Unsupported(
+            crate::native_frame::UnsupportedReason::PlatformNotImplemented,
+        ),
+        cpu_snapshot: CapabilityStatus::Unsupported(
+            crate::native_frame::UnsupportedReason::PlatformNotImplemented,
+        ),
+        supported_frames: Vec::new(),
+        reason: "WPE is only available on Linux.",
+    }
+}
+
+fn probe_webview2(host: Option<&HostWgpuContext>) -> WebSurfaceCapabilities {
     let imported_texture = match host.map(|host| host.backend) {
         Some(InteropBackend::Dx12) => CapabilityStatus::Supported,
         Some(_) => CapabilityStatus::Unsupported(
@@ -170,7 +216,7 @@ fn probe_webview2(host: Option<&HostWgpuContext>) -> WryWebSurfaceCapabilities {
         WebSurfaceMode::NativeChildOverlay
     };
 
-    WryWebSurfaceCapabilities {
+    WebSurfaceCapabilities {
         backend: SystemWebviewBackend::WebView2,
         preferred_mode,
         imported_texture,
@@ -181,9 +227,9 @@ fn probe_webview2(host: Option<&HostWgpuContext>) -> WryWebSurfaceCapabilities {
     }
 }
 
-/// A frame emitted by a Wry/system-webview producer.
+/// A frame emitted by a system-webview producer.
 #[non_exhaustive]
-pub enum WryWebSurfaceFrame {
+pub enum WebSurfaceFrame {
     Native(NativeFrame),
     CpuRgba {
         size: PhysicalSize<u32>,
@@ -198,7 +244,7 @@ pub enum WryWebSurfaceFrame {
     OverlayOnly,
 }
 
-impl WryWebSurfaceFrame {
+impl WebSurfaceFrame {
     pub fn mode(&self) -> WebSurfaceMode {
         match self {
             Self::Native(_) => WebSurfaceMode::ImportedTexture,
@@ -209,7 +255,7 @@ impl WryWebSurfaceFrame {
 }
 
 #[derive(Debug, Error)]
-pub enum WryWebSurfaceError {
+pub enum WebSurfaceError {
     #[error("web surface mode is unsupported: {0}")]
     Unsupported(&'static str),
     #[error("frame is not ready yet: {0}")]
@@ -222,7 +268,7 @@ pub enum WryWebSurfaceError {
 
 /// Lifecycle / state event emitted by the underlying webview.
 ///
-/// Drained from a producer via [`WryWebSurfaceProducer::poll_navigation_event`].
+/// Drained from a producer via [`WebSurfaceProducer::poll_navigation_event`].
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum NavigationEvent {
@@ -550,7 +596,7 @@ pub enum PermissionDecision {
 
 /// HTTP cookie payload used by the producer's cookie-store API
 /// (`request_all_cookies` / `set_cookie` / `delete_cookie` on the
-/// macOS producer). Mirrors the subset of `NSHTTPCookie` that
+/// macOS and Windows producers). Mirrors the subset of native cookies that
 /// browser-shape consumers actually need; `expires_at` is a Unix
 /// timestamp (seconds since 1970-01-01 UTC), `None` for session
 /// cookies.
@@ -582,7 +628,7 @@ pub enum FocusReason {
 ///
 /// Coordinates are in physical pixels, relative to the webview's top-left
 /// corner (i.e. the origin of the bounds set by the most recent
-/// [`WryWebSurfaceProducer::resize`] / `set_offset` pair).
+/// [`WebSurfaceProducer::resize`] / `set_offset` pair).
 #[derive(Clone, Copy, Debug)]
 pub struct MouseInput {
     pub kind: MouseEventKind,
@@ -671,7 +717,7 @@ pub enum PointerDevice {
 
 /// Cursor shape the webview wants the host to display, reported via the
 /// `cursor_changed` callback registered with
-/// [`WryWebSurfaceProducer::set_cursor_handler`].
+/// [`WebSurfaceProducer::set_cursor_handler`].
 ///
 /// The full Win32 / cocoa / X11 cursor namespace is large and platform-
 /// specific. This enum is the subset CSS / WebKit consensus settles
@@ -858,7 +904,7 @@ pub struct WebSurfaceSettings {
     /// in place.
     pub user_agent: Option<String>,
     /// Whether developer-tools are accessible (Ctrl+Shift+I, F12, the
-    /// host's [`WryWebSurfaceProducer::open_devtools_window`] call).
+    /// host's [`WebSurfaceProducer::open_devtools_window`] call).
     pub devtools_enabled: Option<bool>,
     /// Whether JavaScript execution is enabled in the webview.
     pub javascript_enabled: Option<bool>,
@@ -876,7 +922,7 @@ pub struct WebSurfaceSettings {
     pub inactive_scheduling_policy: Option<InactiveSchedulingPolicy>,
 }
 
-/// Producer contract implemented by platform-specific Wry/WebView frame sources.
+/// Producer contract implemented by platform-specific system-webview frame sources.
 ///
 /// The trait covers the cross-platform lifecycle (capabilities + navigate +
 /// resize + offset + a blocking acquire). Per-frame fast-path acquisition
@@ -884,8 +930,8 @@ pub struct WebSurfaceSettings {
 /// "did the shared destination texture get re-allocated this frame"
 /// flag) are exposed on the concrete platform producer types and not
 /// on the trait, since they have no portable shape.
-pub trait WryWebSurfaceProducer {
-    fn capabilities(&self) -> WryWebSurfaceCapabilities;
+pub trait WebSurfaceProducer {
+    fn capabilities(&self) -> WebSurfaceCapabilities;
 
     fn mode(&self) -> WebSurfaceMode {
         self.capabilities().preferred_mode
@@ -894,12 +940,12 @@ pub trait WryWebSurfaceProducer {
     /// Blocking acquire — returns the next available frame from the
     /// underlying capture path, possibly waiting for the WebView to
     /// produce one.
-    fn acquire_frame(&mut self) -> Result<WryWebSurfaceFrame, WryWebSurfaceError>;
+    fn acquire_frame(&mut self) -> Result<WebSurfaceFrame, WebSurfaceError>;
 
     /// Navigate the underlying WebView to inline HTML and block until
     /// `NavigationCompleted` (or analog) fires, or the timeout elapses.
     /// Producers that don't yet support navigation return
-    /// [`WryWebSurfaceError::Unsupported`].
+    /// [`WebSurfaceError::Unsupported`].
     ///
     /// # ⚠️ Blocking — host-event-loop hazard
     ///
@@ -916,41 +962,34 @@ pub trait WryWebSurfaceProducer {
         &mut self,
         html: &str,
         timeout: std::time::Duration,
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         let _ = (html, timeout);
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::navigate_to_string is not implemented for this platform",
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::navigate_to_string is not implemented for this platform",
         ))
     }
 
     /// Resize the underlying WebView and capture region.
-    fn resize(
-        &mut self,
-        size: PhysicalSize<u32>,
-    ) -> Result<(), WryWebSurfaceError> {
+    fn resize(&mut self, size: PhysicalSize<u32>) -> Result<(), WebSurfaceError> {
         let _ = size;
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::resize is not implemented for this platform",
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::resize is not implemented for this platform",
         ))
     }
 
     /// Reposition the underlying WebView overlay relative to the parent
     /// host, in physical pixels.
-    fn set_offset(
-        &mut self,
-        x: f32,
-        y: f32,
-    ) -> Result<(), WryWebSurfaceError> {
+    fn set_offset(&mut self, x: f32, y: f32) -> Result<(), WebSurfaceError> {
         let _ = (x, y);
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::set_offset is not implemented for this platform",
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::set_offset is not implemented for this platform",
         ))
     }
 
     /// Navigate the underlying WebView to a URL and block until
     /// `NavigationCompleted` fires (or the timeout elapses). Producers
     /// that don't yet support URL navigation return
-    /// [`WryWebSurfaceError::Unsupported`].
+    /// [`WebSurfaceError::Unsupported`].
     ///
     /// # ⚠️ Blocking — host-event-loop hazard
     ///
@@ -963,30 +1002,30 @@ pub trait WryWebSurfaceProducer {
         &mut self,
         url: &str,
         timeout: std::time::Duration,
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         let _ = (url, timeout);
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::navigate_to_url is not implemented for this platform",
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::navigate_to_url is not implemented for this platform",
         ))
     }
 
     /// Forward a mouse / scroll event to the underlying webview.
     /// Coordinates are physical pixels relative to the webview's top-left
     /// corner.
-    fn send_mouse_input(&mut self, event: MouseInput) -> Result<(), WryWebSurfaceError> {
+    fn send_mouse_input(&mut self, event: MouseInput) -> Result<(), WebSurfaceError> {
         let _ = event;
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::send_mouse_input is not implemented for this platform",
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::send_mouse_input is not implemented for this platform",
         ))
     }
 
     /// Move keyboard focus into the underlying webview. Hosts typically
     /// call this when the user clicks the webview region or tabs into it
     /// from a host control.
-    fn move_focus(&mut self, reason: FocusReason) -> Result<(), WryWebSurfaceError> {
+    fn move_focus(&mut self, reason: FocusReason) -> Result<(), WebSurfaceError> {
         let _ = reason;
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::move_focus is not implemented for this platform",
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::move_focus is not implemented for this platform",
         ))
     }
 
@@ -1001,11 +1040,11 @@ pub trait WryWebSurfaceProducer {
 
     /// Post a string message into the webview's `window.chrome.webview`
     /// listener. Producers that don't support JS messaging return
-    /// [`WryWebSurfaceError::Unsupported`].
-    fn post_web_message(&mut self, message: &str) -> Result<(), WryWebSurfaceError> {
+    /// [`WebSurfaceError::Unsupported`].
+    fn post_web_message(&mut self, message: &str) -> Result<(), WebSurfaceError> {
         let _ = message;
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::post_web_message is not implemented for this platform",
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::post_web_message is not implemented for this platform",
         ))
     }
 
@@ -1019,39 +1058,39 @@ pub trait WryWebSurfaceProducer {
     /// Take a one-shot PNG snapshot of the current webview document.
     /// Useful for thumbnails / previews / diagnostics; not a substitute
     /// for the live capture path. Producers that don't support snapshot
-    /// capture return [`WryWebSurfaceError::Unsupported`].
-    fn capture_snapshot_png(&mut self) -> Result<Vec<u8>, WryWebSurfaceError> {
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::capture_snapshot_png is not implemented for this platform",
+    /// capture return [`WebSurfaceError::Unsupported`].
+    fn capture_snapshot_png(&mut self) -> Result<Vec<u8>, WebSurfaceError> {
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::capture_snapshot_png is not implemented for this platform",
         ))
     }
 
     /// Forward a touch / pen / pointer event to the webview.
-    fn send_pointer_input(&mut self, event: PointerInput) -> Result<(), WryWebSurfaceError> {
+    fn send_pointer_input(&mut self, event: PointerInput) -> Result<(), WebSurfaceError> {
         let _ = event;
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::send_pointer_input is not implemented for this platform",
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::send_pointer_input is not implemented for this platform",
         ))
     }
 
     /// Forward a keyboard / modifier-state event to the webview. The
     /// host typically calls this when the webview is the focus target
-    /// (see [`WryWebSurfaceProducer::move_focus`]) and the windowing
+    /// (see [`WebSurfaceProducer::move_focus`]) and the windowing
     /// system delivers a key event. Producers that don't yet support
-    /// keyboard forwarding return [`WryWebSurfaceError::Unsupported`].
-    fn send_keyboard_input(&mut self, event: KeyboardInput) -> Result<(), WryWebSurfaceError> {
+    /// keyboard forwarding return [`WebSurfaceError::Unsupported`].
+    fn send_keyboard_input(&mut self, event: KeyboardInput) -> Result<(), WebSurfaceError> {
         let _ = event;
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::send_keyboard_input is not implemented for this platform",
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::send_keyboard_input is not implemented for this platform",
         ))
     }
 
     /// Forward a drag / drop event to the webview. Hosts call this when
     /// the user drags content over the webview region.
-    fn send_drag_input(&mut self, event: DragInput) -> Result<(), WryWebSurfaceError> {
+    fn send_drag_input(&mut self, event: DragInput) -> Result<(), WebSurfaceError> {
         let _ = event;
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::send_drag_input is not implemented for this platform",
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::send_drag_input is not implemented for this platform",
         ))
     }
 
@@ -1063,32 +1102,32 @@ pub trait WryWebSurfaceProducer {
     }
 
     /// Reload the current page (equivalent to the user pressing F5).
-    fn reload(&mut self) -> Result<(), WryWebSurfaceError> {
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::reload is not implemented for this platform",
+    fn reload(&mut self) -> Result<(), WebSurfaceError> {
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::reload is not implemented for this platform",
         ))
     }
 
     /// Stop loading the current navigation.
-    fn stop(&mut self) -> Result<(), WryWebSurfaceError> {
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::stop is not implemented for this platform",
+    fn stop(&mut self) -> Result<(), WebSurfaceError> {
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::stop is not implemented for this platform",
         ))
     }
 
     /// Navigate one entry back in the session history if possible. Returns
     /// `Ok(false)` if the back stack is empty, `Ok(true)` if a navigation
     /// was started.
-    fn go_back(&mut self) -> Result<bool, WryWebSurfaceError> {
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::go_back is not implemented for this platform",
+    fn go_back(&mut self) -> Result<bool, WebSurfaceError> {
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::go_back is not implemented for this platform",
         ))
     }
 
     /// Navigate one entry forward in the session history if possible.
-    fn go_forward(&mut self) -> Result<bool, WryWebSurfaceError> {
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::go_forward is not implemented for this platform",
+    fn go_forward(&mut self) -> Result<bool, WebSurfaceError> {
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::go_forward is not implemented for this platform",
         ))
     }
 
@@ -1117,9 +1156,9 @@ pub trait WryWebSurfaceProducer {
     ///   set `devtools_enabled = Some(true)` via `apply_settings`
     ///   first to make the WebView discoverable.
     /// - **Linux**: opens the WebKit Web Inspector.
-    fn open_devtools_window(&mut self) -> Result<(), WryWebSurfaceError> {
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::open_devtools_window is not implemented for this platform",
+    fn open_devtools_window(&mut self) -> Result<(), WebSurfaceError> {
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::open_devtools_window is not implemented for this platform",
         ))
     }
 
@@ -1141,20 +1180,20 @@ pub trait WryWebSurfaceProducer {
     /// `_setSuspended:` SPI-only path which fully pauses execution
     /// and is unsupported here. Most tabs-in-one-process consumers
     /// only need the light path.
-    fn set_visible(&mut self, visible: bool) -> Result<(), WryWebSurfaceError> {
+    fn set_visible(&mut self, visible: bool) -> Result<(), WebSurfaceError> {
         let _ = visible;
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::set_visible is not implemented for this platform",
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::set_visible is not implemented for this platform",
         ))
     }
 
     /// Apply a partial settings update to the webview. Each `Some` field
     /// is applied; `None` fields are left at their current value.
     /// Producers report unsupported fields by ignoring them silently.
-    fn apply_settings(&mut self, settings: &WebSurfaceSettings) -> Result<(), WryWebSurfaceError> {
+    fn apply_settings(&mut self, settings: &WebSurfaceSettings) -> Result<(), WebSurfaceError> {
         let _ = settings;
-        Err(WryWebSurfaceError::Unsupported(
-            "WryWebSurfaceProducer::apply_settings is not implemented for this platform",
+        Err(WebSurfaceError::Unsupported(
+            "WebSurfaceProducer::apply_settings is not implemented for this platform",
         ))
     }
 }
@@ -1162,22 +1201,22 @@ pub trait WryWebSurfaceProducer {
 /// Conservative overlay-only producer used when no capture backend is available yet.
 #[derive(Clone, Debug)]
 pub struct OverlayOnlyProducer {
-    capabilities: WryWebSurfaceCapabilities,
+    capabilities: WebSurfaceCapabilities,
 }
 
 impl OverlayOnlyProducer {
-    pub fn new(capabilities: WryWebSurfaceCapabilities) -> Self {
+    pub fn new(capabilities: WebSurfaceCapabilities) -> Self {
         Self { capabilities }
     }
 }
 
-impl WryWebSurfaceProducer for OverlayOnlyProducer {
-    fn capabilities(&self) -> WryWebSurfaceCapabilities {
+impl WebSurfaceProducer for OverlayOnlyProducer {
+    fn capabilities(&self) -> WebSurfaceCapabilities {
         self.capabilities.clone()
     }
 
-    fn acquire_frame(&mut self) -> Result<WryWebSurfaceFrame, WryWebSurfaceError> {
-        Ok(WryWebSurfaceFrame::OverlayOnly)
+    fn acquire_frame(&mut self) -> Result<WebSurfaceFrame, WebSurfaceError> {
+        Ok(WebSurfaceFrame::OverlayOnly)
     }
 }
 
@@ -1188,7 +1227,7 @@ mod tests {
     #[test]
     fn overlay_frame_reports_overlay_mode() {
         assert_eq!(
-            WryWebSurfaceFrame::OverlayOnly.mode(),
+            WebSurfaceFrame::OverlayOnly.mode(),
             WebSurfaceMode::NativeChildOverlay
         );
     }

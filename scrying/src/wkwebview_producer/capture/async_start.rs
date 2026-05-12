@@ -21,7 +21,7 @@ use objc2_screen_capture_kit::{
     SCContentFilter, SCShareableContent, SCStream, SCStreamOutputType, SCWindow,
 };
 
-use crate::{HostWgpuContext, InteropBackend, WebSurfaceMode, WryWebSurfaceError};
+use crate::{HostWgpuContext, InteropBackend, WebSurfaceMode, WebSurfaceError};
 
 use super::super::producer::WkWebViewProducer;
 use super::{
@@ -49,7 +49,7 @@ impl WkWebViewProducer {
     pub fn start_capture_async(
         &mut self,
         host: HostWgpuContext,
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         if self.capture.is_some() {
             return Ok(());
         }
@@ -57,7 +57,7 @@ impl WkWebViewProducer {
         // Starting, return without restarting.
         {
             let p = self.pending_capture.lock().map_err(|_| {
-                WryWebSurfaceError::Platform("pending_capture lock poisoned".into())
+                WebSurfaceError::Platform("pending_capture lock poisoned".into())
             })?;
             if matches!(*p, PendingCaptureSlot::Starting) {
                 return Ok(());
@@ -65,12 +65,12 @@ impl WkWebViewProducer {
         }
 
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "start_capture_async must be called on the main thread".into(),
             ));
         }
         if host.backend != InteropBackend::Metal {
-            return Err(WryWebSurfaceError::Platform(format!(
+            return Err(WebSurfaceError::Platform(format!(
                 "start_capture_async requires a Metal wgpu backend, got {:?}",
                 host.backend
             )));
@@ -80,7 +80,7 @@ impl WkWebViewProducer {
             host.device
                 .as_hal::<wgpu::wgc::api::Metal>()
                 .ok_or_else(|| {
-                    WryWebSurfaceError::Platform(
+                    WebSurfaceError::Platform(
                         "host wgpu device is not on the Metal backend".into(),
                     )
                 })?
@@ -89,13 +89,13 @@ impl WkWebViewProducer {
         };
 
         let host_window = self.webview.window().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "WKWebView is not in a window — start_capture_async requires the parent NSView to be embedded in an NSWindow".into(),
             )
         })?;
         let target_window_number = host_window.windowNumber();
         if target_window_number <= 0 {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "host NSWindow has no valid windowNumber".into(),
             ));
         }
@@ -112,12 +112,12 @@ impl WkWebViewProducer {
         // buffer on the main thread; both ferry across to the
         // SCK completion via `SendOnly`.
         let command_queue = metal_device.newCommandQueue().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "MTLDevice::newCommandQueue returned nil".into(),
             )
         })?;
         let shared_event = metal_device.newSharedEvent().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "MTLDevice::newSharedEvent returned nil".into(),
             )
         })?;
@@ -126,7 +126,7 @@ impl WkWebViewProducer {
             .pending_capture
             .lock()
             .map_err(|_| {
-                WryWebSurfaceError::Platform("pending_capture lock poisoned".into())
+                WebSurfaceError::Platform("pending_capture lock poisoned".into())
             })? = PendingCaptureSlot::Starting;
 
         let pending = Arc::clone(&self.pending_capture);

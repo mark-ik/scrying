@@ -32,7 +32,7 @@ use objc2_screen_capture_kit::{
 use crate::native_frame::MetalTextureRef as NativeMetalTextureRef;
 use crate::{
     HostWgpuContext, InteropBackend, NativeFrame, SyncMechanism, WebSurfaceMode,
-    WryWebSurfaceError, WryWebSurfaceFrame,
+    WebSurfaceError, WebSurfaceFrame,
 };
 
 use super::super::helpers::pump_until;
@@ -49,7 +49,7 @@ impl WkWebViewProducer {
     ///
     /// On success, [`Self::acquire_frame`] / [`Self::try_acquire_frame`]
     /// flip from `OverlayOnly` to
-    /// `WryWebSurfaceFrame::Native(NativeFrame::MetalTextureRef(...))`,
+    /// `WebSurfaceFrame::Native(NativeFrame::MetalTextureRef(...))`,
     /// and `capabilities().preferred_mode` flips to
     /// [`WebSurfaceMode::ImportedTexture`].
     ///
@@ -77,19 +77,19 @@ impl WkWebViewProducer {
         &mut self,
         host: HostWgpuContext,
         timeout: Duration,
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         if self.capture.is_some() {
             return Ok(());
         }
 
         let mtm = MainThreadMarker::new().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "start_capture must be called on the main thread".into(),
             )
         })?;
 
         if host.backend != InteropBackend::Metal {
-            return Err(WryWebSurfaceError::Platform(format!(
+            return Err(WebSurfaceError::Platform(format!(
                 "start_capture requires a Metal wgpu backend, got {:?}",
                 host.backend
             )));
@@ -102,7 +102,7 @@ impl WkWebViewProducer {
             host.device
                 .as_hal::<wgpu::wgc::api::Metal>()
                 .ok_or_else(|| {
-                    WryWebSurfaceError::Platform(
+                    WebSurfaceError::Platform(
                         "host wgpu device is not on the Metal backend".into(),
                     )
                 })?
@@ -115,19 +115,19 @@ impl WkWebViewProducer {
         // resolution; `try_acquire_frame` does the per-frame
         // blit-crop down to the WKWebView's pixel rect.
         let host_window = self.webview.window().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "WKWebView is not in a window — start_capture requires the producer's parent NSView to be embedded in an NSWindow".into(),
             )
         })?;
         let window_pixel_size = host_window_pixel_size(&host_window);
 
         let command_queue = metal_device.newCommandQueue().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "MTLDevice::newCommandQueue returned nil".into(),
             )
         })?;
         let shared_event = metal_device.newSharedEvent().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "MTLDevice::newSharedEvent returned nil".into(),
             )
         })?;
@@ -168,7 +168,7 @@ impl WkWebViewProducer {
                     Some(&sample_queue),
                 )
                 .map_err(|e| {
-                    WryWebSurfaceError::Platform(format!(
+                    WebSurfaceError::Platform(format!(
                         "addStreamOutput failed: {}",
                         e.localizedDescription()
                     ))
@@ -200,13 +200,13 @@ impl WkWebViewProducer {
         match pump_until(timeout, || signal.lock().ok().and_then(|s| s.result.clone())) {
             Ok(Ok(())) => {}
             Ok(Err(msg)) => {
-                return Err(WryWebSurfaceError::Platform(format!(
+                return Err(WebSurfaceError::Platform(format!(
                     "startCapture failed: {}",
                     msg
                 )));
             }
             Err(()) => {
-                return Err(WryWebSurfaceError::Platform(format!(
+                return Err(WebSurfaceError::Platform(format!(
                     "startCapture did not resolve within {:?}",
                     timeout
                 )));
@@ -253,16 +253,16 @@ impl WkWebViewProducer {
     pub(super) fn resolve_target_window(
         &self,
         timeout: Duration,
-    ) -> Result<Retained<SCWindow>, WryWebSurfaceError> {
+    ) -> Result<Retained<SCWindow>, WebSurfaceError> {
         let host_window =
             self.webview
                 .window()
-                .ok_or_else(|| WryWebSurfaceError::Platform(
+                .ok_or_else(|| WebSurfaceError::Platform(
                     "WKWebView is not in a window — start_capture requires the producer's parent NSView to be embedded in an NSWindow".into(),
                 ))?;
         let target_window_number = host_window.windowNumber();
         if target_window_number <= 0 {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "host NSWindow has no valid windowNumber".into(),
             ));
         }
@@ -345,20 +345,20 @@ impl WkWebViewProducer {
             signal.lock().ok().and_then(|mut s| s.take())
         })
         .map_err(|()| {
-            WryWebSurfaceError::Platform(format!(
+            WebSurfaceError::Platform(format!(
                 "SCShareableContent did not resolve within {:?} (Screen Recording permission may be denied)",
                 timeout
             ))
         })?;
 
         if let Some(msg) = result.error {
-            return Err(WryWebSurfaceError::Platform(format!(
+            return Err(WebSurfaceError::Platform(format!(
                 "SCShareableContent failed: {}",
                 msg
             )));
         }
         result.matched.ok_or_else(|| {
-            WryWebSurfaceError::Platform(format!(
+            WebSurfaceError::Platform(format!(
                 "no SCWindow matched the WKWebView's host windowNumber {}",
                 target_window_number
             ))
@@ -366,7 +366,7 @@ impl WkWebViewProducer {
     }
 
     /// Non-blocking acquire. Returns:
-    /// - `Ok(Some(WryWebSurfaceFrame::Native(...)))` if the
+    /// - `Ok(Some(WebSurfaceFrame::Native(...)))` if the
     ///   ScreenCaptureKit pipeline has produced a new sample since the
     ///   last call.
     /// - `Ok(None)` if no sample is currently waiting (or capture has
@@ -376,7 +376,7 @@ impl WkWebViewProducer {
     ///   last call.
     pub fn try_acquire_frame(
         &mut self,
-    ) -> Result<Option<WryWebSurfaceFrame>, WryWebSurfaceError> {
+    ) -> Result<Option<WebSurfaceFrame>, WebSurfaceError> {
         // Re-apply size if the host window crossed a backing-scale
         // boundary since the last call. Cheap when no change is
         // pending.
@@ -388,7 +388,7 @@ impl WkWebViewProducer {
         if let Ok(mut slot) = capture.stream_error.lock()
             && let Some(msg) = slot.take()
         {
-            return Err(WryWebSurfaceError::Platform(format!(
+            return Err(WebSurfaceError::Platform(format!(
                 "SCStream stopped with error: {}",
                 msg
             )));
@@ -400,7 +400,7 @@ impl WkWebViewProducer {
                 None => return Ok(None),
             },
             Err(_) => {
-                return Err(WryWebSurfaceError::Platform(
+                return Err(WebSurfaceError::Platform(
                     "latest-sample lock poisoned".into(),
                 ))
             }
@@ -421,7 +421,7 @@ impl WkWebViewProducer {
         let pixel_buffer: &CVPixelBuffer = &image_buffer;
 
         let iosurface = CVPixelBufferGetIOSurface(Some(pixel_buffer)).ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "CVPixelBuffer was not IOSurface-backed (configure SCStreamConfiguration to BGRA)"
                     .into(),
             )
@@ -459,7 +459,7 @@ impl WkWebViewProducer {
         // bug, or a config-change path that didn't go through
         // `update_capture_for_layout_change`). Cheap to keep.
         let host_window_for_dims = self.webview.window().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "WKWebView's host window vanished mid-capture".into(),
             )
         })?;
@@ -493,7 +493,7 @@ impl WkWebViewProducer {
             .metal_device
             .newTextureWithDescriptor_iosurface_plane(&source_descriptor, &iosurface, 0)
             .ok_or_else(|| {
-                WryWebSurfaceError::Platform(
+                WebSurfaceError::Platform(
                     "MTLDevice::newTextureWithDescriptor:iosurface:plane: returned nil".into(),
                 )
             })?;
@@ -542,7 +542,7 @@ impl WkWebViewProducer {
             .metal_device
             .newTextureWithDescriptor(&dest_descriptor)
             .ok_or_else(|| {
-                WryWebSurfaceError::Platform(
+                WebSurfaceError::Platform(
                     "MTLDevice::newTextureWithDescriptor: (dest) returned nil".into(),
                 )
             })?;
@@ -551,12 +551,12 @@ impl WkWebViewProducer {
         // offset within the captured window; dest origin is the
         // top-left of the cropped texture.
         let cmd_buf = capture.command_queue.commandBuffer().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "MTLCommandQueue::commandBuffer returned nil".into(),
             )
         })?;
         let blit = cmd_buf.blitCommandEncoder().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "MTLCommandBuffer::blitCommandEncoder returned nil".into(),
             )
         })?;
@@ -642,7 +642,7 @@ impl WkWebViewProducer {
         capture.last_emitted = Some(dest_texture);
         capture.samples_consumed.fetch_add(1, Ordering::Relaxed);
 
-        Ok(Some(WryWebSurfaceFrame::Native(NativeFrame::MetalTextureRef(frame))))
+        Ok(Some(WebSurfaceFrame::Native(NativeFrame::MetalTextureRef(frame))))
     }
 }
 

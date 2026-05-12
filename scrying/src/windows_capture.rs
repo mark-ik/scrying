@@ -45,7 +45,7 @@ use windows::{
     core::{Interface, PCWSTR},
 };
 
-use crate::{WryWebSurfaceError, WryWebSurfaceFrame};
+use crate::{WebSurfaceError, WebSurfaceFrame};
 
 /// Metadata for a captured WebView2 frame before it has been converted into a
 /// `NativeFrame::Dx12SharedTexture`.
@@ -107,9 +107,9 @@ impl D3D11FenceSignaler {
     fn open_from_shared_handle(
         device5: &ID3D11Device5,
         shared_handle: *mut std::ffi::c_void,
-    ) -> Result<Self, WryWebSurfaceError> {
+    ) -> Result<Self, WebSurfaceError> {
         if shared_handle.is_null() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "fence shared handle was null".to_string(),
             ));
         }
@@ -118,13 +118,13 @@ impl D3D11FenceSignaler {
             device5
                 .OpenSharedFence(HANDLE(shared_handle), &mut fence)
                 .map_err(|error| {
-                    WryWebSurfaceError::Platform(format!(
+                    WebSurfaceError::Platform(format!(
                         "ID3D11Device5::OpenSharedFence failed: {error}"
                     ))
                 })?;
         }
         let fence = fence.ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "ID3D11Device5::OpenSharedFence returned null fence".to_string(),
             )
         })?;
@@ -134,11 +134,11 @@ impl D3D11FenceSignaler {
         })
     }
 
-    fn signal(&self, ctx4: &ID3D11DeviceContext4) -> Result<u64, WryWebSurfaceError> {
+    fn signal(&self, ctx4: &ID3D11DeviceContext4) -> Result<u64, WebSurfaceError> {
         let value = self.next_value.fetch_add(1, Ordering::SeqCst) + 1;
         unsafe {
             ctx4.Signal(&self.fence, value).map_err(|error| {
-                WryWebSurfaceError::Platform(format!(
+                WebSurfaceError::Platform(format!(
                     "ID3D11DeviceContext4::Signal({value}) failed: {error}"
                 ))
             })?;
@@ -148,7 +148,7 @@ impl D3D11FenceSignaler {
 }
 
 impl D3D11SharedTextureFactory {
-    pub fn new_hardware() -> Result<Self, WryWebSurfaceError> {
+    pub fn new_hardware() -> Result<Self, WebSurfaceError> {
         let (device, context) = create_d3d11_hardware_device()?;
         Ok(Self {
             device,
@@ -164,15 +164,15 @@ impl D3D11SharedTextureFactory {
     /// mutex and CPU-spinning.
     pub fn new_hardware_with_fence(
         fence_shared_handle: *mut std::ffi::c_void,
-    ) -> Result<Self, WryWebSurfaceError> {
+    ) -> Result<Self, WebSurfaceError> {
         let (device, context) = create_d3d11_hardware_device()?;
         let device5 = device.cast::<ID3D11Device5>().map_err(|error| {
-            WryWebSurfaceError::Platform(format!(
+            WebSurfaceError::Platform(format!(
                 "ID3D11Device cast to ID3D11Device5 failed (Windows 10 1809+ required): {error}"
             ))
         })?;
         let context4 = context.cast::<ID3D11DeviceContext4>().map_err(|error| {
-            WryWebSurfaceError::Platform(format!(
+            WebSurfaceError::Platform(format!(
                 "ID3D11DeviceContext cast to ID3D11DeviceContext4 failed: {error}"
             ))
         })?;
@@ -204,7 +204,7 @@ impl D3D11SharedTextureFactory {
         size: PhysicalSize<u32>,
         format: wgpu::TextureFormat,
         generation: u64,
-    ) -> Result<WebView2DxgiSharedHandleFrame, WryWebSurfaceError> {
+    ) -> Result<WebView2DxgiSharedHandleFrame, WebSurfaceError> {
         Ok(self
             .create_shared_texture(size, format, generation)?
             .shared_frame)
@@ -215,7 +215,7 @@ impl D3D11SharedTextureFactory {
         size: PhysicalSize<u32>,
         format: wgpu::TextureFormat,
         generation: u64,
-    ) -> Result<D3D11SharedTexture, WryWebSurfaceError> {
+    ) -> Result<D3D11SharedTexture, WebSurfaceError> {
         let dxgi_format = dxgi_format_for_wgpu(format)?;
         // D3D11_RESOURCE_MISC_SHARED_NTHANDLE requires either SHARED or
         // SHARED_KEYEDMUTEX alongside it — NT-handle sharing isn't valid
@@ -247,11 +247,11 @@ impl D3D11SharedTextureFactory {
 
         let mut texture = None;
         unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut texture)) }.map_err(
-            |error| WryWebSurfaceError::Platform(format!("CreateTexture2D failed: {error}")),
+            |error| WebSurfaceError::Platform(format!("CreateTexture2D failed: {error}")),
         )?;
 
         let texture = texture.ok_or_else(|| {
-            WryWebSurfaceError::Platform("CreateTexture2D returned no texture".to_string())
+            WebSurfaceError::Platform("CreateTexture2D returned no texture".to_string())
         })?;
 
         let shared_frame = shared_handle_from_texture(&texture, size, format, generation)?;
@@ -261,27 +261,27 @@ impl D3D11SharedTextureFactory {
         })
     }
 
-    pub fn create_winrt_direct3d_device(&self) -> Result<IDirect3DDevice, WryWebSurfaceError> {
+    pub fn create_winrt_direct3d_device(&self) -> Result<IDirect3DDevice, WebSurfaceError> {
         let dxgi_device = self.device.cast::<IDXGIDevice>().map_err(|error| {
-            WryWebSurfaceError::Platform(format!(
+            WebSurfaceError::Platform(format!(
                 "ID3D11Device cast to IDXGIDevice failed: {error}"
             ))
         })?;
         let inspectable =
             unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device) }.map_err(|error| {
-                WryWebSurfaceError::Platform(format!(
+                WebSurfaceError::Platform(format!(
                     "CreateDirect3D11DeviceFromDXGIDevice failed: {error}"
                 ))
             })?;
         inspectable.cast::<IDirect3DDevice>().map_err(|error| {
-            WryWebSurfaceError::Platform(format!("IDirect3DDevice cast failed: {error}"))
+            WebSurfaceError::Platform(format!("IDirect3DDevice cast failed: {error}"))
         })
     }
 
     pub fn copy_capture_into_shared_frame(
         &self,
         capture: WebView2D3D11CaptureFrame,
-    ) -> Result<WebView2DxgiSharedHandleFrame, WryWebSurfaceError> {
+    ) -> Result<WebView2DxgiSharedHandleFrame, WebSurfaceError> {
         let target =
             self.create_shared_texture(capture.size, capture.format, capture.generation)?;
         let fence_value = self.copy_capture_into_existing_target(&target.texture, capture)?;
@@ -305,7 +305,7 @@ impl D3D11SharedTextureFactory {
         &self,
         target: &ID3D11Texture2D,
         capture: WebView2D3D11CaptureFrame,
-    ) -> Result<u64, WryWebSurfaceError> {
+    ) -> Result<u64, WebSurfaceError> {
         match self.fence.as_ref() {
             Some(fence_mode) => self.copy_with_fence(target, capture, fence_mode),
             None => self.copy_with_keyed_mutex(target, capture).map(|()| 0),
@@ -316,11 +316,11 @@ impl D3D11SharedTextureFactory {
         &self,
         target: &ID3D11Texture2D,
         capture: WebView2D3D11CaptureFrame,
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         let target_mutex = target
             .cast::<windows::Win32::Graphics::Dxgi::IDXGIKeyedMutex>()
             .map_err(|error| {
-                WryWebSurfaceError::Platform(format!(
+                WebSurfaceError::Platform(format!(
                     "destination texture cast to IDXGIKeyedMutex failed: {error}"
                 ))
             })?;
@@ -330,7 +330,7 @@ impl D3D11SharedTextureFactory {
         const ACQUIRE_TIMEOUT_MS: u32 = 500;
         let acquire_hr = unsafe { target_mutex.AcquireSync(0, ACQUIRE_TIMEOUT_MS) };
         if let Err(error) = acquire_hr {
-            return Err(WryWebSurfaceError::Platform(format!(
+            return Err(WebSurfaceError::Platform(format!(
                 "AcquireSync(0, {ACQUIRE_TIMEOUT_MS}ms) on shared dest failed/timed out: {error}"
             )));
         }
@@ -347,7 +347,7 @@ impl D3D11SharedTextureFactory {
         let sync_result = self.flush_and_wait_for_gpu();
 
         let release_result = unsafe { target_mutex.ReleaseSync(0) }.map_err(|error| {
-            WryWebSurfaceError::Platform(format!("ReleaseSync(0) on shared dest failed: {error}"))
+            WebSurfaceError::Platform(format!("ReleaseSync(0) on shared dest failed: {error}"))
         });
 
         copy_result?;
@@ -361,7 +361,7 @@ impl D3D11SharedTextureFactory {
         target: &ID3D11Texture2D,
         capture: WebView2D3D11CaptureFrame,
         fence_mode: &FenceMode,
-    ) -> Result<u64, WryWebSurfaceError> {
+    ) -> Result<u64, WebSurfaceError> {
         with_borrowed_d3d11_texture(capture.raw_d3d11_texture, |source| {
             unsafe {
                 self.context.CopyResource(target, source);
@@ -377,7 +377,7 @@ impl D3D11SharedTextureFactory {
         Ok(value)
     }
 
-    fn flush_and_wait_for_gpu(&self) -> Result<(), WryWebSurfaceError> {
+    fn flush_and_wait_for_gpu(&self) -> Result<(), WebSurfaceError> {
         let mut query = None;
         unsafe {
             self.device
@@ -389,13 +389,13 @@ impl D3D11SharedTextureFactory {
                     Some(&mut query),
                 )
                 .map_err(|error| {
-                    WryWebSurfaceError::Platform(format!(
+                    WebSurfaceError::Platform(format!(
                         "CreateQuery(D3D11_QUERY_EVENT) failed: {error}"
                     ))
                 })?;
         }
         let query = query.ok_or_else(|| {
-            WryWebSurfaceError::Platform("CreateQuery returned no query".to_string())
+            WebSurfaceError::Platform("CreateQuery returned no query".to_string())
         })?;
 
         unsafe {
@@ -419,7 +419,7 @@ impl D3D11SharedTextureFactory {
                 return Ok(());
             }
             if std::time::Instant::now() > deadline {
-                return Err(WryWebSurfaceError::Platform(
+                return Err(WebSurfaceError::Platform(
                     "D3D11 GPU sync (event query) timed out after 2s".to_string(),
                 ));
             }
@@ -428,7 +428,7 @@ impl D3D11SharedTextureFactory {
     }
 }
 
-fn create_d3d11_hardware_device() -> Result<(ID3D11Device, ID3D11DeviceContext), WryWebSurfaceError>
+fn create_d3d11_hardware_device() -> Result<(ID3D11Device, ID3D11DeviceContext), WebSurfaceError>
 {
     let mut device = None;
     let mut context = None;
@@ -448,13 +448,13 @@ fn create_d3d11_hardware_device() -> Result<(ID3D11Device, ID3D11DeviceContext),
             Some(&mut context),
         )
     }
-    .map_err(|error| WryWebSurfaceError::Platform(format!("D3D11CreateDevice failed: {error}")))?;
+    .map_err(|error| WebSurfaceError::Platform(format!("D3D11CreateDevice failed: {error}")))?;
 
     let device = device.ok_or_else(|| {
-        WryWebSurfaceError::Platform("D3D11CreateDevice returned no device".to_string())
+        WebSurfaceError::Platform("D3D11CreateDevice returned no device".to_string())
     })?;
     let context = context.ok_or_else(|| {
-        WryWebSurfaceError::Platform(
+        WebSurfaceError::Platform(
             "D3D11CreateDevice returned no immediate context".to_string(),
         )
     })?;
@@ -475,9 +475,9 @@ pub struct GraphicsCaptureProbe {
     pub free_threaded_frame_pool_created: bool,
 }
 
-pub fn probe_graphics_capture_prerequisites() -> Result<GraphicsCaptureProbe, WryWebSurfaceError> {
+pub fn probe_graphics_capture_prerequisites() -> Result<GraphicsCaptureProbe, WebSurfaceError> {
     let session_supported = GraphicsCaptureSession::IsSupported().map_err(|error| {
-        WryWebSurfaceError::Platform(format!(
+        WebSurfaceError::Platform(format!(
             "GraphicsCaptureSession::IsSupported failed: {error}"
         ))
     })?;
@@ -501,7 +501,7 @@ pub fn probe_graphics_capture_prerequisites() -> Result<GraphicsCaptureProbe, Wr
         },
     )
     .map_err(|error| {
-        WryWebSurfaceError::Platform(format!(
+        WebSurfaceError::Platform(format!(
             "Direct3D11CaptureFramePool::CreateFreeThreaded failed: {error}"
         ))
     })?;
@@ -532,9 +532,9 @@ pub struct CapturedWindowFrame {
 pub unsafe fn capture_window_frame_once(
     hwnd: *mut std::ffi::c_void,
     timeout: std::time::Duration,
-) -> Result<CapturedWindowFrame, WryWebSurfaceError> {
+) -> Result<CapturedWindowFrame, WebSurfaceError> {
     if hwnd.is_null() {
-        return Err(WryWebSurfaceError::Platform(
+        return Err(WebSurfaceError::Platform(
             "window capture HWND was null".to_string(),
         ));
     }
@@ -555,7 +555,7 @@ pub unsafe fn capture_window_frame_once(
 pub unsafe fn capture_visual_frame_once(
     visual: *mut std::ffi::c_void,
     timeout: std::time::Duration,
-) -> Result<CapturedWindowFrame, WryWebSurfaceError> {
+) -> Result<CapturedWindowFrame, WebSurfaceError> {
     unsafe { capture_visual_frame_once_after_start(visual, timeout, || Ok(())) }
 }
 
@@ -572,17 +572,17 @@ pub unsafe fn capture_visual_frame_once(
 pub unsafe fn capture_visual_frame_once_after_start(
     visual: *mut std::ffi::c_void,
     timeout: std::time::Duration,
-    after_start: impl FnOnce() -> Result<(), WryWebSurfaceError>,
-) -> Result<CapturedWindowFrame, WryWebSurfaceError> {
+    after_start: impl FnOnce() -> Result<(), WebSurfaceError>,
+) -> Result<CapturedWindowFrame, WebSurfaceError> {
     if visual.is_null() {
-        return Err(WryWebSurfaceError::Platform(
+        return Err(WebSurfaceError::Platform(
             "composition visual pointer was null".to_string(),
         ));
     }
 
     with_borrowed_composition_visual(visual, |visual| {
         let item = GraphicsCaptureItem::CreateFromVisual(visual).map_err(|error| {
-            WryWebSurfaceError::Platform(format!(
+            WebSurfaceError::Platform(format!(
                 "GraphicsCaptureItem::CreateFromVisual failed: {error}"
             ))
         })?;
@@ -601,24 +601,24 @@ pub unsafe fn capture_visual_frame_once_after_start(
 /// duration of the call.
 pub unsafe fn capture_visual_item_size(
     visual: *mut std::ffi::c_void,
-) -> Result<PhysicalSize<u32>, WryWebSurfaceError> {
+) -> Result<PhysicalSize<u32>, WebSurfaceError> {
     if visual.is_null() {
-        return Err(WryWebSurfaceError::Platform(
+        return Err(WebSurfaceError::Platform(
             "composition visual pointer was null".to_string(),
         ));
     }
 
     with_borrowed_composition_visual(visual, |visual| {
         let item = GraphicsCaptureItem::CreateFromVisual(visual).map_err(|error| {
-            WryWebSurfaceError::Platform(format!(
+            WebSurfaceError::Platform(format!(
                 "GraphicsCaptureItem::CreateFromVisual failed: {error}"
             ))
         })?;
         let item_size = item.Size().map_err(|error| {
-            WryWebSurfaceError::Platform(format!("GraphicsCaptureItem::Size failed: {error}"))
+            WebSurfaceError::Platform(format!("GraphicsCaptureItem::Size failed: {error}"))
         })?;
         if item_size.Width <= 0 || item_size.Height <= 0 {
-            return Err(WryWebSurfaceError::Platform(format!(
+            return Err(WebSurfaceError::Platform(format!(
                 "GraphicsCaptureItem returned invalid size {}x{}",
                 item_size.Width, item_size.Height
             )));
@@ -630,31 +630,31 @@ pub unsafe fn capture_visual_item_size(
 pub fn capture_graphics_item_frame_once(
     item: &GraphicsCaptureItem,
     timeout: std::time::Duration,
-) -> Result<CapturedWindowFrame, WryWebSurfaceError> {
+) -> Result<CapturedWindowFrame, WebSurfaceError> {
     capture_graphics_item_frame_once_after_start(item, timeout, || Ok(()))
 }
 
 fn capture_graphics_item_frame_once_after_start(
     item: &GraphicsCaptureItem,
     timeout: std::time::Duration,
-    after_start: impl FnOnce() -> Result<(), WryWebSurfaceError>,
-) -> Result<CapturedWindowFrame, WryWebSurfaceError> {
+    after_start: impl FnOnce() -> Result<(), WebSurfaceError>,
+) -> Result<CapturedWindowFrame, WebSurfaceError> {
     let session_supported = GraphicsCaptureSession::IsSupported().map_err(|error| {
-        WryWebSurfaceError::Platform(format!(
+        WebSurfaceError::Platform(format!(
             "GraphicsCaptureSession::IsSupported failed: {error}"
         ))
     })?;
     if !session_supported {
-        return Err(WryWebSurfaceError::Unsupported(
+        return Err(WebSurfaceError::Unsupported(
             "Windows.Graphics.Capture is not supported in this session",
         ));
     }
 
     let item_size = item.Size().map_err(|error| {
-        WryWebSurfaceError::Platform(format!("GraphicsCaptureItem::Size failed: {error}"))
+        WebSurfaceError::Platform(format!("GraphicsCaptureItem::Size failed: {error}"))
     })?;
     if item_size.Width <= 0 || item_size.Height <= 0 {
-        return Err(WryWebSurfaceError::Platform(format!(
+        return Err(WebSurfaceError::Platform(format!(
             "GraphicsCaptureItem returned invalid size {}x{}",
             item_size.Width, item_size.Height
         )));
@@ -669,18 +669,18 @@ fn capture_graphics_item_frame_once_after_start(
         item_size,
     )
     .map_err(|error| {
-        WryWebSurfaceError::Platform(format!(
+        WebSurfaceError::Platform(format!(
             "Direct3D11CaptureFramePool::CreateFreeThreaded failed: {error}"
         ))
     })?;
     let session = pool.CreateCaptureSession(item).map_err(|error| {
-        WryWebSurfaceError::Platform(format!("CreateCaptureSession failed: {error}"))
+        WebSurfaceError::Platform(format!("CreateCaptureSession failed: {error}"))
     })?;
     let _ = session.SetIsCursorCaptureEnabled(false);
     let _ = session.SetIsBorderRequired(false);
     session
         .StartCapture()
-        .map_err(|error| WryWebSurfaceError::Platform(format!("StartCapture failed: {error}")))?;
+        .map_err(|error| WebSurfaceError::Platform(format!("StartCapture failed: {error}")))?;
     after_start()?;
 
     let deadline = std::time::Instant::now() + timeout;
@@ -693,7 +693,7 @@ fn capture_graphics_item_frame_once_after_start(
             Err(error) => {
                 let _ = session.Close();
                 let _ = pool.Close();
-                return Err(WryWebSurfaceError::Platform(format!(
+                return Err(WebSurfaceError::Platform(format!(
                     "TryGetNextFrame timed out after {timeout:?} for capture item {}x{}; last poll returned {error}",
                     item_size.Width, item_size.Height
                 )));
@@ -702,22 +702,22 @@ fn capture_graphics_item_frame_once_after_start(
     };
 
     let content_size = frame.ContentSize().map_err(|error| {
-        WryWebSurfaceError::Platform(format!(
+        WebSurfaceError::Platform(format!(
             "Direct3D11CaptureFrame::ContentSize failed: {error}"
         ))
     })?;
     let surface = frame.Surface().map_err(|error| {
-        WryWebSurfaceError::Platform(format!("Direct3D11CaptureFrame::Surface failed: {error}"))
+        WebSurfaceError::Platform(format!("Direct3D11CaptureFrame::Surface failed: {error}"))
     })?;
     let access = surface
         .cast::<IDirect3DDxgiInterfaceAccess>()
         .map_err(|error| {
-            WryWebSurfaceError::Platform(format!(
+            WebSurfaceError::Platform(format!(
                 "IDirect3DSurface cast to IDirect3DDxgiInterfaceAccess failed: {error}"
             ))
         })?;
     let texture = unsafe { access.GetInterface::<ID3D11Texture2D>() }.map_err(|error| {
-        WryWebSurfaceError::Platform(format!(
+        WebSurfaceError::Platform(format!(
             "IDirect3DDxgiInterfaceAccess::GetInterface<ID3D11Texture2D> failed: {error}"
         ))
     })?;
@@ -740,15 +740,15 @@ fn capture_graphics_item_frame_once_after_start(
     })
 }
 
-fn create_capture_item_for_hwnd(hwnd: HWND) -> Result<GraphicsCaptureItem, WryWebSurfaceError> {
+fn create_capture_item_for_hwnd(hwnd: HWND) -> Result<GraphicsCaptureItem, WebSurfaceError> {
     let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
         .map_err(|error| {
-            WryWebSurfaceError::Platform(format!(
+            WebSurfaceError::Platform(format!(
                 "GraphicsCaptureItem interop factory failed: {error}"
             ))
         })?;
     unsafe { interop.CreateForWindow::<GraphicsCaptureItem>(hwnd) }.map_err(|error| {
-        WryWebSurfaceError::Platform(format!(
+        WebSurfaceError::Platform(format!(
             "IGraphicsCaptureItemInterop::CreateForWindow failed: {error}"
         ))
     })
@@ -773,8 +773,8 @@ pub struct WebView2Dx12SharedFrame {
 }
 
 impl WebView2Dx12SharedFrame {
-    pub fn into_surface_frame(self) -> WryWebSurfaceFrame {
-        WryWebSurfaceFrame::Native(NativeFrame::Dx12SharedTexture(Dx12SharedTexture {
+    pub fn into_surface_frame(self) -> WebSurfaceFrame {
+        WebSurfaceFrame::Native(NativeFrame::Dx12SharedTexture(Dx12SharedTexture {
             size: self.size,
             format: self.format,
             generation: self.generation,
@@ -817,7 +817,7 @@ impl WebView2DxgiSharedHandleFrame {
         }
     }
 
-    pub fn into_surface_frame(self) -> WryWebSurfaceFrame {
+    pub fn into_surface_frame(self) -> WebSurfaceFrame {
         self.into_dx12_frame().into_surface_frame()
     }
 }
@@ -829,18 +829,18 @@ impl WebView2DxgiSharedHandleFrame {
 ///
 /// `handle` must be a valid Win32 handle owned by the caller, and it must not
 /// be used after this call succeeds.
-pub unsafe fn close_shared_handle(handle: *mut std::ffi::c_void) -> Result<(), WryWebSurfaceError> {
+pub unsafe fn close_shared_handle(handle: *mut std::ffi::c_void) -> Result<(), WebSurfaceError> {
     if handle.is_null() {
         return Ok(());
     }
 
     unsafe { CloseHandle(HANDLE(handle)) }
-        .map_err(|error| WryWebSurfaceError::Platform(format!("CloseHandle failed: {error}")))
+        .map_err(|error| WebSurfaceError::Platform(format!("CloseHandle failed: {error}")))
 }
 
 pub fn export_capture_frame_shared_handle(
     frame: WebView2D3D11CaptureFrame,
-) -> Result<WebView2DxgiSharedHandleFrame, WryWebSurfaceError> {
+) -> Result<WebView2DxgiSharedHandleFrame, WebSurfaceError> {
     with_borrowed_d3d11_texture(frame.raw_d3d11_texture, |texture| {
         shared_handle_from_texture(texture, frame.size, frame.format, frame.generation)
     })
@@ -875,7 +875,7 @@ pub trait D3D11ToDx12Bridge {
     fn bridge_frame(
         &self,
         frame: WebView2D3D11CaptureFrame,
-    ) -> Result<WebView2Dx12SharedFrame, WryWebSurfaceError>;
+    ) -> Result<WebView2Dx12SharedFrame, WebSurfaceError>;
 }
 
 /// Bridge implementation for capture paths that can already produce a
@@ -887,9 +887,9 @@ impl DxgiSharedHandleBridge {
     pub fn bridge_shared_handle(
         &self,
         frame: WebView2DxgiSharedHandleFrame,
-    ) -> Result<WebView2Dx12SharedFrame, WryWebSurfaceError> {
+    ) -> Result<WebView2Dx12SharedFrame, WebSurfaceError> {
         if frame.shared_handle.is_null() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "WebView2 capture shared handle was null".to_string(),
             ));
         }
@@ -901,7 +901,7 @@ impl D3D11ToDx12Bridge for DxgiSharedHandleBridge {
     fn bridge_frame(
         &self,
         frame: WebView2D3D11CaptureFrame,
-    ) -> Result<WebView2Dx12SharedFrame, WryWebSurfaceError> {
+    ) -> Result<WebView2Dx12SharedFrame, WebSurfaceError> {
         self.bridge_shared_handle(export_capture_frame_shared_handle(frame)?)
     }
 }
@@ -913,8 +913,8 @@ impl D3D11ToDx12Bridge for UnsupportedD3D11ToDx12Bridge {
     fn bridge_frame(
         &self,
         _frame: WebView2D3D11CaptureFrame,
-    ) -> Result<WebView2Dx12SharedFrame, WryWebSurfaceError> {
-        Err(WryWebSurfaceError::Unsupported(
+    ) -> Result<WebView2Dx12SharedFrame, WebSurfaceError> {
+        Err(WebSurfaceError::Unsupported(
             "D3D11 capture texture to D3D12 shared texture bridge is not implemented yet",
         ))
     }
@@ -922,11 +922,11 @@ impl D3D11ToDx12Bridge for UnsupportedD3D11ToDx12Bridge {
 
 fn dxgi_format_for_wgpu(
     format: wgpu::TextureFormat,
-) -> Result<windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT, WryWebSurfaceError> {
+) -> Result<windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT, WebSurfaceError> {
     match format {
         wgpu::TextureFormat::Rgba8Unorm => Ok(DXGI_FORMAT_R8G8B8A8_UNORM),
         wgpu::TextureFormat::Bgra8Unorm => Ok(DXGI_FORMAT_B8G8R8A8_UNORM),
-        _ => Err(WryWebSurfaceError::Unsupported(
+        _ => Err(WebSurfaceError::Unsupported(
             "only Rgba8Unorm and Bgra8Unorm D3D11 capture textures are supported",
         )),
     }
@@ -934,34 +934,34 @@ fn dxgi_format_for_wgpu(
 
 fn with_borrowed_d3d11_texture<R>(
     raw: *mut std::ffi::c_void,
-    f: impl FnOnce(&ID3D11Texture2D) -> Result<R, WryWebSurfaceError>,
-) -> Result<R, WryWebSurfaceError> {
+    f: impl FnOnce(&ID3D11Texture2D) -> Result<R, WebSurfaceError>,
+) -> Result<R, WebSurfaceError> {
     if raw.is_null() {
-        return Err(WryWebSurfaceError::Platform(
+        return Err(WebSurfaceError::Platform(
             "D3D11 capture texture pointer was null".to_string(),
         ));
     }
 
     unsafe { ID3D11Texture2D::from_raw_borrowed(&raw) }
         .ok_or_else(|| {
-            WryWebSurfaceError::Platform("failed to borrow ID3D11Texture2D pointer".to_string())
+            WebSurfaceError::Platform("failed to borrow ID3D11Texture2D pointer".to_string())
         })
         .and_then(f)
 }
 
 fn with_borrowed_composition_visual<R>(
     raw: *mut std::ffi::c_void,
-    f: impl FnOnce(&Visual) -> Result<R, WryWebSurfaceError>,
-) -> Result<R, WryWebSurfaceError> {
+    f: impl FnOnce(&Visual) -> Result<R, WebSurfaceError>,
+) -> Result<R, WebSurfaceError> {
     if raw.is_null() {
-        return Err(WryWebSurfaceError::Platform(
+        return Err(WebSurfaceError::Platform(
             "composition visual pointer was null".to_string(),
         ));
     }
 
     unsafe { Visual::from_raw_borrowed(&raw) }
         .ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "failed to borrow Windows.UI.Composition.Visual pointer".to_string(),
             )
         })
@@ -973,9 +973,9 @@ fn shared_handle_from_texture(
     size: PhysicalSize<u32>,
     format: wgpu::TextureFormat,
     generation: u64,
-) -> Result<WebView2DxgiSharedHandleFrame, WryWebSurfaceError> {
+) -> Result<WebView2DxgiSharedHandleFrame, WebSurfaceError> {
     let resource = texture.cast::<IDXGIResource1>().map_err(|error| {
-        WryWebSurfaceError::Platform(format!(
+        WebSurfaceError::Platform(format!(
             "ID3D11Texture2D cast to IDXGIResource1 failed: {error}"
         ))
     })?;
@@ -988,7 +988,7 @@ fn shared_handle_from_texture(
         )
     }
     .map_err(|error| {
-        WryWebSurfaceError::Platform(format!(
+        WebSurfaceError::Platform(format!(
             "IDXGIResource1::CreateSharedHandle failed: {error}"
         ))
     })?;

@@ -190,7 +190,7 @@ not a one-time write.
 
 - **Orion** (Kagi's WebKit-based browser, notarized): uses standard
   `WKWebView`. No public evidence of layer-tree extraction.
-- **wry / Tauri** issue #391 (offscreen rendering) and #1358
+- **Tauri/WebKit embedding issue history** around offscreen rendering and screenshot capture
   (screenshot capability): contributors document that "WKWebView
   refuses to render reliably when offscreen — JavaScript simply won't
   be executed sometimes." Workaround is the "ugly hack" of inserting
@@ -434,6 +434,5 @@ WebKit trunk headers and supporting precedent (2026-05-09 audit):
 - [Apple — CARenderer](https://developer.apple.com/documentation/quartzcore/carenderer)
 - [Mozilla Gfx — Reduced power usage with Core Animation](https://mozillagfx.wordpress.com/2019/10/22/dramatically-reduced-power-usage-in-firefox-70-on-macos-with-core-animation/)
 - [Electron PR #20965 — disable remote-layer SPI in MAS](https://github.com/electron/electron/pull/20965)
-- [wry #391 (offscreen rendering)](https://github.com/tauri-apps/wry/issues/391),
-  [wry #1246 (background throttling)](https://github.com/tauri-apps/wry/issues/1246)
+- Tauri/WebKit offscreen rendering and background throttling issue history
 - [WebKit Bug 161450 — snapshot reliability](https://bugs.webkit.org/show_bug.cgi?id=161450)

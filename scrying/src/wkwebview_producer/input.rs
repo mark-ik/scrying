@@ -10,7 +10,7 @@ use objc2_core_graphics::{CGEvent, CGScrollEventUnit};
 use objc2_foundation::NSPoint;
 use objc2_web_kit::WKWebView;
 
-use crate::{MouseEventKind, MouseInput, MouseVirtualKeys, WryWebSurfaceError};
+use crate::{MouseEventKind, MouseInput, MouseVirtualKeys, WebSurfaceError};
 
 /// Which `NSResponder` method should receive the synthesized event.
 #[derive(Clone, Copy)]
@@ -47,7 +47,7 @@ pub(super) fn synthesize_mouse_event(
     webview: &WKWebView,
     window: &NSWindow,
     event: MouseInput,
-) -> Result<MouseDispatch, WryWebSurfaceError> {
+) -> Result<MouseDispatch, WebSurfaceError> {
     let scale = window.backingScaleFactor().max(1.0);
     let bounds = webview.bounds();
     let x_local = f64::from(event.point.0) / scale;
@@ -219,7 +219,7 @@ pub(super) fn synthesize_mouse_event(
     };
 
     let ns_event = ns_event.ok_or_else(|| {
-        WryWebSurfaceError::Platform(
+        WebSurfaceError::Platform(
             "NSEvent factory returned nil for the synthesized mouse event".into(),
         )
     })?;
@@ -247,7 +247,7 @@ pub(super) fn synthesize_scroll_wheel_event(
     webview: &WKWebView,
     window: &NSWindow,
     event: MouseInput,
-) -> Result<MouseDispatch, WryWebSurfaceError> {
+) -> Result<MouseDispatch, WebSurfaceError> {
     let (wheel_count, wheel1, wheel2) = match event.kind {
         MouseEventKind::Wheel => (1u32, event.mouse_data, 0i32),
         MouseEventKind::HorizontalWheel => (2u32, 0i32, event.mouse_data),
@@ -262,7 +262,7 @@ pub(super) fn synthesize_scroll_wheel_event(
         0,
     )
     .ok_or_else(|| {
-        WryWebSurfaceError::Platform(
+        WebSurfaceError::Platform(
             "CGEventCreateScrollWheelEvent2 returned nil".into(),
         )
     })?;
@@ -309,7 +309,7 @@ pub(super) fn synthesize_scroll_wheel_event(
     CGEvent::set_flags(Some(&cg_event), cg_flags);
 
     let ns_event = NSEvent::eventWithCGEvent(&cg_event).ok_or_else(|| {
-        WryWebSurfaceError::Platform("NSEvent::eventWithCGEvent returned nil".into())
+        WebSurfaceError::Platform("NSEvent::eventWithCGEvent returned nil".into())
     })?;
     Ok(MouseDispatch {
         event: ns_event,

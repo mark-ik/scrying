@@ -1,6 +1,6 @@
 # scrying
 
-Capability-driven system-webview frame adapter — scry into WebView2/WKWebView/WebKitGTK and surface frames the host renderer can consume.
+Capability-driven system-webview frame adapter — scry into WebView2/WKWebView/WPE/WebKitGTK and surface frames the host renderer can consume.
 
 This repo was extracted from [`wgpu-graft`](https://github.com/mark-ik/wgpu-graft) on 2026-05-05 so that system-webview frame production has its own place to evolve. `wgpu-graft` is now the Servo testbed (Servo embedding demos + GL-FBO interop). `scrying` owns its native-frame import path in-tree as the [`scrying::native_frame`](scrying/src/native_frame/) module, structurally derived from Slint's [Servo embedding example](https://github.com/slint-ui/slint/tree/master/examples/servo) (see [NOTICE](NOTICE)).
 
@@ -8,8 +8,9 @@ This repo was extracted from [`wgpu-graft`](https://github.com/mark-ik/wgpu-graf
 
 | Crate | Purpose |
 | --- | --- |
-| [`scrying`](scrying/) | The library. Capability probe (`WebSurfaceMode`), per-platform `WryWebSurfaceProducer` impls, fallbacks. Windows + macOS producers are real implementations; Linux is a skeleton awaiting WPE/WebKitGTK work. |
-| [`demo-wry-winit`](demo-wry-winit/) | Windows host probe. Creates a Wry webview, asks `scrying` which surface mode is viable, and captures the WebView2 composition target into a wgpu texture. |
+| [`scrying`](scrying/) | The library. Capability probe (`WebSurfaceMode`), per-platform `WebSurfaceProducer` impls, fallbacks. Windows + macOS producers are real implementations; Linux now has a WPE primary scaffold plus a WebKitGTK fallback skeleton. |
+| [`demo-scrying-winit`](demo-scrying-winit/) | Cross-platform selector smoke. Creates a winit/wgpu host and reports the backend, platform producer/config aliases, capability status, and supported native frame kinds selected for the current target. |
+| [`demo-win`](demo-win/) | Windows runtime probe. Drives the WebView2 CompositionController path into a wgpu texture, including WGC capture, shared D3D texture import, resize, input, navigation/message/cursor event drains, and optional readback/fence diagnostics. |
 | [`demo-mac`](demo-mac/) | macOS host probe. Hosts a `WkWebViewProducer` against a winit window's `NSView`; flagged modes drive nav / input / JS-messaging / SCK-capture / per-profile-data-store paths so each producer slice gets exercised at runtime. See [`demo-mac/README.md`](demo-mac/README.md). |
 
 See [`scrying/README.md`](scrying/README.md) for the producer/consumer contract, the Windows WGC + shared D3D11 path, and the future explicit-fence-sync work.
@@ -18,8 +19,10 @@ See [`scrying/README.md`](scrying/README.md) for the producer/consumer contract,
 
 ```bash
 cargo check -p scrying
-# Windows
-cargo run -p demo-wry-winit
+# Cross-platform backend-selection smoke
+cargo run -p demo-scrying-winit
+# Windows runtime probe
+cargo run -p demo-win
 # macOS — overlay mode (default)
 cargo run -p demo-mac
 # macOS — automated runtime tests

@@ -105,3 +105,39 @@ impl ImplicitOnlySynchronizer {
         }
     }
 }
+
+/// Linux WPE placeholder synchronizer: accepts the explicit external
+/// semaphore mechanism so DMABUF frames can flow to the Vulkan importer.
+///
+/// The actual `vkQueueSubmit` wait is part of the Linux Vulkan import work;
+/// until that lands, importing a DMABUF frame still returns
+/// [`InteropError::Unsupported`](crate::native_frame::InteropError::Unsupported).
+#[derive(Default)]
+pub struct ExplicitExternalSemaphoreSynchronizer;
+
+impl InteropSynchronizer for ExplicitExternalSemaphoreSynchronizer {
+    fn producer_complete(
+        &self,
+        _frame: &NativeFrame,
+        mechanism: SyncMechanism,
+    ) -> Result<(), InteropError> {
+        Self::validate(mechanism)
+    }
+
+    fn consumer_ready(
+        &self,
+        _texture: &ImportedTexture,
+        mechanism: SyncMechanism,
+    ) -> Result<(), InteropError> {
+        Self::validate(mechanism)
+    }
+}
+
+impl ExplicitExternalSemaphoreSynchronizer {
+    pub(crate) fn validate(mechanism: SyncMechanism) -> Result<(), InteropError> {
+        match mechanism {
+            SyncMechanism::None | SyncMechanism::ExplicitExternalSemaphore => Ok(()),
+            other => Err(InteropError::UnsupportedSynchronization(other)),
+        }
+    }
+}

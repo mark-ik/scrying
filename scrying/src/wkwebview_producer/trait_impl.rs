@@ -1,4 +1,4 @@
-//! [`WryWebSurfaceProducer`] trait implementation. Bridges the
+//! [`WebSurfaceProducer`] trait implementation. Bridges the
 //! cross-platform trait surface onto the macOS-specific machinery in
 //! [`super::producer::WkWebViewProducer`] / sibling submodules.
 
@@ -14,25 +14,25 @@ use objc2_foundation::{
 use crate::{
     CursorShape, DragInput, FocusReason, KeyEventKind, KeyboardInput, MouseEventKind, MouseInput,
     MouseVirtualKeys, NavigationEvent, PointerDevice, PointerEventKind, PointerInput,
-    WebSurfaceSettings, WryWebSurfaceCapabilities, WryWebSurfaceError, WryWebSurfaceFrame,
-    WryWebSurfaceProducer,
+    WebSurfaceSettings, WebSurfaceCapabilities, WebSurfaceError, WebSurfaceFrame,
+    WebSurfaceProducer,
 };
 
 use super::helpers::{js_string_literal, key_modifier_flags};
 use super::input::{synthesize_mouse_event, MouseTarget};
 use super::producer::WkWebViewProducer;
 
-impl WryWebSurfaceProducer for WkWebViewProducer {
-    fn capabilities(&self) -> WryWebSurfaceCapabilities {
+impl WebSurfaceProducer for WkWebViewProducer {
+    fn capabilities(&self) -> WebSurfaceCapabilities {
         self.capabilities.clone()
     }
 
-    fn acquire_frame(&mut self) -> Result<WryWebSurfaceFrame, WryWebSurfaceError> {
+    fn acquire_frame(&mut self) -> Result<WebSurfaceFrame, WebSurfaceError> {
         if self.capture.is_none() {
             // Slice-A behavior: capture has not been started, so the
             // WKWebView remains a platform overlay child and the
             // consumer composites it itself.
-            return Ok(WryWebSurfaceFrame::OverlayOnly);
+            return Ok(WebSurfaceFrame::OverlayOnly);
         }
 
         // Capture is live: pump the run loop up to `frame_timeout`
@@ -45,7 +45,7 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
                 return Ok(frame);
             }
             if start.elapsed() >= timeout {
-                return Err(WryWebSurfaceError::NotReady(
+                return Err(WebSurfaceError::NotReady(
                     "no SCStream sample arrived within frame_timeout",
                 ));
             }
@@ -58,9 +58,9 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
         &mut self,
         html: &str,
         timeout: std::time::Duration,
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "navigate_to_string must be called on the main thread".into(),
             ));
         }
@@ -79,16 +79,16 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
         &mut self,
         url: &str,
         timeout: std::time::Duration,
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "navigate_to_url must be called on the main thread".into(),
             ));
         }
 
         let url_ns = NSString::from_str(url);
         let ns_url = NSURL::URLWithString(&url_ns).ok_or_else(|| {
-            WryWebSurfaceError::Platform(format!("could not parse URL: {url}"))
+            WebSurfaceError::Platform(format!("could not parse URL: {url}"))
         })?;
         let request = NSURLRequest::requestWithURL(&ns_url);
 
@@ -99,14 +99,14 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
         self.wait_for_nav_completion(timeout, "navigate_to_url")
     }
 
-    fn move_focus(&mut self, _reason: FocusReason) -> Result<(), WryWebSurfaceError> {
+    fn move_focus(&mut self, _reason: FocusReason) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "move_focus must be called on the main thread".into(),
             ));
         }
         let window = self.webview().window().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "WKWebView is not in a window — move_focus requires the parent NSView to be embedded in an NSWindow".into(),
             )
         })?;
@@ -119,7 +119,7 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
         // the host handle keyloop separately.
         let made_first = window.makeFirstResponder(Some(self.webview()));
         if !made_first {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "NSWindow rejected makeFirstResponder for the WKWebView".into(),
             ));
         }
@@ -133,9 +133,9 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
             .and_then(|mut state| state.events.pop_front())
     }
 
-    fn reload(&mut self) -> Result<(), WryWebSurfaceError> {
+    fn reload(&mut self) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "reload must be called on the main thread".into(),
             ));
         }
@@ -145,9 +145,9 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<(), WryWebSurfaceError> {
+    fn stop(&mut self) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "stop must be called on the main thread".into(),
             ));
         }
@@ -157,9 +157,9 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
         Ok(())
     }
 
-    fn go_back(&mut self) -> Result<bool, WryWebSurfaceError> {
+    fn go_back(&mut self) -> Result<bool, WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "go_back must be called on the main thread".into(),
             ));
         }
@@ -172,9 +172,9 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
         Ok(true)
     }
 
-    fn go_forward(&mut self) -> Result<bool, WryWebSurfaceError> {
+    fn go_forward(&mut self) -> Result<bool, WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "go_forward must be called on the main thread".into(),
             ));
         }
@@ -195,9 +195,9 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
         unsafe { self.webview().canGoForward() }
     }
 
-    fn set_visible(&mut self, visible: bool) -> Result<(), WryWebSurfaceError> {
+    fn set_visible(&mut self, visible: bool) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "set_visible must be called on the main thread".into(),
             ));
         }
@@ -214,9 +214,9 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
     fn apply_settings(
         &mut self,
         settings: &WebSurfaceSettings,
-    ) -> Result<(), WryWebSurfaceError> {
+    ) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "apply_settings must be called on the main thread".into(),
             ));
         }
@@ -314,9 +314,9 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
         Ok(())
     }
 
-    fn post_web_message(&mut self, message: &str) -> Result<(), WryWebSurfaceError> {
+    fn post_web_message(&mut self, message: &str) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "post_web_message must be called on the main thread".into(),
             ));
         }
@@ -342,14 +342,14 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
             .and_then(|mut q| q.pop_front())
     }
 
-    fn send_keyboard_input(&mut self, event: KeyboardInput) -> Result<(), WryWebSurfaceError> {
+    fn send_keyboard_input(&mut self, event: KeyboardInput) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "send_keyboard_input must be called on the main thread".into(),
             ));
         }
         let window = self.webview().window().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "WKWebView is not in a window — send_keyboard_input requires the parent NSView to be embedded in an NSWindow".into(),
             )
         })?;
@@ -384,7 +384,7 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
             event.virtual_key_code as u16,
         )
         .ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "NSEvent::keyEventWithType returned nil for the synthesized key event".into(),
             )
         })?;
@@ -397,14 +397,14 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
         Ok(())
     }
 
-    fn send_mouse_input(&mut self, event: MouseInput) -> Result<(), WryWebSurfaceError> {
+    fn send_mouse_input(&mut self, event: MouseInput) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "send_mouse_input must be called on the main thread".into(),
             ));
         }
         let window = self.webview().window().ok_or_else(|| {
-            WryWebSurfaceError::Platform(
+            WebSurfaceError::Platform(
                 "WKWebView is not in a window — send_mouse_input requires the parent NSView to be embedded in an NSWindow".into(),
             )
         })?;
@@ -450,8 +450,8 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
     /// drag through standard `NSDraggingDestination` handling.
     /// `send_drag_input` is therefore unnecessary in this mode and
     /// returns the same `Unsupported` to make the no-op explicit.
-    fn send_drag_input(&mut self, _event: DragInput) -> Result<(), WryWebSurfaceError> {
-        Err(WryWebSurfaceError::Unsupported(
+    fn send_drag_input(&mut self, _event: DragInput) -> Result<(), WebSurfaceError> {
+        Err(WebSurfaceError::Unsupported(
             "WkWebViewProducer::send_drag_input — capture-mode drag forwarding requires \
              NSDraggingInfo synthesis (SPI); overlay-mode drag works automatically through \
              AppKit's responder chain without producer involvement",
@@ -490,7 +490,7 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
     ///   actual `NSEventTypeTabletPoint` events through the
     ///   responder chain in overlay mode; the producer doesn't
     ///   need to (and can't usefully) re-synthesize them.
-    fn send_pointer_input(&mut self, event: PointerInput) -> Result<(), WryWebSurfaceError> {
+    fn send_pointer_input(&mut self, event: PointerInput) -> Result<(), WebSurfaceError> {
         // We treat all pointer devices uniformly; the tabletPoint
         // path on macOS doesn't accept synthesized events with
         // pressure metadata, and we'd lose information either way.
@@ -534,9 +534,9 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
         self.send_mouse_input(synthetic)
     }
 
-    fn resize(&mut self, size: PhysicalSize<u32>) -> Result<(), WryWebSurfaceError> {
+    fn resize(&mut self, size: PhysicalSize<u32>) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "resize must be called on the main thread".into(),
             ));
         }
@@ -547,9 +547,9 @@ impl WryWebSurfaceProducer for WkWebViewProducer {
         self.resize_internal(size)
     }
 
-    fn set_offset(&mut self, x: f32, y: f32) -> Result<(), WryWebSurfaceError> {
+    fn set_offset(&mut self, x: f32, y: f32) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
-            return Err(WryWebSurfaceError::Platform(
+            return Err(WebSurfaceError::Platform(
                 "set_offset must be called on the main thread".into(),
             ));
         }
