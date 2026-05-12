@@ -17,16 +17,34 @@ use winit::window::Window;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
-    let mut app = App {
-        probe_only: std::env::args().any(|arg| arg == "--probe-only"),
-        state: None,
-    };
+    let cli = Cli::parse();
+    let mut app = App { cli, state: None };
     Ok(event_loop.run_app(&mut app)?)
+}
+
+#[derive(Clone, Default)]
+struct Cli {
+    probe_only: bool,
+    scripted: bool,
+}
+
+impl Cli {
+    fn parse() -> Self {
+        let mut cli = Self::default();
+        for arg in std::env::args().skip(1) {
+            match arg.as_str() {
+                "--probe-only" => cli.probe_only = true,
+                "--scripted" => cli.scripted = true,
+                _ => eprintln!("demo-win: unknown arg: {arg}"),
+            }
+        }
+        cli
+    }
 }
 
 #[derive(Default)]
 struct App {
-    probe_only: bool,
+    cli: Cli,
     state: Option<AppState>,
 }
 
@@ -53,16 +71,22 @@ impl ApplicationHandler for App {
             return;
         }
 
-        match AppState::new(event_loop) {
+        let one_shot = self.cli.probe_only || self.cli.scripted;
+        match AppState::new(event_loop, &self.cli) {
             Ok(state) => {
-                self.state = Some(state);
-                if self.probe_only {
+                if one_shot {
+                    drop(state);
                     event_loop.exit();
+                    std::process::exit(0);
                 }
+                self.state = Some(state);
             }
             Err(error) => {
                 eprintln!("demo-win: initialization failed: {error}");
                 event_loop.exit();
+                if one_shot {
+                    std::process::exit(1);
+                }
             }
         }
     }
@@ -196,7 +220,7 @@ impl ApplicationHandler for App {
 }
 
 impl AppState {
-    fn new(event_loop: &ActiveEventLoop) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(event_loop: &ActiveEventLoop, cli: &Cli) -> Result<Self, Box<dyn std::error::Error>> {
         let window = Arc::new(
             event_loop.create_window(
                 Window::default_attributes()
@@ -269,20 +293,25 @@ impl AppState {
             .map(|s| s.shared_handle().0 as *mut std::ffi::c_void);
 
         #[cfg(target_os = "windows")]
-        let captured = run_platform_composition_visual_probe(&window, &host, fence_handle)?;
+        let captured =
+            run_platform_composition_visual_probe(&window, &host, fence_handle, cli.scripted)?;
 
         #[cfg(target_os = "windows")]
-        let renderer = match captured {
-            Some(captured) => Some(WebViewRenderer::new(
-                instance,
-                window.clone(),
-                host.clone(),
-                captured,
-                fence_synchronizer,
-            )?),
-            None => {
-                drop(instance);
-                None
+        let renderer = if cli.scripted {
+            None
+        } else {
+            match captured {
+                Some(captured) => Some(WebViewRenderer::new(
+                    instance,
+                    window.clone(),
+                    host.clone(),
+                    captured,
+                    fence_synchronizer,
+                )?),
+                None => {
+                    drop(instance);
+                    None
+                }
             }
         };
 
@@ -486,6 +515,70 @@ const COMPOSITION_WEBVIEW_PROBE_HTML: &str = r#"<!doctype html>
 </html>"#;
 
 #[cfg(target_os = "windows")]
+const COMPOSITION_WEBVIEW_SCRIPTED_HTML: &str = r#"<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        html, body {
+            margin: 0;
+            width: 100%;
+            min-height: 100%;
+            background: #17202a;
+            color: #f8f1d8;
+            font-family: system-ui, sans-serif;
+        }
+        body {
+            box-sizing: border-box;
+            padding: 18px;
+        }
+        input {
+            box-sizing: border-box;
+            width: 220px;
+            border: 1px solid #8fd2c7;
+            border-radius: 4px;
+            background: #0f1720;
+            color: #f8f1d8;
+            padding: 6px 8px;
+            font: 15px system-ui, sans-serif;
+            letter-spacing: 0;
+        }
+        #scroll-target {
+            margin-top: 12px;
+            height: 520px;
+            border-top: 1px solid #8fd2c7;
+            color: #ffbe70;
+        }
+    </style>
+</head>
+<body>
+    <h1>Scrying Windows Scripted Probe</h1>
+    <input id="scripted-input" autofocus autocomplete="off" spellcheck="false" aria-label="scripted input">
+    <div id="scroll-target">scroll target</div>
+    <script>
+        const post = value => window.chrome.webview.postMessage(value);
+        const input = document.getElementById("scripted-input");
+        input.focus();
+        window.chrome.webview.addEventListener("message", event => {
+            post("scripted:host-echo:" + event.data);
+        });
+        window.addEventListener("wheel", () => post("scripted:wheel"));
+        input.addEventListener("input", () => post("scripted:input:" + input.value));
+        post("scripted:ready");
+    </script>
+</body>
+</html>"#;
+
+#[cfg(target_os = "windows")]
+fn composition_probe_html(scripted: bool) -> &'static str {
+    if scripted {
+        COMPOSITION_WEBVIEW_SCRIPTED_HTML
+    } else {
+        COMPOSITION_WEBVIEW_PROBE_HTML
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn run_windows_shared_texture_probe(
     window: &Window,
     host: &HostWgpuContext,
@@ -579,6 +672,7 @@ fn run_platform_composition_visual_probe(
     window: &Window,
     host: &HostWgpuContext,
     fence_shared_handle: Option<*mut std::ffi::c_void>,
+    scripted: bool,
 ) -> Result<Option<CapturedComposition>, Box<dyn std::error::Error>> {
     use scrying::windows_capture::close_shared_handle;
     use windows::Win32::System::WinRT::{
@@ -619,12 +713,15 @@ fn run_platform_composition_visual_probe(
 
     let producer = unsafe { scrying::PlatformWebSurfaceProducer::new(parent_hwnd, config)? };
     producer.navigate_to_string(
-        COMPOSITION_WEBVIEW_PROBE_HTML,
+        composition_probe_html(scripted),
         std::time::Duration::from_secs(5),
     )?;
     println!("CompositionController visual probe: navigation completed");
 
     let mut producer = producer;
+    if scripted {
+        validate_platform_scripted(&mut producer)?;
+    }
     if keyboard_validate_enabled() {
         validate_platform_keyboard_smoke(&mut producer)?;
     }
@@ -740,6 +837,100 @@ fn validate_platform_keyboard_smoke(
 }
 
 #[cfg(target_os = "windows")]
+fn validate_platform_scripted(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const MESSAGE: &str = "ping-from-demo-win";
+    const EXPECTED_ECHO: &str = "scripted:host-echo:ping-from-demo-win";
+
+    wait_for_web_message(
+        producer,
+        "scripted:ready",
+        std::time::Duration::from_secs(2),
+    )?;
+    producer.post_web_message(MESSAGE)?;
+    wait_for_web_message(producer, EXPECTED_ECHO, std::time::Duration::from_secs(2))?;
+
+    producer.send_mouse_input(scrying::MouseInput {
+        kind: scrying::MouseEventKind::Move,
+        virtual_keys: scrying::MouseVirtualKeys::default(),
+        mouse_data: 0,
+        point: (32, 32),
+    })?;
+    producer.send_mouse_input(scrying::MouseInput {
+        kind: scrying::MouseEventKind::Wheel,
+        virtual_keys: scrying::MouseVirtualKeys::default(),
+        mouse_data: 120,
+        point: (32, 32),
+    })?;
+
+    producer.move_focus(scrying::FocusReason::Programmatic)?;
+    for ch in ['a', 'b', 'c'] {
+        send_scripted_key_pair(producer, ch)?;
+    }
+
+    println!(
+        "demo-win: scripted: PASS - JS message round-trip plus mouse/keyboard API dispatch verified"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_web_message(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    expected: &str,
+    timeout: std::time::Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last_message = String::new();
+    while std::time::Instant::now() < deadline {
+        pump_windows_messages_for(std::time::Duration::from_millis(16));
+        while let Some(message) = producer.poll_web_message() {
+            if message == expected {
+                return Ok(());
+            }
+            last_message = message;
+        }
+    }
+
+    Err(
+        format!("timed out waiting for web message {expected:?}; last observed {last_message:?}")
+            .into(),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn send_scripted_key_pair(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    ch: char,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let virtual_key_code = match ch {
+        'a'..='z' => ch.to_ascii_uppercase() as u32,
+        'A'..='Z' => ch as u32,
+        '0'..='9' => ch as u32,
+        _ => return Err(format!("unsupported scripted keyboard character: {ch:?}").into()),
+    };
+    let characters = ch.to_string();
+    producer.send_keyboard_input(scrying::KeyboardInput {
+        kind: scrying::KeyEventKind::Down,
+        virtual_key_code,
+        characters: characters.clone(),
+        characters_ignoring_modifiers: characters,
+        modifiers: scrying::KeyModifierFlags::default(),
+        is_repeat: false,
+    })?;
+    producer.send_keyboard_input(scrying::KeyboardInput {
+        kind: scrying::KeyEventKind::Up,
+        virtual_key_code,
+        characters: String::new(),
+        characters_ignoring_modifiers: String::new(),
+        modifiers: scrying::KeyModifierFlags::default(),
+        is_repeat: false,
+    })?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn pump_windows_messages_for(duration: std::time::Duration) {
     use windows::Win32::UI::WindowsAndMessaging::{
         DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
@@ -749,9 +940,16 @@ fn pump_windows_messages_for(duration: std::time::Duration) {
     while std::time::Instant::now() < deadline {
         unsafe {
             let mut message = MSG::default();
-            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+            let mut drained = 0u32;
+            while std::time::Instant::now() < deadline
+                && PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool()
+            {
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
+                drained += 1;
+                if drained >= 256 {
+                    break;
+                }
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(4));
