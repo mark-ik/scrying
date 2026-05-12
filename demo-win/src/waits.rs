@@ -106,6 +106,28 @@ pub(crate) fn wait_for_context_menu(
     )
 }
 
+pub(crate) fn wait_for_drop_detected(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    timeout: std::time::Duration,
+) -> Result<(u32, Option<String>), Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last_event = String::new();
+    while std::time::Instant::now() < deadline {
+        pump_windows_messages_for(std::time::Duration::from_millis(16));
+        while let Some(event) = producer.poll_navigation_event() {
+            match event {
+                NavigationEvent::DropDetected {
+                    file_count,
+                    primary_url,
+                    ..
+                } => return Ok((file_count, primary_url)),
+                other => last_event = format!("{other:?}"),
+            }
+        }
+    }
+    Err(format!("timed out waiting for DropDetected; last navigation event {last_event:?}").into())
+}
+
 pub(crate) fn wait_for_media_capture_state(
     producer: &mut scrying::PlatformWebSurfaceProducer,
     timeout: std::time::Duration,

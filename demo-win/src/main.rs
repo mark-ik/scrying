@@ -38,10 +38,13 @@ use probe::{
 use renderer::WebViewRenderer;
 #[cfg(target_os = "windows")]
 use smokes::browser::{
-    validate_platform_browser_controls, validate_platform_context_menu, validate_platform_find,
+    validate_platform_browser_controls, validate_platform_context_menu,
+    validate_platform_drop_observability, validate_platform_find,
     validate_platform_media_capture_observability, validate_platform_pdf,
     validate_platform_popup_routing,
 };
+#[cfg(target_os = "windows")]
+use smokes::capture::{validate_platform_capture, validate_platform_scale_resize};
 #[cfg(target_os = "windows")]
 use smokes::input::{
     keyboard_validate_enabled, validate_platform_keyboard_smoke, validate_platform_scripted,
@@ -87,8 +90,10 @@ struct Cli {
     find_test: bool,
     pdf_test: bool,
     context_test: bool,
+    drop_test: bool,
     media_test: bool,
     capture_test: bool,
+    scale_test: bool,
 }
 
 impl Cli {
@@ -114,8 +119,10 @@ impl Cli {
                 "--find-test" => cli.find_test = true,
                 "--pdf-test" => cli.pdf_test = true,
                 "--context-test" => cli.context_test = true,
+                "--drop-test" => cli.drop_test = true,
                 "--media-test" => cli.media_test = true,
                 "--capture-test" => cli.capture_test = true,
+                "--scale-test" => cli.scale_test = true,
                 _ => eprintln!("demo-win: unknown arg: {arg}"),
             }
         }
@@ -141,8 +148,10 @@ impl Cli {
             || self.find_test
             || self.pdf_test
             || self.context_test
+            || self.drop_test
             || self.media_test
             || self.capture_test
+            || self.scale_test
     }
 }
 
@@ -206,6 +215,19 @@ impl ApplicationHandler for App {
             #[cfg(target_os = "windows")]
             WindowEvent::Resized(new_size) => {
                 if let Some(state) = self.state.as_mut() {
+                    if let Some(renderer) = state.renderer.as_mut() {
+                        renderer.resize(new_size);
+                    }
+                }
+            }
+            #[cfg(target_os = "windows")]
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                if let Some(state) = self.state.as_mut() {
+                    let new_size = state.window.inner_size();
+                    println!(
+                        "scale-factor changed: scale={} window={}x{}",
+                        scale_factor, new_size.width, new_size.height
+                    );
                     if let Some(renderer) = state.renderer.as_mut() {
                         renderer.resize(new_size);
                     }

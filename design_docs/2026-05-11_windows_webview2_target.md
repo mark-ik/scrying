@@ -140,23 +140,27 @@ Audited against
 
 ### Missing Windows Slices
 
-- Tab-state serialize / restore: design a Windows equivalent for macOS's
-  opaque interaction-state blob, or document the WebView2 limitation and set
-  the target to URL/history/form-state best effort.
-- Portable download resume data: WebView2 exposes live operation pause/resume,
-  but not a macOS-style offline resume-data blob through the currently wired
-  path.
-- Browser conveniences: content rules or WebView2 equivalents, spellcheck
-  controls, and autofill/credential integration notes. Find-in-page,
-  print-to-PDF / PDF request, and interactive print are wired through native
-  WebView2 APIs and covered by `--find-test` / `--pdf-test`.
-- Observability events: external drop detected remains open. Context-menu
-  requested and WebRTC capture lifecycle events are wired, and native
+- Tab-state serialize / restore: WebView2 exposes no opaque interaction-state
+  blob equivalent to WKWebView. Windows now has same-named methods for
+  cross-platform call sites; serialization returns `None`, restore returns
+  `Unsupported`, and hosts should restore URL/history/form state explicitly.
+- Portable download resume data: WebView2 exposes live operation
+  `pause_download(id)` / `resume_download(id)` / `can_resume_download(id)`, but
+  not a macOS-style offline resume-data blob. Windows cancellations therefore
+  report `resume_data: None`; hosts that want resume must pause/resume before
+  cancelling the operation.
+- Browser conveniences: find-in-page, print-to-PDF / PDF request, interactive
+  print, autofill/password toggles, and the content-blocking/spellcheck
+  ceilings are wired or documented. Find/PDF are covered by `--find-test` /
+  `--pdf-test`; autofill toggles and the hard-throttle ceiling are covered by
+  `--browser-test`.
+- Observability events: external drop detected, context-menu requested, and
+  WebRTC capture lifecycle events are wired, and native
   `Set-Cookie` observation is covered through WebView2
   `WebResourceResponseReceived`.
-- Capture polish: producer capture metrics and resize stale-frame/dim-match
-  guard are wired; DPI monitor-move handling, Display P3 / HDR pipeline
-  decision, and documented hard-throttling limit remain open.
+- Capture polish: producer capture metrics, resize stale-frame/dim-match
+  guard, fixed Windows color-target reporting, demo host scale-change resize
+  routing, and the documented WebView2 hard-throttling ceiling are wired.
 
 ## Implementation Lane
 
@@ -196,7 +200,10 @@ Goal: give a tabbed shell ownership of browser chrome.
 - Wire new-window/popup interception.
 - Wire process-failure events and recovery smoke. ✅ `--process-test`
 - Wire custom scheme / virtual host content routing. ✅ `--routing-test`
-- Decide and document tab-state restore semantics.
+- ✅ Decide and document tab-state restore semantics. Windows exposes the same
+  method names as macOS, but `serialize_interaction_state()` returns `None` and
+  `restore_interaction_state(...)` returns `Unsupported`; browser shells should
+  persist URL/history/form state explicitly when they need Windows tab restore.
 - Add `demo-win` modes that prove popup routing, crash recovery if practical,
   and app-owned content loading.
 
@@ -211,7 +218,9 @@ Goal: make Windows viable for real browsing and authenticated/document flows.
 - Document download-channel auth source limits in WebView2. ✅
 - Wire permission requests for camera/microphone/device-like prompts. ✅ `--permission-test`
 - Wire downloads with id correlation, destination decisions, progress,
-  cancellation, and follow-up resume policy. 🟡 shipped except portable resume data; covered by `--download-test`
+  cancellation, and follow-up resume policy. ✅ WebView2 live pause/resume is
+  wired; offline resume-data blobs are a documented Windows ceiling. Covered by
+  `--download-test` for the deterministic transfer path.
 - Add runtime smokes with local deterministic test pages/servers where needed. ✅
 
 Done condition: a browser shell can prompt for credentials and permissions,
@@ -230,11 +239,20 @@ APIs.
 - ✅ Context-menu requested event and optional default-menu suppression. Native
   WebView2 context-menu events are registered; the deterministic smoke uses
   the document-start bridge and is covered by `--context-test`.
+- ✅ External drop detected event. The document-start bridge mirrors the macOS
+  `DataTransfer` heuristic and is covered by `--drop-test`; real page delivery
+  still goes through the concrete OLE `IDataObject` drag/drop helpers.
 - ✅ WebRTC capture lifecycle observability. Covered by `--media-test` for the
   bridge/event path.
-- Content blocking / request filtering policy or a documented WebView2
-  equivalent.
-- Spellcheck/autocorrect and autofill/credential integration notes.
+- ✅ Document content blocking: WebView2 exposes request events/filters and the
+  Windows producer uses them for virtual-host app routing, but there is no
+  public `WKContentRuleList`-style compiled rule-list engine in this path.
+- ✅ Document spellcheck/autocorrect: the bound WebView2 API exposes no
+  producer-level spellcheck/autocorrect setting; page-authored `spellcheck`
+  attributes remain the portable path.
+- ✅ Wire autofill/password controls: Windows exposes
+  `set_password_autosave_enabled` and `set_general_autofill_enabled` through
+  WebView2 `ICoreWebView2Settings4`, and `--browser-test` toggles both.
 
 Done condition: Windows matches the browser-class checklist rows that app
 chrome surfaces directly.
@@ -248,10 +266,21 @@ conditions.
   WGC frames received, emitted frames consumed by the host, and stale
   dimension-mismatch frames dropped during resize/restart churn.
 - ✅ Add stale-frame / dim-match guards around resize and capture restart.
-- Add DPI monitor-move handling and a runtime smoke that moves or simulates
-  scale changes where feasible.
-- Decide the Windows color target: document that WGC/WebView2 currently emits
-  BGRA8 sRGB, or wire a real Display P3 / HDR path if public APIs allow it.
+- ✅ Add DPI monitor-move handling and a runtime smoke that moves or simulates
+  scale changes where feasible. `demo-win` routes `ScaleFactorChanged` through
+  the same renderer resize path as physical resize events, and `--scale-test`
+  simulates scale-induced physical capture-size changes by resizing the
+  WebView2 producer and acquiring/importing fresh WGC frames at each size.
+- ✅ Decide the Windows color target: the WebView2/WGC path currently reports
+  `ColorPipeline::Srgb` and `Bgra8Unorm`. Public WebView2/WGC APIs in the
+  bound version do not expose a Display P3 or HDR pixel-format/color-space
+  control for this composition capture path, so P3/HDR stay unsupported on
+  Windows until Microsoft exposes that surface.
+- ✅ Document the hard-throttling limit: WebView2 exposes `SetIsVisible` for
+  Page Visibility but no public inactive-scheduling / hard-pause equivalent to
+  macOS `WKPreferences.inactiveSchedulingPolicy`. Windows `apply_settings`
+  returns `Unsupported` when `inactive_scheduling_policy` is set, and
+  `demo-win --browser-test` covers that ceiling.
 - Keep explicit D3D12 fence sync as the preferred path and retain the fallback
   invalidation escape hatch.
 

@@ -13,12 +13,29 @@ impl WebView2CompositionProducer {
             .map_err(platform("controller.SetIsVisible"))
     }
 
+    pub fn set_password_autosave_enabled(&self, enabled: bool) -> Result<(), WebSurfaceError> {
+        let settings = self.settings4()?;
+        unsafe { settings.SetIsPasswordAutosaveEnabled(enabled) }
+            .map_err(platform("Settings4.SetIsPasswordAutosaveEnabled"))
+    }
+
+    pub fn set_general_autofill_enabled(&self, enabled: bool) -> Result<(), WebSurfaceError> {
+        let settings = self.settings4()?;
+        unsafe { settings.SetIsGeneralAutofillEnabled(enabled) }
+            .map_err(platform("Settings4.SetIsGeneralAutofillEnabled"))
+    }
+
     /// Apply a partial settings update. `None` fields are left at their
     /// current value.
     pub fn apply_settings(
         &self,
         settings: &crate::WebSurfaceSettings,
     ) -> Result<(), WebSurfaceError> {
+        if settings.inactive_scheduling_policy.is_some() {
+            return Err(WebSurfaceError::Unsupported(
+                "WebView2 exposes SetIsVisible for Page Visibility, but no public inactive-scheduling / hard-pause policy equivalent",
+            ));
+        }
         if let Some(zoom) = settings.zoom_factor {
             unsafe { self.controller.SetZoomFactor(zoom) }
                 .map_err(platform("controller.SetZoomFactor"))?;
@@ -58,5 +75,20 @@ impl WebView2CompositionProducer {
                 .map_err(platform("Settings2.SetUserAgent"))?;
         }
         Ok(())
+    }
+
+    fn settings4(
+        &self,
+    ) -> Result<
+        webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings4,
+        WebSurfaceError,
+    > {
+        let settings: webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings =
+            unsafe { self.webview.Settings() }.map_err(platform("webview.Settings"))?;
+        settings.cast().map_err(|_| {
+            WebSurfaceError::Unsupported(
+                "WebView2 runtime does not expose ICoreWebView2Settings4 autofill controls",
+            )
+        })
     }
 }

@@ -1,0 +1,85 @@
+use super::super::*;
+
+pub(crate) fn validate_platform_capture(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    host: &HostWgpuContext,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let captured = producer.acquire_full_frame()?;
+    let imported = import_and_close(host, &captured)?;
+    let metrics = producer.capture_metrics();
+    let color_pipeline = producer.capture_color_pipeline();
+    let texture_format = producer.capture_texture_format();
+    println!(
+        "demo-win: capture-test: captured {}x{}, imported {:?} {}x{} generation {}, color={:?}, texture_format={:?}, received={}, consumed={}, stale_dropped={}",
+        captured.content_size.width,
+        captured.content_size.height,
+        imported.format,
+        imported.size.width,
+        imported.size.height,
+        imported.generation,
+        color_pipeline,
+        texture_format,
+        metrics.samples_received,
+        metrics.samples_consumed,
+        metrics.stale_frames_dropped,
+    );
+    println!("demo-win: capture-test: PASS - WebView2 WGC frame acquired and imported");
+    Ok(())
+}
+
+pub(crate) fn validate_platform_scale_resize(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    host: &HostWgpuContext,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let samples = [
+        winit::dpi::PhysicalSize::new(315, 195),
+        winit::dpi::PhysicalSize::new(
+            COMPOSITION_PROBE_WIDTH as u32,
+            COMPOSITION_PROBE_HEIGHT as u32,
+        ),
+    ];
+    for target in samples {
+        producer.resize(target)?;
+        let captured = producer.acquire_full_frame()?;
+        let imported = import_and_close(host, &captured)?;
+        if imported.size != target {
+            return Err(format!(
+                "scale-test imported {}x{} after resize to {}x{}",
+                imported.size.width, imported.size.height, target.width, target.height
+            )
+            .into());
+        }
+        println!(
+            "demo-win: scale-test: captured {}x{}, imported {:?} {}x{} generation {}",
+            captured.content_size.width,
+            captured.content_size.height,
+            imported.format,
+            imported.size.width,
+            imported.size.height,
+            imported.generation,
+        );
+    }
+    let metrics = producer.capture_metrics();
+    println!(
+        "demo-win: scale-test: PASS - simulated scale resize path, received={}, consumed={}, stale_dropped={}",
+        metrics.samples_received, metrics.samples_consumed, metrics.stale_frames_dropped,
+    );
+    Ok(())
+}
+
+fn import_and_close(
+    host: &HostWgpuContext,
+    captured: &scrying::webview2_composition_producer::WebView2CompositionFrame,
+) -> Result<scrying::ImportedTexture, Box<dyn std::error::Error>> {
+    use scrying::windows_capture::close_shared_handle;
+
+    let WebSurfaceFrame::Native(ref native_frame) = captured.frame else {
+        return Err("WebView2 composition producer did not emit a native frame".into());
+    };
+    let importer = WgpuTextureImporter::new(host.clone());
+    let imported = importer.import_frame(native_frame, &ImportOptions::default())?;
+    unsafe {
+        close_shared_handle(captured.shared_handle)?;
+    }
+    Ok(imported)
+}

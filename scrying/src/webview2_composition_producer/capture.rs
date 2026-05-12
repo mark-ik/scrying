@@ -127,6 +127,20 @@ impl WebView2CompositionProducer {
         }
     }
 
+    /// Color-space target emitted by the current Windows WebView2/WGC path.
+    ///
+    /// WebView2 composition capture is fixed to SDR sRGB in the public APIs
+    /// used here. P3 and HDR remain unsupported until WebView2 or WGC expose
+    /// a configurable color-space / pixel-format control for this path.
+    pub fn capture_color_pipeline(&self) -> ColorPipeline {
+        ColorPipeline::Srgb
+    }
+
+    /// Texture format emitted by the current Windows WebView2/WGC path.
+    pub fn capture_texture_format(&self) -> wgpu::TextureFormat {
+        wgpu::TextureFormat::Bgra8Unorm
+    }
+
     pub fn try_acquire_frame(
         &mut self,
     ) -> Result<Option<WebView2CompositionFrame>, WebSurfaceError> {

@@ -82,6 +82,37 @@ pub(crate) fn validate_platform_context_menu(
     Ok(())
 }
 
+pub(crate) fn validate_platform_drop_observability(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    producer.navigate_to_string(
+        r#"<!doctype html><html><body style="margin:0"><main id="target" style="display:block;width:220px;height:80px;padding:24px">drop target</main><script>const post=value=>window.chrome.webview.postMessage(value);post("drop-test:ready");window.chrome.webview.addEventListener("message", event => { if (event.data === "drop-test:trigger") { const target = document.getElementById("target"); const data = new DataTransfer(); data.setData("text/uri-list", "https://example.test/drop"); target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, clientX: 35, clientY: 45, dataTransfer: data })); post("drop-test:triggered"); } });</script></body></html>"#,
+        std::time::Duration::from_secs(5),
+    )?;
+    wait_for_web_message(
+        producer,
+        "drop-test:ready",
+        std::time::Duration::from_secs(3),
+    )?;
+    drain_navigation_events(producer);
+    producer.post_web_message("drop-test:trigger")?;
+    wait_for_web_message(
+        producer,
+        "drop-test:triggered",
+        std::time::Duration::from_secs(3),
+    )?;
+    let (file_count, primary_url) =
+        wait_for_drop_detected(producer, std::time::Duration::from_secs(5))?;
+    if file_count != 0 || primary_url.as_deref() != Some("https://example.test/drop") {
+        return Err(format!(
+            "drop-test: unexpected file_count={file_count} primary_url={primary_url:?}"
+        )
+        .into());
+    }
+    println!("demo-win: drop-test: PASS - drop bridge reported primary URL {primary_url:?}");
+    Ok(())
+}
+
 pub(crate) fn validate_platform_media_capture_observability(
     producer: &mut scrying::PlatformWebSurfaceProducer,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -184,6 +215,18 @@ pub(crate) fn validate_platform_browser_controls(
     }
     wait_for_web_message(producer, second_ready, std::time::Duration::from_secs(3))?;
     drain_web_messages(producer);
+    if producer.serialize_interaction_state().is_some() {
+        return Err("browser-test: WebView2 unexpectedly serialized interaction state".into());
+    }
+    match producer.restore_interaction_state(b"not-a-webview2-state") {
+        Err(scrying::WebSurfaceError::Unsupported(_)) => {}
+        Err(error) => return Err(error.into()),
+        Ok(()) => {
+            return Err(
+                "browser-test: WebView2 interaction-state restore unexpectedly succeeded".into(),
+            );
+        }
+    }
 
     producer.reload()?;
     wait_for_web_message(producer, second_ready, std::time::Duration::from_secs(3))?;
@@ -201,6 +244,19 @@ pub(crate) fn validate_platform_browser_controls(
     producer.set_visible(false)?;
     pump_windows_messages_for(std::time::Duration::from_millis(100));
     producer.set_visible(true)?;
+    let hard_throttle = WebSurfaceSettings {
+        inactive_scheduling_policy: Some(scrying::InactiveSchedulingPolicy::Suspend),
+        ..WebSurfaceSettings::default()
+    };
+    match producer.apply_settings(&hard_throttle) {
+        Err(scrying::WebSurfaceError::Unsupported(_)) => {}
+        Err(error) => return Err(error.into()),
+        Ok(()) => return Err("browser-test: WebView2 hard throttle unexpectedly succeeded".into()),
+    }
+    producer.set_password_autosave_enabled(false)?;
+    producer.set_general_autofill_enabled(false)?;
+    producer.set_password_autosave_enabled(true)?;
+    producer.set_general_autofill_enabled(true)?;
     producer.apply_settings(&WebSurfaceSettings {
         zoom_factor: Some(1.0),
         user_agent: None,
@@ -212,7 +268,7 @@ pub(crate) fn validate_platform_browser_controls(
     })?;
 
     println!(
-        "demo-win: browser-test: PASS - history, reload/stop, title, settings, and visibility controls verified"
+        "demo-win: browser-test: PASS - history, tab-state ceiling, reload/stop, title, settings, visibility controls, autofill toggles, and hard-throttle ceiling verified"
     );
     Ok(())
 }

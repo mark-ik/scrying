@@ -142,7 +142,7 @@ impl WebView2CompositionProducer {
 
 pub(super) fn install_context_menu_bridge(webview: &ICoreWebView2) -> Result<(), WebSurfaceError> {
     let script = format!(
-        r#"(() => {{
+        r##"(() => {{
             if (window.__scryingContextMenuBridgeInstalled) return;
             Object.defineProperty(window, "__scryingContextMenuBridgeInstalled", {{ value: true }});
             const prefix = {prefix:?};
@@ -166,8 +166,40 @@ pub(super) fn install_context_menu_bridge(webview: &ICoreWebView2) -> Result<(),
                 ].join("\t");
                 try {{ window.chrome.webview.postMessage(prefix + payload); }} catch (_) {{}}
             }}, true);
-        }})()"#,
+        }})()"##,
         prefix = CONTEXT_MENU_BRIDGE_PREFIX,
+    );
+    add_script_to_execute_on_document_created_blocking(webview, script)
+}
+
+pub(super) fn install_drop_detected_bridge(webview: &ICoreWebView2) -> Result<(), WebSurfaceError> {
+    let script = format!(
+        r##"(() => {{
+            if (window.__scryingDropBridgeInstalled) return;
+            Object.defineProperty(window, "__scryingDropBridgeInstalled", {{ value: true }});
+            const prefix = {prefix:?};
+            const clean = value => String(value || "").replace(/[\t\r\n]/g, " ");
+            window.addEventListener("drop", event => {{
+                const dt = event.dataTransfer;
+                if (!dt) return;
+                const types = Array.from(dt.types || []);
+                const hasFiles = dt.files && dt.files.length > 0;
+                const hasUri = types.includes("text/uri-list") || !!dt.getData("text/uri-list");
+                const hasImage = types.some(type => String(type).toLowerCase().startsWith("image/"));
+                if (!hasFiles && !hasUri && !hasImage) return;
+                let primaryUrl = dt.getData("text/uri-list") || "";
+                if (primaryUrl.includes("\n")) primaryUrl = primaryUrl.split(/\r?\n/).find(line => line && !line.startsWith("#")) || "";
+                if (!primaryUrl) primaryUrl = dt.getData("text/plain") || "";
+                const payload = [
+                    Math.round(event.clientX),
+                    Math.round(event.clientY),
+                    dt.files ? dt.files.length : 0,
+                    clean(primaryUrl),
+                ].join("\t");
+                try {{ window.chrome.webview.postMessage(prefix + payload); }} catch (_) {{}}
+            }}, true);
+        }})()"##,
+        prefix = DROP_DETECTED_BRIDGE_PREFIX,
     );
     add_script_to_execute_on_document_created_blocking(webview, script)
 }
@@ -355,6 +387,21 @@ pub(super) fn parse_context_menu_bridge_message(message: &str) -> Option<Navigat
         y,
         link_url,
         image_url,
+    })
+}
+
+pub(super) fn parse_drop_detected_bridge_message(message: &str) -> Option<NavigationEvent> {
+    let payload = message.strip_prefix(DROP_DETECTED_BRIDGE_PREFIX)?;
+    let mut parts = payload.splitn(4, '\t');
+    let x = parts.next()?.parse().ok()?;
+    let y = parts.next()?.parse().ok()?;
+    let file_count = parts.next()?.parse().ok()?;
+    let primary_url = optional_bridge_string(parts.next().unwrap_or_default());
+    Some(NavigationEvent::DropDetected {
+        x,
+        y,
+        file_count,
+        primary_url,
     })
 }
 

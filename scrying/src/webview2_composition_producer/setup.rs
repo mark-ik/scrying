@@ -142,6 +142,7 @@ impl WebView2CompositionProducer {
 
         cookies::install_cookie_change_bridge(&webview)?;
         browser::install_context_menu_bridge(&webview)?;
+        browser::install_drop_detected_bridge(&webview)?;
         browser::install_media_capture_bridge(&webview)?;
 
         let (

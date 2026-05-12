@@ -397,11 +397,11 @@ pub enum NavigationEvent {
     /// `resume_data` is `Some` when WebKit captured enough state
     /// to potentially resume the download via
     /// [`crate::wkwebview_producer::WkWebViewProducer::resume_download`].
-    /// `None` when the cancel happened before any bytes
-    /// transferred (e.g. host destination handler returned
-    /// `Cancel` from `decideDestination`) or when the protocol /
-    /// server doesn't support resumption (no `Accept-Ranges`
-    /// support, etc.).
+    /// `None` when the cancel happened before any bytes transferred (e.g.
+    /// host destination handler returned `Cancel` from `decideDestination`),
+    /// when the protocol / server doesn't support resumption (no
+    /// `Accept-Ranges` support, etc.), or on Windows where WebView2 exposes
+    /// live pause/resume operations but no portable offline resume-data blob.
     DownloadCancelled {
         id: DownloadId,
         destination_path: std::path::PathBuf,
@@ -410,7 +410,7 @@ pub enum NavigationEvent {
     /// External content was dropped on the page (file from
     /// Finder, URL from another browser, image from a different
     /// app, etc.). Fires *in addition to* the page's own
-    /// `dragenter` / `drop` JS events and any default WKWebView
+    /// `dragenter` / `drop` JS events and any default webview
     /// behavior — the user-script that drives this event runs
     /// at the capture phase but does *not* call
     /// `event.preventDefault()`, so the page still gets to
@@ -841,7 +841,8 @@ pub enum DragEventKind {
 
 /// Color-space pipeline a producer's capture path is configured
 /// for. Picks how the engine encodes captured pixels into the
-/// IOSurface the consumer eventually imports as a wgpu texture.
+/// platform-native texture the consumer eventually imports as a
+/// wgpu texture.
 ///
 /// Today this is a *static* per-producer choice (set in
 /// [`crate::wkwebview_producer::WkWebViewProducerConfig`] or via

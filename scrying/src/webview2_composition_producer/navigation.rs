@@ -173,6 +173,16 @@ impl WebView2CompositionProducer {
             .unwrap_or(false)
     }
 
+    pub fn serialize_interaction_state(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    pub fn restore_interaction_state(&mut self, _bytes: &[u8]) -> Result<(), WebSurfaceError> {
+        Err(WebSurfaceError::Unsupported(
+            "WebView2 exposes navigation history controls but no opaque tab interaction-state blob equivalent to WKWebView",
+        ))
+    }
+
     pub fn load_url(&self, url: &str) -> Result<(), WebSurfaceError> {
         let url = CoTaskMemPWSTR::from(url);
         unsafe { self.webview.Navigate(*url.as_ref().as_pcwstr()) }
@@ -336,6 +346,12 @@ pub(super) fn register_persistent_handlers(
                     return Ok(());
                 }
                 if let Some(event) = browser::parse_context_menu_bridge_message(&s) {
+                    if let Ok(mut q) = nav_queue_for_messages.lock() {
+                        q.push_back(event);
+                    }
+                    return Ok(());
+                }
+                if let Some(event) = browser::parse_drop_detected_bridge_message(&s) {
                     if let Ok(mut q) = nav_queue_for_messages.lock() {
                         q.push_back(event);
                     }

@@ -97,9 +97,9 @@ use windows::core::{IInspectable, Interface, PCWSTR, PWSTR};
 use windows_numerics::{Vector2, Vector3};
 
 use crate::{
-    AuthChallenge, AuthDisposition, AuthSource, Cookie, CursorShape, DownloadDecision,
-    DownloadDestinationRequest, DownloadId, FocusReason, KeyEventKind, KeyboardInput,
-    MouseEventKind, MouseInput, NavigationEvent, PermissionDecision, PermissionKind,
+    AuthChallenge, AuthDisposition, AuthSource, ColorPipeline, Cookie, CursorShape,
+    DownloadDecision, DownloadDestinationRequest, DownloadId, FocusReason, KeyEventKind,
+    KeyboardInput, MouseEventKind, MouseInput, NavigationEvent, PermissionDecision, PermissionKind,
     PermissionRequest, UrlSchemeHandlerFn, UrlSchemeResponse,
 };
 
@@ -116,6 +116,7 @@ use downloads::{DownloadIdAllocator, WebView2DownloadRegistry};
 const FIRST_FRAME_NUDGE_LABEL: &str = "WebView2CompositionProducer.first-frame";
 const COOKIE_CHANGE_BRIDGE_MESSAGE: &str = "\0scrying:cookie-change";
 const CONTEXT_MENU_BRIDGE_PREFIX: &str = "scrying:context-menu:";
+const DROP_DETECTED_BRIDGE_PREFIX: &str = "scrying:drop-detected:";
 const MEDIA_CAPTURE_BRIDGE_PREFIX: &str = "scrying:media-capture:";
 const MAX_MESSAGES_PER_PUMP_SLICE: usize = 256;
 
