@@ -1,0 +1,360 @@
+use super::*;
+
+impl WebView2CompositionProducer {
+    pub fn capture_snapshot_png(&self) -> Result<Vec<u8>, WebSurfaceError> {
+        let stream: IStream = unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }
+            .map_err(platform("CreateStreamOnHGlobal"))?;
+        let (tx, rx) = mpsc::channel::<windows::core::Result<()>>();
+        let handler = webview2_com::CapturePreviewCompletedHandler::create(Box::new(
+            move |result: windows::core::Result<()>| {
+                let _ = tx.send(result);
+                Ok(())
+            },
+        ));
+        unsafe {
+            self.webview
+                .CapturePreview(
+                    COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+                    &stream,
+                    &handler,
+                )
+                .map_err(platform("CapturePreview"))?;
+        }
+
+        loop {
+            pump_messages_for(Duration::from_millis(16));
+            match rx.try_recv() {
+                Ok(result) => {
+                    result.map_err(platform("CapturePreview completion"))?;
+                    break;
+                }
+                Err(mpsc::TryRecvError::Empty) => continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(WebSurfaceError::Platform(
+                        "CapturePreview completion channel closed unexpectedly".into(),
+                    ));
+                }
+            }
+        }
+
+        unsafe {
+            let hglobal =
+                GetHGlobalFromStream(&stream).map_err(platform("GetHGlobalFromStream"))?;
+            let size = GlobalSize(hglobal);
+            if size == 0 {
+                return Ok(Vec::new());
+            }
+            let ptr = GlobalLock(hglobal);
+            if ptr.is_null() {
+                return Err(WebSurfaceError::Platform("GlobalLock returned null".into()));
+            }
+            let bytes = std::slice::from_raw_parts(ptr as *const u8, size).to_vec();
+            let _ = GlobalUnlock(hglobal);
+            Ok(bytes)
+        }
+    }
+
+    pub fn force_restart_capture(&mut self) {
+        if let Some(state) = self.capture_state.take() {
+            let _ = state.session.Close();
+            let _ = state.pool.Close();
+        }
+    }
+
+    pub fn invalidate_persistent_dest(&mut self) {
+        self.persistent_dest = None;
+    }
+
+    pub fn set_offset(&self, x: f32, y: f32) -> Result<(), WebSurfaceError> {
+        self.root_visual
+            .SetOffset(Vector3 { X: x, Y: y, Z: 0.0 })
+            .map_err(platform("root.SetOffset"))
+    }
+
+    pub fn resize(&mut self, size: PhysicalSize<u32>) -> Result<(), WebSurfaceError> {
+        if size.width == 0 || size.height == 0 {
+            return Err(WebSurfaceError::Platform(format!(
+                "WebView2 producer resize must be non-zero, got {}x{}",
+                size.width, size.height
+            )));
+        }
+        if size == self.size {
+            return Ok(());
+        }
+        eprintln!(
+            "[producer] resize: {}x{} -> {}x{}",
+            self.size.width, self.size.height, size.width, size.height
+        );
+        let visual_size = Vector2 {
+            X: size.width as f32,
+            Y: size.height as f32,
+        };
+        self.root_visual
+            .SetSize(visual_size)
+            .map_err(platform("root.SetSize"))?;
+        self.webview_visual
+            .SetSize(visual_size)
+            .map_err(platform("webview_visual.SetSize"))?;
+        unsafe {
+            self.controller
+                .SetBounds(RECT {
+                    left: 0,
+                    top: 0,
+                    right: size.width as i32,
+                    bottom: size.height as i32,
+                })
+                .map_err(platform("controller.SetBounds"))?;
+        }
+        self.force_restart_capture();
+        self.persistent_dest = None;
+        self.size = size;
+        Ok(())
+    }
+
+    pub fn acquire_full_frame(&mut self) -> Result<WebView2CompositionFrame, WebSurfaceError> {
+        if self.capture_state.is_none() {
+            self.start_capture()?;
+        }
+        self.acquire_frame_with_timeout(Duration::from_secs(2))
+    }
+
+    pub fn try_acquire_frame(
+        &mut self,
+    ) -> Result<Option<WebView2CompositionFrame>, WebSurfaceError> {
+        if self.capture_state.is_none() {
+            self.start_capture()?;
+        }
+        let needs_nudge = self
+            .capture_state
+            .as_ref()
+            .map(|state| !state.first_frame_emitted)
+            .unwrap_or(true);
+        if needs_nudge {
+            let _ = self.nudge_content(FIRST_FRAME_NUDGE_LABEL);
+        }
+        let first_frame_deadline = if needs_nudge {
+            Some(Instant::now() + Duration::from_millis(500))
+        } else {
+            None
+        };
+        let block_started = Instant::now();
+        loop {
+            let state = self
+                .capture_state
+                .as_mut()
+                .expect("capture state populated above");
+            match state.pool.TryGetNextFrame() {
+                Ok(frame) => return self.capture_frame_to_shared(frame).map(Some),
+                Err(_) => match first_frame_deadline {
+                    Some(deadline) if Instant::now() < deadline => {
+                        pump_messages_for(Duration::from_millis(16));
+                    }
+                    Some(_) => {
+                        eprintln!(
+                            "[producer] first-frame block: TIMED OUT after {}ms",
+                            block_started.elapsed().as_millis()
+                        );
+                        return Ok(None);
+                    }
+                    None => return Ok(None),
+                },
+            }
+        }
+    }
+
+    pub fn acquire_frame_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<WebView2CompositionFrame, WebSurfaceError> {
+        if self.capture_state.is_none() {
+            self.start_capture()?;
+        }
+        let needs_nudge = self
+            .capture_state
+            .as_ref()
+            .map(|state| !state.first_frame_emitted)
+            .unwrap_or(true);
+        if needs_nudge {
+            let _ = self.nudge_content(FIRST_FRAME_NUDGE_LABEL);
+        }
+        let deadline = Instant::now() + timeout;
+        let frame = loop {
+            let state = self
+                .capture_state
+                .as_mut()
+                .expect("capture state populated above");
+            match state.pool.TryGetNextFrame() {
+                Ok(frame) => break frame,
+                Err(_) if Instant::now() < deadline => pump_messages_for(Duration::from_millis(16)),
+                Err(error) => {
+                    return Err(WebSurfaceError::Platform(format!(
+                        "TryGetNextFrame timed out after {timeout:?} for {}x{}: {error}",
+                        self.size.width, self.size.height
+                    )));
+                }
+            }
+        };
+        self.capture_frame_to_shared(frame)
+    }
+
+    fn capture_frame_to_shared(
+        &mut self,
+        frame: windows::Graphics::Capture::Direct3D11CaptureFrame,
+    ) -> Result<WebView2CompositionFrame, WebSurfaceError> {
+        let content_size = frame
+            .ContentSize()
+            .map_err(platform("Direct3D11CaptureFrame::ContentSize"))?;
+        let surface = frame
+            .Surface()
+            .map_err(platform("Direct3D11CaptureFrame::Surface"))?;
+        let access = surface
+            .cast::<IDirect3DDxgiInterfaceAccess>()
+            .map_err(platform(
+                "IDirect3DSurface cast to IDirect3DDxgiInterfaceAccess",
+            ))?;
+        let texture = unsafe { access.GetInterface::<ID3D11Texture2D>() }
+            .map_err(platform("GetInterface<ID3D11Texture2D>"))?;
+        let raw_texture = Interface::as_raw(&texture);
+        self.generation = self.generation.saturating_add(1);
+        let captured_size =
+            PhysicalSize::new(content_size.Width as u32, content_size.Height as u32);
+        let allocated_now = self.ensure_persistent_dest(captured_size)?;
+        let dest = self
+            .persistent_dest
+            .as_mut()
+            .expect("persistent_dest populated above");
+        let fence_value = self.capture_factory.copy_capture_into_existing_target(
+            &dest.texture.texture,
+            WebView2D3D11CaptureFrame {
+                size: captured_size,
+                format: wgpu::TextureFormat::Bgra8Unorm,
+                generation: self.generation,
+                raw_d3d11_texture: raw_texture,
+            },
+        )?;
+        let _ = frame.Close();
+        if let Some(state) = self.capture_state.as_mut() {
+            state.first_frame_emitted = true;
+        }
+        let resource_is_new = allocated_now || !dest.handle_handed_off;
+        let shared_handle = if resource_is_new {
+            dest.handle_handed_off = true;
+            dest.texture.shared_frame.shared_handle
+        } else {
+            std::ptr::null_mut()
+        };
+        let surface_frame = WebView2DxgiSharedHandleFrame {
+            size: captured_size,
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            generation: self.generation,
+            shared_handle,
+            producer_sync: self.capture_factory.sync_mechanism(),
+            fence_value,
+        }
+        .into_surface_frame();
+        Ok(WebView2CompositionFrame {
+            frame: surface_frame,
+            content_size: captured_size,
+            generation: self.generation,
+            shared_handle,
+            resource_is_new,
+        })
+    }
+
+    fn ensure_persistent_dest(&mut self, size: PhysicalSize<u32>) -> Result<bool, WebSurfaceError> {
+        if self
+            .persistent_dest
+            .as_ref()
+            .map(|dest| dest.size == size)
+            .unwrap_or(false)
+        {
+            return Ok(false);
+        }
+        self.persistent_dest = None;
+        let texture = self.capture_factory.create_shared_texture(
+            size,
+            wgpu::TextureFormat::Bgra8Unorm,
+            self.generation,
+        )?;
+        self.persistent_dest = Some(PersistentDest {
+            texture,
+            size,
+            handle_handed_off: false,
+        });
+        Ok(true)
+    }
+
+    fn start_capture(&mut self) -> Result<(), WebSurfaceError> {
+        let started = Instant::now();
+        if !GraphicsCaptureSession::IsSupported()
+            .map_err(platform("GraphicsCaptureSession::IsSupported"))?
+        {
+            return Err(WebSurfaceError::Unsupported(
+                "Windows.Graphics.Capture is not supported in this session",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        let visual: Visual = self
+            .webview_visual
+            .cast()
+            .map_err(platform("webview_visual cast to Visual"))?;
+        let item = GraphicsCaptureItem::CreateFromVisual(&visual)
+            .map_err(platform("GraphicsCaptureItem::CreateFromVisual"))?;
+        let item_size = item.Size().map_err(platform("GraphicsCaptureItem::Size"))?;
+        if item_size.Width <= 0 || item_size.Height <= 0 {
+            return Err(WebSurfaceError::Platform(format!(
+                "GraphicsCaptureItem returned invalid size {}x{}",
+                item_size.Width, item_size.Height
+            )));
+        }
+        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+            &self.capture_device,
+            DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            2,
+            item_size,
+        )
+        .map_err(platform("Direct3D11CaptureFramePool::CreateFreeThreaded"))?;
+        let session = pool
+            .CreateCaptureSession(&item)
+            .map_err(platform("CreateCaptureSession"))?;
+        let _ = session.SetIsCursorCaptureEnabled(false);
+        let _ = session.SetIsBorderRequired(false);
+        session.StartCapture().map_err(platform("StartCapture"))?;
+        self.capture_state = Some(CaptureState {
+            item,
+            pool,
+            session,
+            first_frame_emitted: false,
+        });
+        eprintln!(
+            "[producer] start_capture: {}x{} ready in {}ms",
+            item_size.Width,
+            item_size.Height,
+            started.elapsed().as_millis()
+        );
+        Ok(())
+    }
+
+    pub fn nudge_content(&self, label: &str) -> Result<(), WebSurfaceError> {
+        let safe_label: String = label
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+            .collect();
+        let script = format!(
+            r#"(() => new Promise(resolve => {{
+                document.body.dataset.captureNudge = "{safe_label}";
+                document.body.style.boxShadow = `inset 0 0 0 4px rgb(${{Math.floor(Math.random() * 255)}}, 190, 112)`;
+                requestAnimationFrame(() => requestAnimationFrame(() => resolve("nudged")));
+            }}))()"#
+        );
+        execute_script_blocking(&self.webview, script)
+    }
+
+    pub fn webview(&self) -> &ICoreWebView2 {
+        &self.webview
+    }
+
+    pub fn controller(&self) -> &ICoreWebView2Controller {
+        &self.controller
+    }
+}
