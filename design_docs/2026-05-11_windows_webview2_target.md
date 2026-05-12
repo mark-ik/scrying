@@ -117,7 +117,8 @@ Audited against
 - Runtime proof in `demo-win`: `--scripted`, `--browser-test`,
   `--cookie-test`, `--profile-test`, `--incognito-test`, `--popup-test`,
   `--routing-test`, `--process-test`, `--download-test`, `--auth-test`, and
-  `--permission-test`, `--visibility-test`, and `--multi-view-test`.
+  `--permission-test`, `--visibility-test`, `--multi-view-test`, and
+  `--capture-test`.
 
 ### Partially Shipped or Needs Runtime Proof
 
@@ -153,9 +154,9 @@ Audited against
   requested and WebRTC capture lifecycle events are wired, and native
   `Set-Cookie` observation is covered through WebView2
   `WebResourceResponseReceived`.
-- Capture polish: capture metrics, resize stale-frame/dim-match guard, DPI
-  monitor-move handling, Display P3 / HDR pipeline decision, and documented
-  hard-throttling limit.
+- Capture polish: producer capture metrics and resize stale-frame/dim-match
+  guard are wired; DPI monitor-move handling, Display P3 / HDR pipeline
+  decision, and documented hard-throttling limit remain open.
 
 ## Implementation Lane
 
@@ -164,7 +165,9 @@ Audited against
 Every GUI smoke must be bounded by an external timeout and process-tree kill.
 Do not run raw `cargo run -p demo-win -- ...` during validation. The Win32
 message pumps used inside test helpers must bound inner `PeekMessageW` drains
-so a busy queue cannot defeat the timeout.
+so a busy queue cannot defeat the timeout. ✅ The WebView2 producer's internal
+message pump now caps each drain slice, and `demo-win --capture-test` has a
+hard external process timeout in the validation lane.
 
 ### W1 - Input and Visibility Proof
 
@@ -241,9 +244,10 @@ chrome surfaces directly.
 Goal: keep the post-composition texture stream trustworthy under real windowing
 conditions.
 
-- Add capture metrics to the Windows producer, mirroring macOS's
-  `CaptureMetrics` shape.
-- Add stale-frame / dim-match guards around resize and capture restart.
+- ✅ Add capture metrics to the Windows producer: `capture_metrics()` reports
+  WGC frames received, emitted frames consumed by the host, and stale
+  dimension-mismatch frames dropped during resize/restart churn.
+- ✅ Add stale-frame / dim-match guards around resize and capture restart.
 - Add DPI monitor-move handling and a runtime smoke that moves or simulates
   scale changes where feasible.
 - Decide the Windows color target: document that WGC/WebView2 currently emits

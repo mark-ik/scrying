@@ -21,7 +21,7 @@ pub mod webview2_composition_producer;
 
 #[cfg(target_os = "windows")]
 pub use webview2_composition_producer::{
-    WebView2CompositionConfig as PlatformWebSurfaceConfig,
+    CaptureMetrics, WebView2CompositionConfig as PlatformWebSurfaceConfig,
     WebView2CompositionProducer as PlatformWebSurfaceProducer,
 };
 

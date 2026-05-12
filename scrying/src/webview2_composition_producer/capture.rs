@@ -56,6 +56,7 @@ impl WebView2CompositionProducer {
 
     pub fn force_restart_capture(&mut self) {
         if let Some(state) = self.capture_state.take() {
+            let _ = state.pool.RemoveFrameArrived(state.frame_arrived_token);
             let _ = state.session.Close();
             let _ = state.pool.Close();
         }
@@ -118,6 +119,14 @@ impl WebView2CompositionProducer {
         self.acquire_frame_with_timeout(Duration::from_secs(2))
     }
 
+    pub fn capture_metrics(&self) -> CaptureMetrics {
+        CaptureMetrics {
+            samples_received: self.capture_samples_received.load(Ordering::Relaxed),
+            samples_consumed: self.capture_samples_consumed.load(Ordering::Relaxed),
+            stale_frames_dropped: self.capture_stale_frames_dropped.load(Ordering::Relaxed),
+        }
+    }
+
     pub fn try_acquire_frame(
         &mut self,
     ) -> Result<Option<WebView2CompositionFrame>, WebSurfaceError> {
@@ -143,8 +152,30 @@ impl WebView2CompositionProducer {
                 .capture_state
                 .as_mut()
                 .expect("capture state populated above");
+            if !state.frame_ready() {
+                match first_frame_deadline {
+                    Some(deadline) if Instant::now() < deadline => {
+                        pump_messages_for(Duration::from_millis(16));
+                        continue;
+                    }
+                    Some(_) => {
+                        eprintln!(
+                            "[producer] first-frame block: TIMED OUT after {}ms",
+                            block_started.elapsed().as_millis()
+                        );
+                        return Ok(None);
+                    }
+                    None => return Ok(None),
+                }
+            }
             match state.pool.TryGetNextFrame() {
-                Ok(frame) => return self.capture_frame_to_shared(frame).map(Some),
+                Ok(frame) => match self.capture_frame_to_shared(frame)? {
+                    Some(frame) => return Ok(Some(frame)),
+                    None if first_frame_deadline.is_some() => {
+                        pump_messages_for(Duration::from_millis(16));
+                    }
+                    None => return Ok(None),
+                },
                 Err(_) => match first_frame_deadline {
                     Some(deadline) if Instant::now() < deadline => {
                         pump_messages_for(Duration::from_millis(16));
@@ -178,13 +209,33 @@ impl WebView2CompositionProducer {
             let _ = self.nudge_content(FIRST_FRAME_NUDGE_LABEL);
         }
         let deadline = Instant::now() + timeout;
-        let frame = loop {
+        loop {
             let state = self
                 .capture_state
                 .as_mut()
                 .expect("capture state populated above");
+            if !state.frame_ready() {
+                if Instant::now() < deadline {
+                    pump_messages_for(Duration::from_millis(16));
+                    continue;
+                }
+                return Err(WebSurfaceError::Platform(format!(
+                    "WGC frame did not arrive within {timeout:?} for {}x{}",
+                    self.size.width, self.size.height
+                )));
+            }
             match state.pool.TryGetNextFrame() {
-                Ok(frame) => break frame,
+                Ok(frame) => match self.capture_frame_to_shared(frame)? {
+                    Some(frame) => return Ok(frame),
+                    None if Instant::now() < deadline => {
+                        pump_messages_for(Duration::from_millis(16))
+                    }
+                    None => {
+                        return Err(WebSurfaceError::NotReady(
+                            "WGC only returned stale frames before the acquire timeout",
+                        ));
+                    }
+                },
                 Err(_) if Instant::now() < deadline => pump_messages_for(Duration::from_millis(16)),
                 Err(error) => {
                     return Err(WebSurfaceError::Platform(format!(
@@ -193,17 +244,26 @@ impl WebView2CompositionProducer {
                     )));
                 }
             }
-        };
-        self.capture_frame_to_shared(frame)
+        }
     }
 
     fn capture_frame_to_shared(
         &mut self,
         frame: windows::Graphics::Capture::Direct3D11CaptureFrame,
-    ) -> Result<WebView2CompositionFrame, WebSurfaceError> {
+    ) -> Result<Option<WebView2CompositionFrame>, WebSurfaceError> {
         let content_size = frame
             .ContentSize()
             .map_err(platform("Direct3D11CaptureFrame::ContentSize"))?;
+        self.capture_samples_received
+            .fetch_add(1, Ordering::Relaxed);
+        let captured_size =
+            PhysicalSize::new(content_size.Width as u32, content_size.Height as u32);
+        if captured_size != self.size {
+            self.capture_stale_frames_dropped
+                .fetch_add(1, Ordering::Relaxed);
+            let _ = frame.Close();
+            return Ok(None);
+        }
         let surface = frame
             .Surface()
             .map_err(platform("Direct3D11CaptureFrame::Surface"))?;
@@ -216,8 +276,6 @@ impl WebView2CompositionProducer {
             .map_err(platform("GetInterface<ID3D11Texture2D>"))?;
         let raw_texture = Interface::as_raw(&texture);
         self.generation = self.generation.saturating_add(1);
-        let captured_size =
-            PhysicalSize::new(content_size.Width as u32, content_size.Height as u32);
         let allocated_now = self.ensure_persistent_dest(captured_size)?;
         let dest = self
             .persistent_dest
@@ -252,13 +310,16 @@ impl WebView2CompositionProducer {
             fence_value,
         }
         .into_surface_frame();
-        Ok(WebView2CompositionFrame {
+        let webview_frame = WebView2CompositionFrame {
             frame: surface_frame,
             content_size: captured_size,
             generation: self.generation,
             shared_handle,
             resource_is_new,
-        })
+        };
+        self.capture_samples_consumed
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(Some(webview_frame))
     }
 
     fn ensure_persistent_dest(&mut self, size: PhysicalSize<u32>) -> Result<bool, WebSurfaceError> {
@@ -314,6 +375,18 @@ impl WebView2CompositionProducer {
             item_size,
         )
         .map_err(platform("Direct3D11CaptureFramePool::CreateFreeThreaded"))?;
+        let frame_arrivals = Arc::new(AtomicU64::new(0));
+        let frame_arrived_handler =
+            TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new({
+                let frame_arrivals = frame_arrivals.clone();
+                move |_, _| {
+                    frame_arrivals.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
+            });
+        let frame_arrived_token = pool
+            .FrameArrived(&frame_arrived_handler)
+            .map_err(platform("Direct3D11CaptureFramePool::FrameArrived"))?;
         let session = pool
             .CreateCaptureSession(&item)
             .map_err(platform("CreateCaptureSession"))?;
@@ -324,6 +397,9 @@ impl WebView2CompositionProducer {
             item,
             pool,
             session,
+            frame_arrivals,
+            frame_arrivals_observed: 0,
+            frame_arrived_token,
             first_frame_emitted: false,
         });
         eprintln!(
@@ -336,18 +412,8 @@ impl WebView2CompositionProducer {
     }
 
     pub fn nudge_content(&self, label: &str) -> Result<(), WebSurfaceError> {
-        let safe_label: String = label
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
-            .collect();
-        let script = format!(
-            r#"(() => new Promise(resolve => {{
-                document.body.dataset.captureNudge = "{safe_label}";
-                document.body.style.boxShadow = `inset 0 0 0 4px rgb(${{Math.floor(Math.random() * 255)}}, 190, 112)`;
-                requestAnimationFrame(() => requestAnimationFrame(() => resolve("nudged")));
-            }}))()"#
-        );
-        execute_script_blocking(&self.webview, script)
+        let _ = label;
+        Ok(())
     }
 
     pub fn webview(&self) -> &ICoreWebView2 {
@@ -356,5 +422,16 @@ impl WebView2CompositionProducer {
 
     pub fn controller(&self) -> &ICoreWebView2Controller {
         &self.controller
+    }
+}
+
+impl CaptureState {
+    fn frame_ready(&mut self) -> bool {
+        let arrivals = self.frame_arrivals.load(Ordering::Relaxed);
+        if arrivals == self.frame_arrivals_observed {
+            return false;
+        }
+        self.frame_arrivals_observed = arrivals;
+        true
     }
 }

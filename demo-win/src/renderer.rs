@@ -307,8 +307,9 @@ impl WebViewRenderer {
             return;
         }
         let secs = elapsed.as_secs_f64().max(0.001);
+        let producer_metrics = self.captured.producer.capture_metrics();
         println!(
-            "renderer metrics ({:.1}s): polled={}, acquired={} ({:.1}/s), resource_swaps={}, total_imports={}, capture_restarts={}",
+            "renderer metrics ({:.1}s): polled={}, acquired={} ({:.1}/s), resource_swaps={}, total_imports={}, capture_restarts={}, producer_received={}, producer_consumed={}, producer_stale_dropped={}",
             secs,
             self.frames_polled,
             self.frames_acquired,
@@ -316,6 +317,9 @@ impl WebViewRenderer {
             self.frames_resource_swapped,
             self.frames_imported,
             self.capture_restarts,
+            producer_metrics.samples_received,
+            producer_metrics.samples_consumed,
+            producer_metrics.stale_frames_dropped,
         );
         self.frames_polled = 0;
         self.frames_acquired = 0;

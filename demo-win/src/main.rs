@@ -88,6 +88,7 @@ struct Cli {
     pdf_test: bool,
     context_test: bool,
     media_test: bool,
+    capture_test: bool,
 }
 
 impl Cli {
@@ -114,6 +115,7 @@ impl Cli {
                 "--pdf-test" => cli.pdf_test = true,
                 "--context-test" => cli.context_test = true,
                 "--media-test" => cli.media_test = true,
+                "--capture-test" => cli.capture_test = true,
                 _ => eprintln!("demo-win: unknown arg: {arg}"),
             }
         }
@@ -140,6 +142,7 @@ impl Cli {
             || self.pdf_test
             || self.context_test
             || self.media_test
+            || self.capture_test
     }
 }
 

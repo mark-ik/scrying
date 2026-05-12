@@ -70,9 +70,9 @@ yet.
 | Overlay vs imported-texture mode | ✅ | ✅ | ? | Capability-driven via `WebSurfaceMode` |
 | Source-rect crop to webview region | ✅ | ✅ | ? | macOS via per-frame Metal blit; Apple ignores `sourceRect` for single-window filters |
 | Chrome (title-bar) offset honored | ✅ | n/a | n/a | Window-frame top-left coords; macOS-specific because SCK captures full window |
-| Resize correctness (dim-match guard) | ✅ | ? | ? | Stale pre-resize SCK samples rejected by IOSurface-dim check |
+| Resize correctness (dim-match guard) | ✅ | ✅ | ? | macOS rejects stale pre-resize SCK samples; Windows drops WGC frames whose `ContentSize` no longer matches the producer size after resize/restart churn |
 | DPI awareness across monitor moves | ✅ | ? | ? | Backing-scale-change observer re-applies `config.size` |
-| Capture cadence probe (`CaptureMetrics`) | ✅ | ⏳ | ⏳ | `samples_received` / `samples_consumed` atomic counters |
+| Capture cadence probe (`CaptureMetrics`) | ✅ | ✅ | ⏳ | macOS exposes `samples_received` / `samples_consumed`; Windows also reports `stale_frames_dropped` for resize/restart diagnostics |
 | Cross-API GPU sync (explicit fences) | ✅ | ✅ | ✅ | macOS producer encodes `MTLCommandBuffer::encodeSignalEvent_value` and producer-side waits before handoff; Windows supports `D3D12_FENCE_FLAG_SHARED` when the host supplies a shared fence handle, with the older barrier path as fallback. Architectural follow-up on macOS: consumer-side `encodeWaitForEvent:value:` via the wgpu-hal Metal escape removes the CPU stall entirely (~1ms per acquire saved) |
 | Color management — Display P3 SDR | ✅ | ⏳ | ⏳ | `WkWebViewProducerConfig::color_pipeline = ColorPipeline::DisplayP3` (or `set_color_pipeline` live); SCK's `colorSpaceName` switches to `kCGColorSpaceDisplayP3`. Same 8-bit BGRA format as sRGB — only the gamut tag differs |
 | Color management — HDR / 16-float | ✅ | ⏳ | ⏳ | `ColorPipeline::Hdr16f`: SCK config flips to `kCVPixelFormatType_64RGBAHalf` + `kCGColorSpaceExtendedLinearDisplayP3`; Metal source/dest become `RGBA16Float`; `MetalTextureRef::format = wgpu::TextureFormat::Rgba16Float`. Per-frame bandwidth ~doubles. Consumers must configure their wgpu surface for HDR (Rgba16Float + EDR alpha mode) to actually display HDR; SDR surfaces clamp >1.0 values to ~SDR-white |

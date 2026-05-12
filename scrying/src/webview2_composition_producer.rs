@@ -71,6 +71,7 @@ use webview2_com::{
     StateChangedEventHandler, WebMessageReceivedEventHandler, WebResourceRequestedEventHandler,
     WebResourceResponseReceivedEventHandler,
 };
+use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
@@ -92,7 +93,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_IME_SELECT, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_SYSCHAR,
     WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
-use windows::core::{Interface, PCWSTR, PWSTR};
+use windows::core::{IInspectable, Interface, PCWSTR, PWSTR};
 use windows_numerics::{Vector2, Vector3};
 
 use crate::{
@@ -116,6 +117,7 @@ const FIRST_FRAME_NUDGE_LABEL: &str = "WebView2CompositionProducer.first-frame";
 const COOKIE_CHANGE_BRIDGE_MESSAGE: &str = "\0scrying:cookie-change";
 const CONTEXT_MENU_BRIDGE_PREFIX: &str = "scrying:context-menu:";
 const MEDIA_CAPTURE_BRIDGE_PREFIX: &str = "scrying:media-capture:";
+const MAX_MESSAGES_PER_PUMP_SLICE: usize = 256;
 
 pub type WebView2CookieChangeHandlerFn = Box<dyn Fn() + Send + Sync + 'static>;
 pub type WebView2DownloadHandlerFn =
@@ -258,6 +260,19 @@ pub struct WebView2CompositionFrame {
     pub resource_is_new: bool,
 }
 
+/// Live Windows.Graphics.Capture counters for the WebView2 producer.
+///
+/// `samples_received` counts WGC frames pulled from the frame pool,
+/// `samples_consumed` counts frames emitted to the host, and
+/// `stale_frames_dropped` counts frames skipped because their dimensions no
+/// longer match the producer after a resize or capture restart.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CaptureMetrics {
+    pub samples_received: u64,
+    pub samples_consumed: u64,
+    pub stale_frames_dropped: u64,
+}
+
 /// WebView2 + WinComp + WGC capture producer.
 ///
 /// Construction sets up the composition tree and the WebView2 environment.
@@ -287,6 +302,9 @@ pub struct WebView2CompositionProducer {
     capture_device: IDirect3DDevice,
     capture_state: Option<CaptureState>,
     persistent_dest: Option<PersistentDest>,
+    capture_samples_received: AtomicU64,
+    capture_samples_consumed: AtomicU64,
+    capture_stale_frames_dropped: AtomicU64,
 
     // Persistent event queues drained by `poll_navigation_event` and
     // `poll_web_message`. Handler closures own clones of these `Arc`s and
@@ -335,6 +353,9 @@ struct CaptureState {
     item: GraphicsCaptureItem,
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
+    frame_arrivals: Arc<AtomicU64>,
+    frame_arrivals_observed: u64,
+    frame_arrived_token: i64,
     first_frame_emitted: bool,
 }
 
@@ -512,9 +533,13 @@ fn pump_messages_for(duration: Duration) {
     while Instant::now() < deadline {
         unsafe {
             let mut message = MSG::default();
-            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+            let mut drained = 0;
+            while drained < MAX_MESSAGES_PER_PUMP_SLICE
+                && PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool()
+            {
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
+                drained += 1;
             }
         }
         std::thread::sleep(Duration::from_millis(16));
@@ -532,9 +557,13 @@ fn pump_until(timeout: Duration, rx: &mpsc::Receiver<()>) -> Result<(), ()> {
         }
         unsafe {
             let mut message = MSG::default();
-            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+            let mut drained = 0;
+            while drained < MAX_MESSAGES_PER_PUMP_SLICE
+                && PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool()
+            {
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
+                drained += 1;
                 if rx.try_recv().is_ok() {
                     return Ok(());
                 }

@@ -3,6 +3,7 @@ use super::*;
 impl Drop for WebView2CompositionProducer {
     fn drop(&mut self) {
         if let Some(state) = self.capture_state.take() {
+            let _ = state.pool.RemoveFrameArrived(state.frame_arrived_token);
             let _ = state.session.Close();
             let _ = state.pool.Close();
             let _ = state;

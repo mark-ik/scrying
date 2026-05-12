@@ -4,6 +4,8 @@ Windows WebView2 composition runtime probe for `scrying`.
 
 This is the Windows-specific counterpart to [`../demo-mac`](../demo-mac/). It is intentionally heavier than [`../demo-scrying-winit`](../demo-scrying-winit/): the catchall demo proves platform selection and dependency gating, while this crate drives the WebView2 CompositionController, WinComp, Windows Graphics Capture, shared D3D texture import, resize, input, navigation events, JS messages, cursor reporting, and optional readback/fence diagnostics from a real winit event loop.
 
+During interactive runs the renderer logs producer capture counters from `capture_metrics()`: WGC frames received, frames emitted to the host, and stale dimension-mismatch frames dropped during resize/restart churn.
+
 Future Windows browser-shape assertions should land here first, mirroring the mode vocabulary used by `demo-mac` (`--scripted`, `--browser-test`, `--cookie-test`, `--profile-test`, `--incognito-test`, `--popup-test`, `--routing-test`, `--process-test`, `--download-test`, `--auth-test`, `--permission-test`, `--visibility-test`, `--find-test`, `--pdf-test`, `--context-test`, `--media-test`, `--multi-view-test`, `--two-tabs`, `--capture-test`) as each WebView2 slice gets runtime proof.
 
 Current Windows runtime observations:
@@ -45,6 +47,7 @@ cargo run -p demo-win -- --pdf-test
 cargo run -p demo-win -- --context-test
 cargo run -p demo-win -- --media-test
 cargo run -p demo-win -- --multi-view-test
+cargo run -p demo-win -- --capture-test
 ```
 
 `--scripted` loads a deterministic inline page, asserts a host-to-JS-to-host message round-trip, verifies mouse/keyboard forwarding APIs accept synthetic events, and requests process shutdown after the synchronous probe. It deliberately does not require the DOM keyboard effect to round-trip; the stricter `WEBVIEW_KEYBOARD_VALIDATE=1` smoke remains opt-in until the Windows message-loop path is tightened.
@@ -78,6 +81,8 @@ cargo run -p demo-win -- --multi-view-test
 `--context-test` verifies `NavigationEvent::ContextMenuRequested` through the installed context-menu bridge. The producer also registers WebView2's native `ContextMenuRequested` event for real user input.
 
 `--media-test` verifies the media-capture WebMessage bridge used by the injected `getUserMedia` observer to emit `NavigationEvent::MediaCaptureStateChanged`.
+
+`--capture-test` acquires one WebView2 WGC frame, imports it through the host DX12 wgpu device, prints producer `capture_metrics()` counters, closes the shared handle, and exits.
 
 `--multi-view-test` creates two simultaneous WebView2 composition producers on separate HWNDs and verifies both pages can navigate and post messages independently. The known limitation is same-HWND composition: a single HWND cannot currently host two independent composition roots in this demo setup.
 

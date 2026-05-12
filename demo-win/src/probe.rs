@@ -508,6 +508,10 @@ pub(crate) fn run_platform_composition_visual_probe(
     if cli.media_test {
         validate_platform_media_capture_observability(&mut producer)?;
     }
+    if cli.capture_test {
+        validate_platform_capture(&mut producer, host)?;
+        return Ok(None);
+    }
     if cli.profile_test {
         validate_platform_profile_store(producer, parent_hwnd, user_data_dir)?;
         return Ok(None);
@@ -563,4 +567,36 @@ pub(crate) fn run_platform_composition_visual_probe(
         producer,
         dispatcher_queue,
     }))
+}
+
+fn validate_platform_capture(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    host: &HostWgpuContext,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use scrying::windows_capture::close_shared_handle;
+
+    let captured = producer.acquire_full_frame()?;
+    let importer = WgpuTextureImporter::new(host.clone());
+    let WebSurfaceFrame::Native(ref native_frame) = captured.frame else {
+        return Err("WebView2 composition producer did not emit a native frame".into());
+    };
+    let imported = importer.import_frame(native_frame, &ImportOptions::default())?;
+    let metrics = producer.capture_metrics();
+    println!(
+        "demo-win: capture-test: captured {}x{}, imported {:?} {}x{} generation {}, received={}, consumed={}, stale_dropped={}",
+        captured.content_size.width,
+        captured.content_size.height,
+        imported.format,
+        imported.size.width,
+        imported.size.height,
+        imported.generation,
+        metrics.samples_received,
+        metrics.samples_consumed,
+        metrics.stale_frames_dropped,
+    );
+    unsafe {
+        close_shared_handle(captured.shared_handle)?;
+    }
+    println!("demo-win: capture-test: PASS - WebView2 WGC frame acquired and imported");
+    Ok(())
 }
