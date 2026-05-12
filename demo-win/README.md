@@ -4,7 +4,7 @@ Windows WebView2 composition runtime probe for `scrying`.
 
 This is the Windows-specific counterpart to [`../demo-mac`](../demo-mac/). It is intentionally heavier than [`../demo-scrying-winit`](../demo-scrying-winit/): the catchall demo proves platform selection and dependency gating, while this crate drives the WebView2 CompositionController, WinComp, Windows Graphics Capture, shared D3D texture import, resize, input, navigation events, JS messages, cursor reporting, and optional readback/fence diagnostics from a real winit event loop.
 
-Future Windows browser-shape assertions should land here first, mirroring the mode vocabulary used by `demo-mac` (`--scripted`, `--browser-test`, `--cookie-test`, `--profile-test`, `--two-tabs`, `--capture-test`) as each WebView2 slice gets runtime proof.
+Future Windows browser-shape assertions should land here first, mirroring the mode vocabulary used by `demo-mac` (`--scripted`, `--browser-test`, `--cookie-test`, `--profile-test`, `--incognito-test`, `--popup-test`, `--routing-test`, `--process-test`, `--two-tabs`, `--capture-test`) as each WebView2 slice gets runtime proof.
 
 Current Windows runtime observations:
 
@@ -32,6 +32,10 @@ cargo run -p demo-win -- --scripted
 cargo run -p demo-win -- --browser-test
 cargo run -p demo-win -- --cookie-test
 cargo run -p demo-win -- --profile-test
+cargo run -p demo-win -- --incognito-test
+cargo run -p demo-win -- --popup-test
+cargo run -p demo-win -- --routing-test
+cargo run -p demo-win -- --process-test
 ```
 
 `--scripted` loads a deterministic inline page, asserts a host-to-JS-to-host message round-trip, verifies mouse/keyboard forwarding APIs accept synthetic events, and requests process shutdown after the synchronous probe. It deliberately does not require the DOM keyboard effect to round-trip; the stricter `WEBVIEW_KEYBOARD_VALIDATE=1` smoke remains opt-in until the Windows message-loop path is tightened.
@@ -41,3 +45,11 @@ cargo run -p demo-win -- --profile-test
 `--cookie-test` verifies the WebView2 profile cookie manager by setting a unique HttpOnly cookie, querying it back through `request_all_cookies` / `poll_cookies`, deleting it, and confirming the next query no longer sees it.
 
 `--profile-test` sets a persistent cookie, drops the first WebView2 producer, creates a second producer with the same `user_data_dir`, and verifies the cookie store survives producer recreation.
+
+`--incognito-test` creates the first producer with `PlatformWebSurfaceConfig::non_persistent()`, sets a persistent cookie in that InPrivate profile, drops the producer, recreates a normal persistent producer with the same `user_data_dir`, and verifies the InPrivate cookie did not leak.
+
+`--popup-test` triggers `window.open(...)` from the page, verifies `NavigationEvent::NewWindowRequested { url }`, and relies on the producer to suppress WebView2's default popup so the host owns tab creation.
+
+`--routing-test` registers a WebView2 virtual HTTPS host via `register_virtual_host_handler`, navigates to that host, and verifies the app-owned response body can post back through the normal JS message bridge.
+
+`--process-test` triggers a renderer failure through the DevTools `Page.crash` method, verifies `NavigationEvent::ContentProcessTerminated`, and then proves the producer can recover by navigating to fresh inline HTML.

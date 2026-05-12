@@ -15,6 +15,11 @@ The intent is not "implement everything everywhere", it's:
 3. Surface platform-specific upgrades (fences, IME, DMABUF) as
    distinct slices that can ship independently of the parity baseline.
 
+Platform-specific implementation targets live in focused companion docs when
+the detail gets too deep for this overview. Windows WebView2's target and
+remaining lane are split into
+[`2026-05-11_windows_webview2_target.md`](2026-05-11_windows_webview2_target.md).
+
 ---
 
 ## Per-platform ceilings
@@ -74,43 +79,13 @@ cursor-change reporting, keyboard forwarding, and optional explicit D3D12
 fence sync.
 
 The remaining Windows work is no longer "make the WebView2 producer
-real"; it is a browser-shape completion lane. The code still lacks a
-native `Set-Cookie` response-header observation, validated CJK IME
-round-trips, tab-state serialize / restore, auth and
-permission handlers, downloads, find / PDF / print, new-window /
-process-failure events, context-menu and drop observability events,
-media-capture observation, content rules / spellcheck controls, capture
-metrics, DPI-change handling, Display P3 / HDR color pipeline, and hard
-inactive-tab throttling. `set_visible` and WebView2 cookie CRUD are now
-wired; cookie-change callbacks are best-effort for host mutations and
-page-side `document.cookie` writes because `webview2-com` 0.39.1 does
-not expose a native cookie-change event. Runtime proof now lives in
-`demo-win`: `--scripted` covers JS message round-trip plus mouse /
-keyboard dispatch API acceptance, `--browser-test` covers history,
-reload / stop, title, settings, and visibility controls, and
-`--cookie-test` covers cookie set / read / delete round-trip.
-`--profile-test` covers persistent cookie-store survival across
-producer recreation with the same WebView2 `user_data_dir`.
-
-**Windows remaining-work lane:**
-
-| Slice | Scope | Cost | Done condition |
-| --- | --- | --- | --- |
-| W1 — input + inactive tab baseline | Validate the wired `send_keyboard_input` path plus the parent-HWND `forward_keyboard_message` helper for `WM_KEY*`, `WM_CHAR`, dead-key, and `WM_IME*` traffic; extend cookie observation if / when WebView2 exposes native `Set-Cookie` response-header pulses. `set_visible`, cookie request / set / delete, and best-effort change callbacks are wired. | medium | Keyboard text entry and CJK composition round-trip in a focused composition WebView; hidden tabs report Page Visibility and throttle; host can enumerate, mutate, and observe profile cookies. |
-| W2 — session and shell controls | Best-effort tab-state serialize / restore; new-window and process-failure events; auth and permission handler closures; downloads with ids, destinations, cancel / resume, and download-channel auth source. | medium | A tabbed shell can restore useful navigation / scroll state, own popup creation and crash recovery, prompt for credentials / permissions, and manage downloads without reaching around scrying. |
-| W3 — browser conveniences | Find-in-page, request-PDF, interactive print, context-menu interception, drop observability event, media-capture lifecycle event, content-rule list, spellcheck override. | small-to-medium | Windows matches the macOS browser-class API rows that are visible to app chrome. |
-| W4 — capture polish | CaptureMetrics atomics, resize dim-match / stale-frame guard, DPI-change observer, Display P3 / HDR16f pipeline, hard inactive scheduling policy. | medium | Capture behavior remains diagnosable and color / DPI correct under monitor moves and advanced displays; hard throttling is explicitly documented as public WebView2 API or out of scope. |
-
-Keyboard-forwarder shape for the remaining W1 validation work: keep
-`WebSurfaceProducer::send_keyboard_input` as the portable host API for
-basic key/text events. Windows also exposes
-`WebView2CompositionProducer::forward_keyboard_message` so a host-side
-subclass / message filter can post the real `WM_KEYDOWN`, `WM_KEYUP`,
-`WM_CHAR`, `WM_DEADCHAR`, and `WM_IME_*` composition messages that arrive
-while the WebView has focus; this is the path for preserving native IME
-payloads instead of trying to synthesize text in JS. Done-condition tests
-should cover plain ASCII, accelerator-modified keys, dead keys, and at
-least one CJK IME composition round-trip.
+real"; it is a browser-shell completion and capture-polish lane. The
+target is a production-quality WebView2 host surface plus robust
+post-composition WGC texture import, not pre-composition renderer access.
+See
+[`2026-05-11_windows_webview2_target.md`](2026-05-11_windows_webview2_target.md)
+for the audited implementation state, runtime proof, hard ceilings, and
+Windows-specific W1-W5 lane.
 
 ---
 

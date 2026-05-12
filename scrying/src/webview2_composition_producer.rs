@@ -17,35 +17,53 @@
 //! 6. Receive a `Bgra8Unorm` frame.
 //! 7. Bridge D3D11 capture output into a DX12-importable native frame.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use dpi::PhysicalSize;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, COREWEBVIEW2_MOUSE_EVENT_KIND,
-    COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS, COREWEBVIEW2_MOVE_FOCUS_REASON, ICoreWebView2,
-    ICoreWebView2_2, ICoreWebView2CompositionController, ICoreWebView2Controller,
-    ICoreWebView2Cookie, ICoreWebView2CookieManager, ICoreWebView2Environment,
-    ICoreWebView2Environment3, ICoreWebView2EnvironmentOptions,
+    COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS, COREWEBVIEW2_MOVE_FOCUS_REASON,
+    COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON,
+    COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED, COREWEBVIEW2_DOWNLOAD_STATE,
+    COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED, COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED,
+    COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_CAMERA,
+    COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_KIND_OTHER_SENSORS,
+    COREWEBVIEW2_PERMISSION_STATE, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+    COREWEBVIEW2_PERMISSION_STATE_DEFAULT, COREWEBVIEW2_PERMISSION_STATE_DENY,
+    COREWEBVIEW2_PROCESS_FAILED_KIND, COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED,
+    COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
+    COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
+    COREWEBVIEW2_PROCESS_FAILED_KIND_UNKNOWN_PROCESS_EXITED, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+    ICoreWebView2, ICoreWebView2_2, ICoreWebView2CompositionController, ICoreWebView2Controller,
+    ICoreWebView2Cookie, ICoreWebView2CookieManager, ICoreWebView2DownloadOperation,
+    ICoreWebView2Environment, ICoreWebView2Environment3, ICoreWebView2Environment10,
+    ICoreWebView2EnvironmentOptions, ICoreWebView2PermissionRequestedEventArgs2, ICoreWebView2_4,
+    ICoreWebView2_10,
 };
 use webview2_com::{
-    AddScriptToExecuteOnDocumentCreatedCompletedHandler, CoTaskMemPWSTR,
+    AddScriptToExecuteOnDocumentCreatedCompletedHandler, BasicAuthenticationRequestedEventHandler,
+    BytesReceivedChangedEventHandler, CallDevToolsProtocolMethodCompletedHandler, CoTaskMemPWSTR,
     CoreWebView2EnvironmentOptions, CreateCoreWebView2CompositionControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, DocumentTitleChangedEventHandler,
-    ExecuteScriptCompletedHandler, GetCookiesCompletedHandler, NavigationCompletedEventHandler,
-    NavigationStartingEventHandler, SourceChangedEventHandler, WebMessageReceivedEventHandler,
+    DownloadStartingEventHandler, ExecuteScriptCompletedHandler, GetCookiesCompletedHandler,
+    NavigationCompletedEventHandler, NavigationStartingEventHandler,
+    NewWindowRequestedEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler,
+    SourceChangedEventHandler, StateChangedEventHandler, WebMessageReceivedEventHandler,
+    WebResourceRequestedEventHandler,
 };
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
 use windows::Graphics::DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat};
 use windows::UI::Composition::{Compositor, ContainerVisual, Visual};
-use windows::Win32::Foundation::{E_POINTER, HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{E_POINTER, HGLOBAL, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::System::Com::StructuredStorage::{CreateStreamOnHGlobal, GetHGlobalFromStream};
-use windows::Win32::System::Com::{CoTaskMemFree, IStream};
+use windows::Win32::System::Com::{CoTaskMemFree, IStream, STREAM_SEEK_SET};
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
 use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
@@ -62,8 +80,10 @@ use windows::core::{Interface, PCWSTR, PWSTR};
 use windows_numerics::{Vector2, Vector3};
 
 use crate::{
-    Cookie, CursorShape, FocusReason, KeyEventKind, KeyboardInput, MouseEventKind, MouseInput,
-    NavigationEvent,
+    AuthChallenge, AuthDisposition, AuthSource, Cookie, CursorShape, DownloadDecision,
+    DownloadDestinationRequest, DownloadId, FocusReason, KeyEventKind, KeyboardInput,
+    MouseEventKind, MouseInput, NavigationEvent, PermissionDecision, PermissionKind,
+    PermissionRequest, UrlSchemeHandlerFn, UrlSchemeResponse,
 };
 
 use crate::windows_capture::{
@@ -71,14 +91,19 @@ use crate::windows_capture::{
     WebView2DxgiSharedHandleFrame,
 };
 use crate::{
-    SystemWebviewBackend, WebSurfaceMode, WebSurfaceCapabilities, WebSurfaceError,
-    WebSurfaceFrame,
+    SystemWebviewBackend, WebSurfaceCapabilities, WebSurfaceError, WebSurfaceFrame, WebSurfaceMode,
 };
 
 const FIRST_FRAME_NUDGE_LABEL: &str = "WebView2CompositionProducer.first-frame";
 const COOKIE_CHANGE_BRIDGE_MESSAGE: &str = "\0scrying:cookie-change";
 
 pub type WebView2CookieChangeHandlerFn = Box<dyn Fn() + Send + Sync + 'static>;
+pub type WebView2DownloadHandlerFn =
+    Box<dyn Fn(DownloadDestinationRequest) -> DownloadDecision + Send + Sync + 'static>;
+pub type WebView2AuthHandlerFn =
+    Box<dyn Fn(AuthChallenge) -> AuthDisposition + Send + Sync + 'static>;
+pub type WebView2PermissionHandlerFn =
+    Box<dyn Fn(PermissionRequest) -> PermissionDecision + Send + Sync + 'static>;
 
 /// Configuration for `WebView2CompositionProducer::new`.
 #[derive(Clone, Debug)]
@@ -89,6 +114,15 @@ pub struct WebView2CompositionConfig {
     pub offset: (f32, f32),
     /// User-data directory for the WebView2 environment. Created if missing.
     pub user_data_dir: PathBuf,
+    /// Default directory for WebView2 downloads when no host download handler
+    /// overrides the destination.
+    pub download_dir: PathBuf,
+    /// When `true`, create the CompositionController in WebView2 InPrivate
+    /// mode. Cookies, local storage, and IndexedDB are scoped to this
+    /// controller and are discarded when it is dropped. The `user_data_dir`
+    /// is still supplied to WebView2 as the environment root, but this
+    /// producer does not persist page storage into that profile.
+    pub non_persistent: bool,
     /// Optional CSS color used for a sprite visual placed under the WebView
     /// visual. Mostly useful as a diagnostic backstop while the WebView paints.
     pub diagnostic_backdrop: Option<(u8, u8, u8)>,
@@ -110,15 +144,27 @@ pub struct WebView2CompositionConfig {
 
 impl WebView2CompositionConfig {
     pub fn new(size: PhysicalSize<u32>, user_data_dir: impl Into<PathBuf>) -> Self {
+        let user_data_dir = user_data_dir.into();
+        let download_dir = user_data_dir.join("downloads");
         Self {
             size,
             offset: (0.0, 0.0),
-            user_data_dir: user_data_dir.into(),
+            user_data_dir,
+            download_dir,
+            non_persistent: false,
             diagnostic_backdrop: None,
             navigation_timeout: Duration::from_secs(5),
             frame_timeout: Duration::from_secs(2),
             fence_shared_handle: None,
         }
+    }
+
+    /// Switch this config into WebView2 InPrivate / non-persistent mode.
+    /// Cookie, local-storage, and IndexedDB activity for this producer does
+    /// not touch the persistent `user_data_dir` profile and is wiped on drop.
+    pub fn non_persistent(mut self) -> Self {
+        self.non_persistent = true;
+        self
     }
 
     pub fn with_offset(mut self, x: f32, y: f32) -> Self {
@@ -128,6 +174,11 @@ impl WebView2CompositionConfig {
 
     pub fn with_diagnostic_backdrop(mut self, rgb: (u8, u8, u8)) -> Self {
         self.diagnostic_backdrop = Some(rgb);
+        self
+    }
+
+    pub fn with_download_dir(mut self, download_dir: impl Into<PathBuf>) -> Self {
+        self.download_dir = download_dir.into();
         self
     }
 
@@ -197,11 +248,23 @@ pub struct WebView2CompositionProducer {
     cursor_queue: Arc<Mutex<VecDeque<CursorShape>>>,
     pending_cookies: Arc<Mutex<Option<Vec<Cookie>>>>,
     cookie_change_handler: Arc<Mutex<Option<WebView2CookieChangeHandlerFn>>>,
+    download_handler: Arc<Mutex<Option<WebView2DownloadHandlerFn>>>,
+    auth_handler: Arc<Mutex<Option<WebView2AuthHandlerFn>>>,
+    permission_handler: Arc<Mutex<Option<WebView2PermissionHandlerFn>>>,
+    download_registry: Arc<Mutex<WebView2DownloadRegistry>>,
+    download_id_allocator: Arc<DownloadIdAllocator>,
+    resource_handlers: Arc<Mutex<HashMap<String, UrlSchemeHandlerFn>>>,
     nav_starting_token: i64,
     nav_completed_token: i64,
     source_changed_token: i64,
     title_changed_token: i64,
+    new_window_requested_token: i64,
+    process_failed_token: i64,
+    download_starting_token: i64,
+    basic_auth_token: i64,
+    permission_requested_token: i64,
     web_message_token: i64,
+    web_resource_requested_token: Option<i64>,
     cursor_changed_token: i64,
 }
 
@@ -222,6 +285,43 @@ struct CaptureState {
     session: GraphicsCaptureSession,
     first_frame_emitted: bool,
 }
+
+#[derive(Default)]
+struct WebView2DownloadRegistry {
+    by_id: HashMap<DownloadId, WebView2DownloadEntry>,
+}
+
+// SAFETY: WebView2 download callbacks and producer methods are expected to run
+// on the same STA thread as the WebView2 controller. The registry sits behind a
+// mutex only to share state between COM callback closures and producer methods.
+unsafe impl Send for WebView2DownloadRegistry {}
+unsafe impl Sync for WebView2DownloadRegistry {}
+
+struct WebView2DownloadEntry {
+    destination_path: PathBuf,
+    total_bytes_expected: Option<u64>,
+    operation: ICoreWebView2DownloadOperation,
+    bytes_received_token: i64,
+    state_changed_token: i64,
+    last_progress_emit: Instant,
+    last_progress_bytes: u64,
+    cancelled_by_host: bool,
+}
+
+struct DownloadIdAllocator(AtomicU64);
+
+impl DownloadIdAllocator {
+    fn new() -> Self {
+        Self(AtomicU64::new(1))
+    }
+
+    fn next(&self) -> DownloadId {
+        DownloadId(self.0.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+const DOWNLOAD_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
+const DOWNLOAD_PROGRESS_MIN_BYTES: u64 = 1_048_576;
 
 impl WebView2CompositionProducer {
     /// Build the composition tree, the WebView2 controller, and prepare for
@@ -316,7 +416,8 @@ impl WebView2CompositionProducer {
             .map_err(platform("DesktopWindowTarget::SetRoot"))?;
 
         let environment = create_environment(&config.user_data_dir)?;
-        let composition_controller = create_composition_controller(&environment, parent_hwnd)?;
+        let composition_controller =
+            create_composition_controller(&environment, parent_hwnd, config.non_persistent)?;
         unsafe {
             composition_controller
                 .SetRootVisualTarget(&webview_visual)
@@ -354,6 +455,12 @@ impl WebView2CompositionProducer {
         let cursor_queue: Arc<Mutex<VecDeque<CursorShape>>> = Arc::new(Mutex::new(VecDeque::new()));
         let pending_cookies = Arc::new(Mutex::new(None));
         let cookie_change_handler = Arc::new(Mutex::new(None));
+        let download_handler = Arc::new(Mutex::new(None));
+        let auth_handler = Arc::new(Mutex::new(None));
+        let permission_handler = Arc::new(Mutex::new(None));
+        let download_registry = Arc::new(Mutex::new(WebView2DownloadRegistry::default()));
+        let download_id_allocator = Arc::new(DownloadIdAllocator::new());
+        let resource_handlers = Arc::new(Mutex::new(HashMap::new()));
 
         install_cookie_change_bridge(&webview)?;
 
@@ -362,6 +469,8 @@ impl WebView2CompositionProducer {
             nav_completed_token,
             source_changed_token,
             title_changed_token,
+            new_window_requested_token,
+            process_failed_token,
             web_message_token,
         ) = register_persistent_handlers(
             &webview,
@@ -371,6 +480,23 @@ impl WebView2CompositionProducer {
         )?;
         let cursor_changed_token =
             register_cursor_changed_handler(&composition_controller, cursor_queue.clone())?;
+        let download_starting_token = register_download_starting_handler(
+            &webview,
+            nav_event_queue.clone(),
+            config.download_dir.clone(),
+            download_handler.clone(),
+            download_registry.clone(),
+            download_id_allocator.clone(),
+        )?;
+        let basic_auth_token = register_basic_auth_handler(
+            &webview,
+            nav_event_queue.clone(),
+            auth_handler.clone(),
+        )?;
+        let permission_requested_token = register_permission_requested_handler(
+            &webview,
+            permission_handler.clone(),
+        )?;
 
         Ok(Self {
             parent_hwnd,
@@ -393,11 +519,23 @@ impl WebView2CompositionProducer {
             cursor_queue,
             pending_cookies,
             cookie_change_handler,
+            download_handler,
+            auth_handler,
+            permission_handler,
+            download_registry,
+            download_id_allocator,
+            resource_handlers,
             nav_starting_token,
             nav_completed_token,
             source_changed_token,
             title_changed_token,
+            new_window_requested_token,
+            process_failed_token,
+            download_starting_token,
+            basic_auth_token,
+            permission_requested_token,
             web_message_token,
+            web_resource_requested_token: None,
             cursor_changed_token,
         })
     }
@@ -408,11 +546,7 @@ impl WebView2CompositionProducer {
 
     /// Navigate the underlying WebView2 to an inline HTML document and block
     /// until `NavigationCompleted` fires (or the configured timeout elapses).
-    pub fn navigate_to_string(
-        &self,
-        html: &str,
-        timeout: Duration,
-    ) -> Result<(), WebSurfaceError> {
+    pub fn navigate_to_string(&self, html: &str, timeout: Duration) -> Result<(), WebSurfaceError> {
         let (tx, rx) = mpsc::channel::<()>();
         let mut navigation_token = 0;
         let handler = NavigationCompletedEventHandler::create(Box::new(move |_sender, _args| {
@@ -794,6 +928,116 @@ impl WebView2CompositionProducer {
         }
     }
 
+    /// Fire a Chrome DevTools Protocol method without waiting for its result.
+    ///
+    /// This is primarily useful for diagnostics and runtime smokes. Browser
+    /// hosts that need rich DevTools results should use [`Self::webview`] and
+    /// attach their own callback plumbing.
+    pub fn call_devtools_protocol_method(
+        &self,
+        method: &str,
+        params_json: &str,
+    ) -> Result<(), WebSurfaceError> {
+        let method = CoTaskMemPWSTR::from(method);
+        let params = CoTaskMemPWSTR::from(params_json);
+        let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
+        unsafe {
+            self.webview
+                .CallDevToolsProtocolMethod(
+                    *method.as_ref().as_pcwstr(),
+                    *params.as_ref().as_pcwstr(),
+                    &handler,
+                )
+                .map_err(platform("CallDevToolsProtocolMethod"))
+        }
+    }
+
+    /// Route requests for `https://{host}/...` through a host-provided
+    /// resource handler.
+    ///
+    /// WebView2 does not support arbitrary custom URL schemes the same way
+    /// WebKit does, so Windows uses virtual HTTPS hosts. Browser-shape hosts
+    /// can register stable app origins such as `mere.local` or
+    /// `settings.internal` and serve bytes through the same
+    /// [`UrlSchemeResponse`] shape macOS uses for `WKURLSchemeHandler`.
+    pub fn register_virtual_host_handler(
+        &mut self,
+        host: impl Into<String>,
+        handler: UrlSchemeHandlerFn,
+    ) -> Result<(), WebSurfaceError> {
+        let host = normalize_virtual_host(&host.into())?;
+        self.ensure_web_resource_requested_handler()?;
+        let was_new = {
+            let mut handlers = self
+                .resource_handlers
+                .lock()
+                .map_err(|_| WebSurfaceError::Platform("resource handler mutex poisoned".into()))?;
+            handlers.insert(host.clone(), handler).is_none()
+        };
+        if was_new {
+            let filter = format!("https://{host}/*");
+            let filter = CoTaskMemPWSTR::from(filter.as_str());
+            unsafe {
+                self.webview
+                    .AddWebResourceRequestedFilter(
+                        *filter.as_ref().as_pcwstr(),
+                        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+                    )
+                    .map_err(platform("AddWebResourceRequestedFilter"))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_web_resource_requested_handler(&mut self) -> Result<(), WebSurfaceError> {
+        if self.web_resource_requested_token.is_some() {
+            return Ok(());
+        }
+
+        let handlers = self.resource_handlers.clone();
+        let environment = self.environment.clone();
+        let handler = WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
+            if let Some(args) = args {
+                let request = unsafe { args.Request()? };
+                let mut uri = PWSTR::null();
+                unsafe { request.Uri(&mut uri)? };
+                let url = unsafe { consume_pwstr(uri) };
+                let Some(host) = virtual_host_from_https_url(&url) else {
+                    return Ok(());
+                };
+                let handler = handlers
+                    .lock()
+                    .ok()
+                    .and_then(|handlers| handlers.get(&host).cloned());
+                if let Some(handler) = handler {
+                    let response = handler(&url);
+                    let stream = stream_from_bytes(&response.body)?;
+                    let headers = web_resource_headers(&response);
+                    let reason = CoTaskMemPWSTR::from("OK");
+                    let headers = CoTaskMemPWSTR::from(headers.as_str());
+                    let web_response = unsafe {
+                        environment.CreateWebResourceResponse(
+                            &stream,
+                            200,
+                            *reason.as_ref().as_pcwstr(),
+                            *headers.as_ref().as_pcwstr(),
+                        )?
+                    };
+                    unsafe { args.SetResponse(&web_response)? };
+                }
+            }
+            Ok(())
+        }));
+        let mut token = 0i64;
+        unsafe {
+            self.webview
+                .add_WebResourceRequested(&handler, &mut token)
+                .map_err(platform("add_WebResourceRequested"))?;
+        }
+        self.web_resource_requested_token = Some(token);
+        Ok(())
+    }
+
     /// Drain the next pending message posted from JS via
     /// `window.chrome.webview.postMessage(...)`. Returns `None` when no
     /// message is queued.
@@ -985,19 +1229,105 @@ impl WebView2CompositionProducer {
         &mut self,
         handler: WebView2CookieChangeHandlerFn,
     ) -> Result<(), WebSurfaceError> {
-        let mut slot = self.cookie_change_handler.lock().map_err(|_| {
-            WebSurfaceError::Platform("cookie_change_handler lock poisoned".into())
-        })?;
+        let mut slot = self
+            .cookie_change_handler
+            .lock()
+            .map_err(|_| WebSurfaceError::Platform("cookie_change_handler lock poisoned".into()))?;
         *slot = Some(handler);
         Ok(())
     }
 
     pub fn clear_cookie_change_handler(&mut self) -> Result<(), WebSurfaceError> {
-        let mut slot = self.cookie_change_handler.lock().map_err(|_| {
-            WebSurfaceError::Platform("cookie_change_handler lock poisoned".into())
-        })?;
+        let mut slot = self
+            .cookie_change_handler
+            .lock()
+            .map_err(|_| WebSurfaceError::Platform("cookie_change_handler lock poisoned".into()))?;
         *slot = None;
         Ok(())
+    }
+
+    pub fn set_download_handler(
+        &mut self,
+        handler: WebView2DownloadHandlerFn,
+    ) -> Result<(), WebSurfaceError> {
+        let mut slot = self
+            .download_handler
+            .lock()
+            .map_err(|_| WebSurfaceError::Platform("download_handler lock poisoned".into()))?;
+        *slot = Some(handler);
+        Ok(())
+    }
+
+    pub fn clear_download_handler(&mut self) -> Result<(), WebSurfaceError> {
+        let mut slot = self
+            .download_handler
+            .lock()
+            .map_err(|_| WebSurfaceError::Platform("download_handler lock poisoned".into()))?;
+        *slot = None;
+        Ok(())
+    }
+
+    pub fn cancel_download(&mut self, id: DownloadId) -> Result<(), WebSurfaceError> {
+        let operation = {
+            let mut registry = self
+                .download_registry
+                .lock()
+                .map_err(|_| WebSurfaceError::Platform("download registry lock poisoned".into()))?;
+            let Some(entry) = registry.by_id.get_mut(&id) else {
+                return Err(WebSurfaceError::NotReady("unknown WebView2 download id"));
+            };
+            entry.cancelled_by_host = true;
+            entry.operation.clone()
+        };
+        unsafe { operation.Cancel() }.map_err(platform("DownloadOperation.Cancel"))
+    }
+
+    pub fn set_auth_handler(
+        &mut self,
+        handler: WebView2AuthHandlerFn,
+    ) -> Result<(), WebSurfaceError> {
+        let mut slot = self
+            .auth_handler
+            .lock()
+            .map_err(|_| WebSurfaceError::Platform("auth_handler lock poisoned".into()))?;
+        *slot = Some(handler);
+        Ok(())
+    }
+
+    pub fn clear_auth_handler(&mut self) -> Result<(), WebSurfaceError> {
+        let mut slot = self
+            .auth_handler
+            .lock()
+            .map_err(|_| WebSurfaceError::Platform("auth_handler lock poisoned".into()))?;
+        *slot = None;
+        Ok(())
+    }
+
+    pub fn set_permission_handler(
+        &mut self,
+        handler: WebView2PermissionHandlerFn,
+    ) -> Result<(), WebSurfaceError> {
+        let mut slot = self
+            .permission_handler
+            .lock()
+            .map_err(|_| WebSurfaceError::Platform("permission_handler lock poisoned".into()))?;
+        *slot = Some(handler);
+        Ok(())
+    }
+
+    pub fn clear_permission_handler(&mut self) -> Result<(), WebSurfaceError> {
+        let mut slot = self
+            .permission_handler
+            .lock()
+            .map_err(|_| WebSurfaceError::Platform("permission_handler lock poisoned".into()))?;
+        *slot = None;
+        Ok(())
+    }
+
+    pub fn load_url(&self, url: &str) -> Result<(), WebSurfaceError> {
+        let url = CoTaskMemPWSTR::from(url);
+        unsafe { self.webview.Navigate(*url.as_ref().as_pcwstr()) }
+            .map_err(platform("Navigate (load_url)"))
     }
 
     fn cookie_manager(&self) -> Result<ICoreWebView2CookieManager, WebSurfaceError> {
@@ -1072,9 +1402,7 @@ impl WebView2CompositionProducer {
             }
             let ptr = GlobalLock(hglobal);
             if ptr.is_null() {
-                return Err(WebSurfaceError::Platform(
-                    "GlobalLock returned null".into(),
-                ));
+                return Err(WebSurfaceError::Platform("GlobalLock returned null".into()));
             }
             let bytes = std::slice::from_raw_parts(ptr as *const u8, size).to_vec();
             let _ = GlobalUnlock(hglobal);
@@ -1394,10 +1722,7 @@ impl WebView2CompositionProducer {
         })
     }
 
-    fn ensure_persistent_dest(
-        &mut self,
-        size: PhysicalSize<u32>,
-    ) -> Result<bool, WebSurfaceError> {
+    fn ensure_persistent_dest(&mut self, size: PhysicalSize<u32>) -> Result<bool, WebSurfaceError> {
         if self
             .persistent_dest
             .as_ref()
@@ -1540,6 +1865,13 @@ impl Drop for WebView2CompositionProducer {
                 .remove_DocumentTitleChanged(self.title_changed_token);
             let _ = self
                 .webview
+                .remove_NewWindowRequested(self.new_window_requested_token);
+            let _ = self.webview.remove_ProcessFailed(self.process_failed_token);
+            if let Some(token) = self.web_resource_requested_token {
+                let _ = self.webview.remove_WebResourceRequested(token);
+            }
+            let _ = self
+                .webview
                 .remove_WebMessageReceived(self.web_message_token);
             let _ = self
                 .composition_controller
@@ -1672,9 +2004,7 @@ impl crate::WebSurfaceProducer for WebView2CompositionProducer {
     }
 }
 
-fn create_environment(
-    user_data_dir: &Path,
-) -> Result<ICoreWebView2Environment, WebSurfaceError> {
+fn create_environment(user_data_dir: &Path) -> Result<ICoreWebView2Environment, WebSurfaceError> {
     if let Err(error) = std::fs::create_dir_all(user_data_dir) {
         return Err(WebSurfaceError::Platform(format!(
             "create user_data_dir {}: {error}",
@@ -1719,17 +2049,39 @@ fn create_environment(
 fn create_composition_controller(
     environment: &ICoreWebView2Environment,
     parent_hwnd: HWND,
+    non_persistent: bool,
 ) -> Result<ICoreWebView2CompositionController, WebSurfaceError> {
-    let environment3: ICoreWebView2Environment3 = environment
-        .cast()
-        .map_err(platform("environment cast to ICoreWebView2Environment3"))?;
     let (tx, rx) = mpsc::channel();
     CreateCoreWebView2CompositionControllerCompletedHandler::wait_for_async_operation(
-        Box::new(move |handler| unsafe {
-            environment3
-                .CreateCoreWebView2CompositionController(parent_hwnd, &handler)
-                .map_err(webview2_com::Error::WindowsError)
-        }),
+        if non_persistent {
+            let environment10: ICoreWebView2Environment10 = environment
+                .cast()
+                .map_err(platform("environment cast to ICoreWebView2Environment10"))?;
+            Box::new(move |handler| unsafe {
+                let options = environment10
+                    .CreateCoreWebView2ControllerOptions()
+                    .map_err(webview2_com::Error::WindowsError)?;
+                options
+                    .SetIsInPrivateModeEnabled(true)
+                    .map_err(webview2_com::Error::WindowsError)?;
+                environment10
+                    .CreateCoreWebView2CompositionControllerWithOptions(
+                        parent_hwnd,
+                        &options,
+                        &handler,
+                    )
+                    .map_err(webview2_com::Error::WindowsError)
+            })
+        } else {
+            let environment3: ICoreWebView2Environment3 = environment
+                .cast()
+                .map_err(platform("environment cast to ICoreWebView2Environment3"))?;
+            Box::new(move |handler| unsafe {
+                environment3
+                    .CreateCoreWebView2CompositionController(parent_hwnd, &handler)
+                    .map_err(webview2_com::Error::WindowsError)
+            })
+        },
         Box::new(move |error_code, controller| {
             error_code?;
             tx.send(controller.ok_or_else(|| windows::core::Error::from(E_POINTER)))
@@ -1750,10 +2102,7 @@ fn create_composition_controller(
         .map_err(platform("CreateCoreWebView2CompositionController result"))
 }
 
-fn execute_script_blocking(
-    webview: &ICoreWebView2,
-    script: String,
-) -> Result<(), WebSurfaceError> {
+fn execute_script_blocking(webview: &ICoreWebView2, script: String) -> Result<(), WebSurfaceError> {
     let webview = webview.clone();
     ExecuteScriptCompletedHandler::wait_for_async_operation(
         Box::new(move |handler| unsafe {
@@ -1852,6 +2201,85 @@ fn pump_until(timeout: Duration, rx: &mpsc::Receiver<()>) -> Result<(), ()> {
 
 fn platform<E: std::fmt::Display>(context: &'static str) -> impl FnOnce(E) -> WebSurfaceError {
     move |error| WebSurfaceError::Platform(format!("{context} failed: {error}"))
+}
+
+fn normalize_virtual_host(host: &str) -> Result<String, WebSurfaceError> {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty()
+        || host.contains('/')
+        || host.contains(':')
+        || host.contains('?')
+        || host.contains('#')
+    {
+        return Err(WebSurfaceError::Platform(format!(
+            "invalid virtual host name: {host:?}"
+        )));
+    }
+    Ok(host)
+}
+
+fn virtual_host_from_https_url(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
+}
+
+fn web_resource_headers(response: &UrlSchemeResponse) -> String {
+    let mut headers = String::new();
+    push_web_resource_header(&mut headers, "Content-Type", &response.mime_type);
+    push_web_resource_header(
+        &mut headers,
+        "Content-Length",
+        &response.body.len().to_string(),
+    );
+    for (name, value) in &response.headers {
+        push_web_resource_header(&mut headers, name, value);
+    }
+    headers
+}
+
+fn push_web_resource_header(headers: &mut String, name: &str, value: &str) {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        return;
+    }
+    let value = value.replace(['\r', '\n'], " ");
+    headers.push_str(name);
+    headers.push_str(": ");
+    headers.push_str(&value);
+    headers.push_str("\r\n");
+}
+
+fn stream_from_bytes(bytes: &[u8]) -> windows::core::Result<IStream> {
+    let stream: IStream = unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }?;
+    if !bytes.is_empty() {
+        let mut written = 0u32;
+        unsafe {
+            stream
+                .Write(
+                    bytes.as_ptr() as *const std::ffi::c_void,
+                    bytes.len() as u32,
+                    Some(&mut written),
+                )
+                .ok()?;
+        }
+        if written != bytes.len() as u32 {
+            return Err(windows::core::Error::from(E_POINTER));
+        }
+    }
+    unsafe { stream.Seek(0, STREAM_SEEK_SET, None)? };
+    Ok(stream)
 }
 
 unsafe fn consume_pwstr(p: PWSTR) -> String {
@@ -2164,7 +2592,7 @@ fn register_persistent_handlers(
     nav_queue: Arc<Mutex<VecDeque<NavigationEvent>>>,
     web_message_queue: Arc<Mutex<VecDeque<String>>>,
     cookie_change_handler: Arc<Mutex<Option<WebView2CookieChangeHandlerFn>>>,
-) -> Result<(i64, i64, i64, i64, i64), WebSurfaceError> {
+) -> Result<(i64, i64, i64, i64, i64, i64, i64), WebSurfaceError> {
     // NavigationStarting -> NavigationEvent::Starting { url }
     let queue = nav_queue.clone();
     let nav_starting_handler = NavigationStartingEventHandler::create(Box::new(move |_, args| {
@@ -2239,7 +2667,7 @@ fn register_persistent_handlers(
     }
 
     // DocumentTitleChanged -> NavigationEvent::TitleChanged { title }
-    let queue = nav_queue;
+    let queue = nav_queue.clone();
     let webview_for_handler = webview.clone();
     let title_changed_handler =
         DocumentTitleChangedEventHandler::create(Box::new(move |_, _args| {
@@ -2259,6 +2687,54 @@ fn register_persistent_handlers(
         webview
             .add_DocumentTitleChanged(&title_changed_handler, &mut title_changed_token)
             .map_err(platform("add_DocumentTitleChanged"))?;
+    }
+
+    // NewWindowRequested -> NavigationEvent::NewWindowRequested { url }
+    let queue = nav_queue.clone();
+    let new_window_handler = NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
+        if let Some(args) = args {
+            let mut uri = PWSTR::null();
+            let url = if unsafe { args.Uri(&mut uri) }.is_ok() {
+                unsafe { consume_pwstr(uri) }
+            } else {
+                String::new()
+            };
+            unsafe { args.SetHandled(true)? };
+            if let Ok(mut q) = queue.lock() {
+                q.push_back(NavigationEvent::NewWindowRequested { url });
+            }
+        }
+        Ok(())
+    }));
+    let mut new_window_requested_token = 0i64;
+    unsafe {
+        webview
+            .add_NewWindowRequested(&new_window_handler, &mut new_window_requested_token)
+            .map_err(platform("add_NewWindowRequested"))?;
+    }
+
+    // ProcessFailed -> NavigationEvent::ContentProcessTerminated for page/render failures.
+    let queue = nav_queue;
+    let process_failed_handler = ProcessFailedEventHandler::create(Box::new(move |_, args| {
+        let should_emit = args
+            .as_ref()
+            .and_then(|args| {
+                let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND(0);
+                unsafe { args.ProcessFailedKind(&mut kind) }
+                    .ok()
+                    .map(|()| is_content_process_failure(kind))
+            })
+            .unwrap_or(true);
+        if should_emit && let Ok(mut q) = queue.lock() {
+            q.push_back(NavigationEvent::ContentProcessTerminated);
+        }
+        Ok(())
+    }));
+    let mut process_failed_token = 0i64;
+    unsafe {
+        webview
+            .add_ProcessFailed(&process_failed_handler, &mut process_failed_token)
+            .map_err(platform("add_ProcessFailed"))?;
     }
 
     // WebMessageReceived -> string queue
@@ -2296,8 +2772,20 @@ fn register_persistent_handlers(
         nav_completed_token,
         source_changed_token,
         title_changed_token,
+        new_window_requested_token,
+        process_failed_token,
         web_message_token,
     ))
+}
+
+fn is_content_process_failure(kind: COREWEBVIEW2_PROCESS_FAILED_KIND) -> bool {
+    matches!(
+        kind,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED
+            | COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE
+            | COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED
+            | COREWEBVIEW2_PROCESS_FAILED_KIND_UNKNOWN_PROCESS_EXITED
+    )
 }
 
 fn register_cursor_changed_handler(

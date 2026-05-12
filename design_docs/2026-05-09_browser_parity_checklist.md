@@ -16,6 +16,11 @@ embedded in a paragraph of macOS impl notes. A reader who just
 wants "are we done yet?" should be able to read this file in
 under a minute.
 
+Windows-specific target depth lives in
+[`2026-05-11_windows_webview2_target.md`](2026-05-11_windows_webview2_target.md):
+it audits the current WebView2 producer, states how good the integration can
+be, and tracks the Windows implementation lane.
+
 Status values, applied per row:
 
 - ✅ shipped on macOS (0.4.x)
@@ -40,8 +45,8 @@ yet.
 | Capability | macOS | Windows | Linux | Notes |
 | --- | --- | --- | --- | --- |
 | History controls (reload / stop / back / forward) | ✅ | ✅ | ? | Trait methods on `WebSurfaceProducer` |
-| New-window / popup intercept | ✅ | ⏳ | ? | `NavigationEvent::NewWindowRequested { url }` |
-| Process-failure recovery | ✅ | ⏳ | ? | `NavigationEvent::ContentProcessTerminated`; reload to recover |
+| New-window / popup intercept | ✅ | ✅ | ? | `NavigationEvent::NewWindowRequested { url }`; Windows covered by `demo-win --popup-test` |
+| Process-failure recovery | ✅ | ✅ | ? | `NavigationEvent::ContentProcessTerminated`; Windows covered by `demo-win --process-test` |
 | Tab-state serialize / restore | ✅ | ? | ? | `serialize_interaction_state` / `restore_interaction_state` (opaque bytes) |
 | Page Visibility / occlusion sync | ✅ | ✅ | ⏳ | `set_visible(bool)` cascades through `NSView::setHidden:` on macOS and `ICoreWebView2Controller::SetIsVisible` on Windows. Distinct from the SPI-only `_setSuspended:` / hard pause paths |
 | Throttling control (hard pause) | ✅ | ? | ⏳ | `WebSurfaceSettings::inactive_scheduling_policy` (`Suspend` / `Throttle` / `None`) → `WKPreferences.inactiveSchedulingPolicy` on macOS 14+ / iOS 17+. Older OS versions: silent no-op. Composes with `set_visible(false)` for browser-shape inactive-tab handling. SPI alternative (`_suspendPage:` for older macOS) and the wider SPI evaluation live in [`2026-05-09_spi_evaluation.md`](2026-05-09_spi_evaluation.md) |
@@ -79,10 +84,10 @@ yet.
 | Capability | macOS | Windows | Linux | Notes |
 | --- | --- | --- | --- | --- |
 | Settings application (zoom / UA / JS / inspectable) | ✅ | ✅ | ? | `apply_settings(&WebSurfaceSettings)` |
-| Custom URL schemes | ✅ | ⏳ | ? | `WkWebViewProducer::new_with_url_schemes` on macOS; Windows should map to `WebResourceRequested` / virtual host mapping |
+| Custom URL schemes | ✅ | ✅ | ? | `WkWebViewProducer::new_with_url_schemes` on macOS; `WebView2CompositionProducer::register_virtual_host_handler` on Windows, covered by `demo-win --routing-test` |
 | Per-profile data store | ✅ | ✅ | ? | `WKWebsiteDataStore::dataStoreForIdentifier:` (macOS 14+) |
-| Incognito / non-persistent profile | ✅ | ⏳ | ? | `WkWebViewProducerConfig::non_persistent`; Windows needs the WebView2 equivalent wired separately from per-user-data-dir profiles |
-| Multi-instance verification (cross-talk isolation) | ✅ | ✅ | ? | Two producers, one window, independent event queues |
+| Incognito / non-persistent profile | ✅ | ✅ | ? | `WkWebViewProducerConfig::non_persistent` on macOS; `WebView2CompositionConfig::non_persistent` creates an InPrivate CompositionController on Windows and is covered by `demo-win --incognito-test` |
+| Multi-instance verification (cross-talk isolation) | ✅ | ⏳ | ? | Windows profile smoke proves sequential producer recreation with the same `user_data_dir`; simultaneous two-producer composition needs a separate-HWND or shared-composition-root strategy and runtime proof |
 | Cookie store (read / write / delete) | ✅ | ✅ | ? | Wraps `WKHTTPCookieStore` on macOS and WebView2 `ICoreWebView2CookieManager` on Windows |
 | Cookie / storage *change events* | ✅ | ⏳ | ⏳ | macOS uses `cookiesDidChangeInCookieStore:` for page writes, `Set-Cookie` headers, and host writes. Windows currently fires best-effort pulses for host `set_cookie` / `delete_cookie` and page-side `document.cookie` writes; native `Set-Cookie` response observation remains open |
 
@@ -123,7 +128,8 @@ yet.
   `--cookie-test` / `--profile-test` one-shot modes for the shipped
   WebView2 slices. The Windows profile smoke recreates the producer
   because one CompositionController target can be attached to a given
-  HWND at a time.
+  HWND at a time. The focused target and lane live in
+  [`2026-05-11_windows_webview2_target.md`](2026-05-11_windows_webview2_target.md).
 - **Linux** rows are largely "?" because the WPE producer is
   unstarted (out-of-band slice; see roadmap in
   [`2026-05-07_platform_ceilings.md`](2026-05-07_platform_ceilings.md)).

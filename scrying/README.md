@@ -35,6 +35,7 @@ Platform selection is intentionally split:
 - **JS messaging** — `post_web_message` (Rust → JS via `window.chrome.webview` listeners), `poll_web_message` (JS → Rust via `window.chrome.webview.postMessage`).
 - **DevTools** — `open_devtools_window` opens the engine's developer-tools UI.
 - **Settings** — `apply_settings(&WebSurfaceSettings)` accepts a partial update of zoom factor, user-agent string, JS-enabled, devtools-enabled, default-context-menus, and built-in accelerator keys. `None` fields are left at the producer's current value.
+- **Profiles** — platform configs take a persistent data directory. `non_persistent()` switches supported producers into incognito/private mode so browser-shaped hosts can create temporary tiles without touching the persistent profile.
 - **Snapshots** — `capture_snapshot_png` returns encoded PNG bytes via the underlying engine's preview API.
 
 Methods that aren't yet implemented on a given platform return [`WebSurfaceError::Unsupported`] rather than panicking, so consumers can probe the surface incrementally.
@@ -58,6 +59,10 @@ The Windows producer ([`webview2_composition_producer::WebView2CompositionProduc
 - `Windows.Graphics.Capture` item, frame pool, session
 - Persistent shared D3D11 destination texture (`D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX`) reused across frames; one allocation + one wgpu import per size change
 - Lazy `start_capture` + bounded first-frame block + post-resize tear-down/rebuild + stall-detection escape hatch (`force_restart_capture`)
+- Optional `WebView2CompositionConfig::non_persistent()` InPrivate mode for producers whose cookie, local-storage, and IndexedDB state should die with the controller instead of persisting into `user_data_dir`
+- `NewWindowRequested` event routing for `target="_blank"` / `window.open(...)`, with the default WebView2 popup suppressed so the host owns tab creation
+- `ProcessFailed` routing to `NavigationEvent::ContentProcessTerminated`, plus DevTools-protocol diagnostic calls for bounded crash/recovery smokes
+- `register_virtual_host_handler(host, handler)` for app-owned `https://{host}/...` content via WebView2 `WebResourceRequested`, using the same `UrlSchemeResponse` body/header shape as macOS custom schemes
 
 `WebView2 TextureStream` is not treated as the primary path because it is a page/media texture stream API, not a whole-webview compositor-output API.
 

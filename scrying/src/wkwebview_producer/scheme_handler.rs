@@ -4,47 +4,16 @@
 //! [`super::WkWebViewProducer::new_with_url_schemes`] feeds them in
 //! at construction time.
 
-use std::sync::Arc;
-
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly};
+use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_foundation::{
     MainThreadMarker, NSData, NSDictionary, NSHTTPURLResponse, NSObject, NSObjectProtocol,
-    NSString, NSURLResponse, NSURL,
+    NSString, NSURL, NSURLResponse,
 };
 use objc2_web_kit::{WKURLSchemeHandler, WKURLSchemeTask, WKWebView};
 
-/// Response served by a [`UrlSchemeHandlerFn`] — MIME type plus the
-/// raw bytes that should appear as the resource body to the WebView.
-///
-/// `headers` contributes extra HTTP response headers (
-/// `Content-Disposition`, `Cache-Control`, etc.); the scheme
-/// handler always sets `Content-Type` from `mime_type` and
-/// `Content-Length` from `body.len()`. Use the
-/// [`Self::with_header`] builder for the common case.
-#[derive(Clone, Debug)]
-pub struct UrlSchemeResponse {
-    pub mime_type: String,
-    pub body: Vec<u8>,
-    pub headers: Vec<(String, String)>,
-}
-
-impl UrlSchemeResponse {
-    /// Append an extra HTTP header to this response.
-    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers.push((name.into(), value.into()));
-        self
-    }
-}
-
-/// Closure type registered on a config / producer to serve resources
-/// for a custom URL scheme (e.g. `mere://settings`). The closure
-/// receives the full URL of the request and returns a body to deliver
-/// to the WebView. `Arc` so the config can be cloned and the handler
-/// can be shared across re-creates of the producer.
-pub type UrlSchemeHandlerFn =
-    Arc<dyn Fn(&str) -> UrlSchemeResponse + Send + Sync + 'static>;
+pub use crate::{UrlSchemeHandlerFn, UrlSchemeResponse};
 
 // `WKURLSchemeHandler` delegate class. Holds one handler closure
 // keyed to one scheme; multiple schemes get multiple delegate
@@ -118,10 +87,7 @@ define_class!(
 );
 
 impl SchemeHandler {
-    pub(super) fn new(
-        mtm: MainThreadMarker,
-        handler: UrlSchemeHandlerFn,
-    ) -> Retained<Self> {
+    pub(super) fn new(mtm: MainThreadMarker, handler: UrlSchemeHandlerFn) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(handler);
         unsafe { msg_send![super(this), init] }
     }
@@ -139,10 +105,7 @@ impl SchemeHandler {
 /// used a plain `NSURLResponse` which doesn't carry headers, so
 /// served octet-stream payloads failed the navigation instead of
 /// becoming downloads.
-fn build_http_response(
-    url: &NSURL,
-    response: &UrlSchemeResponse,
-) -> Retained<NSURLResponse> {
+fn build_http_response(url: &NSURL, response: &UrlSchemeResponse) -> Retained<NSURLResponse> {
     let mut keys: Vec<Retained<NSString>> = Vec::with_capacity(2 + response.headers.len());
     let mut values: Vec<Retained<NSString>> = Vec::with_capacity(2 + response.headers.len());
     keys.push(NSString::from_str("Content-Type"));
@@ -158,15 +121,13 @@ fn build_http_response(
     let header_dict = NSDictionary::from_slices(&key_refs, &value_refs);
     let http_version = NSString::from_str("HTTP/1.1");
 
-    if let Some(http_response) =
-        NSHTTPURLResponse::initWithURL_statusCode_HTTPVersion_headerFields(
-            NSHTTPURLResponse::alloc(),
-            url,
-            200,
-            Some(&http_version),
-            Some(&header_dict),
-        )
-    {
+    if let Some(http_response) = NSHTTPURLResponse::initWithURL_statusCode_HTTPVersion_headerFields(
+        NSHTTPURLResponse::alloc(),
+        url,
+        200,
+        Some(&http_version),
+        Some(&header_dict),
+    ) {
         // SAFETY: `NSHTTPURLResponse` is an `NSURLResponse`
         // subclass per Apple's class hierarchy; objc2's
         // `cast_unchecked` upcasts via the runtime class chain.

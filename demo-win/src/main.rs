@@ -7,7 +7,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 #[cfg(target_os = "windows")]
 use scrying::Dx12FenceSynchronizer;
 use scrying::{
-    Cookie, HostWgpuContext, ImportOptions, NavigationEvent, TextureImporter,
+    Cookie, HostWgpuContext, ImportOptions, NavigationEvent, TextureImporter, UrlSchemeResponse,
     WebSurfaceCapabilities, WebSurfaceFrame, WebSurfaceSettings, WgpuTextureImporter,
 };
 use winit::application::ApplicationHandler;
@@ -29,6 +29,10 @@ struct Cli {
     cookie_test: bool,
     browser_test: bool,
     profile_test: bool,
+    incognito_test: bool,
+    popup_test: bool,
+    process_test: bool,
+    routing_test: bool,
 }
 
 impl Cli {
@@ -41,6 +45,10 @@ impl Cli {
                 "--cookie-test" => cli.cookie_test = true,
                 "--browser-test" => cli.browser_test = true,
                 "--profile-test" => cli.profile_test = true,
+                "--incognito-test" => cli.incognito_test = true,
+                "--popup-test" => cli.popup_test = true,
+                "--process-test" => cli.process_test = true,
+                "--routing-test" => cli.routing_test = true,
                 _ => eprintln!("demo-win: unknown arg: {arg}"),
             }
         }
@@ -53,6 +61,10 @@ impl Cli {
             || self.cookie_test
             || self.browser_test
             || self.profile_test
+            || self.incognito_test
+            || self.popup_test
+            || self.process_test
+            || self.routing_test
     }
 }
 
@@ -408,6 +420,12 @@ fn drain_composition_events(renderer: &mut WebViewRenderer) {
             scrying::NavigationEvent::TitleChanged { title } => {
                 println!("[nav] title -> {title}");
             }
+            scrying::NavigationEvent::NewWindowRequested { url } => {
+                println!("[nav] new window requested -> {url}");
+            }
+            scrying::NavigationEvent::ContentProcessTerminated => {
+                println!("[nav] content process terminated");
+            }
             _ => {}
         }
     }
@@ -723,6 +741,9 @@ fn run_platform_composition_visual_probe(
     if let Some(handle) = fence_shared_handle {
         config = config.with_fence_shared_handle(handle);
     }
+    if cli.incognito_test {
+        config = config.non_persistent();
+    }
 
     let producer = unsafe { scrying::PlatformWebSurfaceProducer::new(parent_hwnd, config)? };
     producer.navigate_to_string(
@@ -741,8 +762,21 @@ fn run_platform_composition_visual_probe(
     if cli.browser_test {
         validate_platform_browser_controls(&mut producer)?;
     }
+    if cli.popup_test {
+        validate_platform_popup_routing(&mut producer)?;
+    }
+    if cli.routing_test {
+        validate_platform_virtual_host_routing(&mut producer)?;
+    }
+    if cli.process_test {
+        validate_platform_process_failure_recovery(&mut producer)?;
+    }
     if cli.profile_test {
         validate_platform_profile_store(producer, parent_hwnd, user_data_dir)?;
+        return Ok(None);
+    }
+    if cli.incognito_test {
+        validate_platform_incognito_store(producer, parent_hwnd, user_data_dir)?;
         return Ok(None);
     }
     if keyboard_validate_enabled() {
@@ -792,6 +826,150 @@ fn run_platform_composition_visual_probe(
         producer,
         dispatcher_queue,
     }))
+}
+
+#[cfg(target_os = "windows")]
+fn validate_platform_virtual_host_routing(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const HOST: &str = "scrying-test.local";
+    producer.register_virtual_host_handler(
+        HOST,
+        Arc::new(|url: &str| -> UrlSchemeResponse {
+            let body = format!(
+                r#"<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Scrying Routing Test</title></head>
+<body>
+    <h1>routing-test</h1>
+    <script>
+        window.chrome.webview.postMessage("routing-test:ready:{url}");
+    </script>
+</body>
+</html>"#
+            );
+            UrlSchemeResponse {
+                mime_type: "text/html".into(),
+                body: body.into_bytes(),
+                headers: Vec::new(),
+            }
+        }),
+    )?;
+
+    drain_navigation_events(producer);
+    drain_web_messages(producer);
+    let url = format!("https://{HOST}/app-shell");
+    producer.navigate_to_url(&url, std::time::Duration::from_secs(5))?;
+    wait_for_web_message(
+        producer,
+        &format!("routing-test:ready:{url}"),
+        std::time::Duration::from_secs(3),
+    )?;
+    println!(
+        "demo-win: routing-test: PASS - WebResourceRequested virtual host served app-owned content"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn validate_platform_process_failure_recovery(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    drain_navigation_events(producer);
+    drain_web_messages(producer);
+    producer.call_devtools_protocol_method("Page.crash", "{}")?;
+    wait_for_content_process_terminated(producer, std::time::Duration::from_secs(5))?;
+    producer.navigate_to_string(process_recovery_html(), std::time::Duration::from_secs(5))?;
+    wait_for_web_message(
+        producer,
+        "process-test:recovered",
+        std::time::Duration::from_secs(3),
+    )?;
+    println!(
+        "demo-win: process-test: PASS - ProcessFailed surfaced and producer recovered with a fresh navigation"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn process_recovery_html() -> &'static str {
+    r#"<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Scrying Process Recovery Test</title></head>
+<body>
+    <h1>process recovery</h1>
+    <script>window.chrome.webview.postMessage("process-test:recovered");</script>
+</body>
+</html>"#
+}
+
+#[cfg(target_os = "windows")]
+fn validate_platform_popup_routing(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const POPUP_URL: &str = "https://example.com/scrying-popup-target";
+    drain_navigation_events(producer);
+    drain_web_messages(producer);
+    let html = popup_test_html(POPUP_URL);
+    producer.navigate_to_string(&html, std::time::Duration::from_secs(5))?;
+    wait_for_web_message(
+        producer,
+        "popup-test:ready",
+        std::time::Duration::from_secs(3),
+    )?;
+    producer.post_web_message("popup-test:open")?;
+    wait_for_web_message(
+        producer,
+        "popup-test:opened",
+        std::time::Duration::from_secs(3),
+    )?;
+
+    let observed_url = wait_for_new_window_request(producer, std::time::Duration::from_secs(3))?;
+    if observed_url != POPUP_URL {
+        return Err(format!(
+            "popup-test: expected new-window URL {POPUP_URL:?}, got {observed_url:?}"
+        )
+        .into());
+    }
+
+    println!(
+        "demo-win: popup-test: PASS - NewWindowRequested routed to the host and default popup was suppressed"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn popup_test_html(popup_url: &str) -> String {
+    r#"<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Scrying Popup Test</title>
+    <style>
+        html, body { margin: 0; width: 100%; height: 100%; }
+        body { background: #17202a; color: #f6ead0; font-family: system-ui, sans-serif; padding: 18px; }
+        button { font: inherit; padding: 8px 12px; }
+    </style>
+</head>
+<body>
+    <button id="open-popup">Open popup</button>
+    <script>
+        const post = value => window.chrome.webview.postMessage(value);
+        document.getElementById("open-popup").addEventListener("click", () => {
+            window.open("__POPUP_URL__", "_blank");
+            post("popup-test:clicked");
+        });
+        window.chrome.webview.addEventListener("message", event => {
+            if (event.data === "popup-test:open") {
+                window.open("__POPUP_URL__", "_blank");
+                post("popup-test:opened");
+            }
+        });
+        window.addEventListener("pageshow", () => post("popup-test:ready"));
+    </script>
+</body>
+</html>"#
+    .replace("__POPUP_URL__", popup_url)
 }
 
 #[cfg(target_os = "windows")]
@@ -864,6 +1042,70 @@ fn validate_platform_profile_store(
 
     println!(
         "demo-win: profile-test: PASS - persistent cookie store survived producer recreation with the same user_data_dir"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn validate_platform_incognito_store(
+    mut incognito: scrying::PlatformWebSurfaceProducer,
+    parent_hwnd: *mut std::ffi::c_void,
+    user_data_dir: std::path::PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cookie_name = format!("demo_win_incognito_cookie_{}", std::process::id());
+    let cookie = Cookie {
+        name: cookie_name.clone(),
+        value: "incognito-only".into(),
+        domain: "example.com".into(),
+        path: "/".into(),
+        expires_at: Some(4_102_444_800.0),
+        is_secure: false,
+        is_http_only: false,
+    };
+
+    let _ = incognito.delete_cookie(&cookie.name, &cookie.domain, &cookie.path);
+    incognito.set_cookie(&cookie)?;
+    pump_windows_messages_for(std::time::Duration::from_millis(250));
+
+    let incognito_cookies = request_cookies(&mut incognito, std::time::Duration::from_secs(3))?;
+    require_cookie(
+        &incognito_cookies,
+        &cookie,
+        "incognito-test: InPrivate producer did not report the cookie after set_cookie",
+    )?;
+    drop(incognito);
+    pump_windows_messages_for(std::time::Duration::from_millis(250));
+
+    let persistent_config = scrying::PlatformWebSurfaceConfig::new(
+        winit::dpi::PhysicalSize::new(
+            COMPOSITION_PROBE_WIDTH as u32,
+            COMPOSITION_PROBE_HEIGHT as u32,
+        ),
+        user_data_dir,
+    )
+    .with_offset(
+        COMPOSITION_PROBE_X + COMPOSITION_PROBE_WIDTH + 24.0,
+        COMPOSITION_PROBE_Y,
+    )
+    .with_diagnostic_backdrop((59, 92, 72));
+    let mut persistent =
+        unsafe { scrying::PlatformWebSurfaceProducer::new(parent_hwnd, persistent_config)? };
+    persistent.navigate_to_string(
+        &browser_test_html("incognito-persistent"),
+        std::time::Duration::from_secs(5),
+    )?;
+
+    let persistent_cookies = request_cookies(&mut persistent, std::time::Duration::from_secs(3))?;
+    if contains_cookie(&persistent_cookies, &cookie) {
+        return Err(format!(
+            "incognito-test: persistent producer saw InPrivate cookie {:?}",
+            cookie.name
+        )
+        .into());
+    }
+
+    println!(
+        "demo-win: incognito-test: PASS - InPrivate cookie stayed isolated from the persistent user_data_dir profile"
     );
     Ok(())
 }
@@ -1029,6 +1271,57 @@ fn browser_test_html(label: &str) -> String {
 #[cfg(target_os = "windows")]
 fn drain_web_messages(producer: &mut scrying::PlatformWebSurfaceProducer) {
     while producer.poll_web_message().is_some() {}
+}
+
+#[cfg(target_os = "windows")]
+fn drain_navigation_events(producer: &mut scrying::PlatformWebSurfaceProducer) {
+    while producer.poll_navigation_event().is_some() {}
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_new_window_request(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    timeout: std::time::Duration,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last_event = String::new();
+    while std::time::Instant::now() < deadline {
+        pump_windows_messages_for(std::time::Duration::from_millis(16));
+        while let Some(event) = producer.poll_navigation_event() {
+            match event {
+                NavigationEvent::NewWindowRequested { url } => return Ok(url),
+                other => last_event = format!("{other:?}"),
+            }
+        }
+    }
+
+    Err(
+        format!("timed out waiting for NewWindowRequested; last navigation event {last_event:?}")
+            .into(),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_content_process_terminated(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    timeout: std::time::Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last_event = String::new();
+    while std::time::Instant::now() < deadline {
+        pump_windows_messages_for(std::time::Duration::from_millis(16));
+        while let Some(event) = producer.poll_navigation_event() {
+            match event {
+                NavigationEvent::ContentProcessTerminated => return Ok(()),
+                other => last_event = format!("{other:?}"),
+            }
+        }
+    }
+
+    Err(format!(
+        "timed out waiting for ContentProcessTerminated; last navigation event {last_event:?}"
+    )
+    .into())
 }
 
 #[cfg(target_os = "windows")]

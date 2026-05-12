@@ -23,6 +23,15 @@ cargo check -p scrying
 cargo run -p demo-scrying-winit
 # Windows runtime probe
 cargo run -p demo-win
+# Windows — automated runtime tests
+cargo run -p demo-win -- --scripted                  # JS messaging + input forwarding API smoke
+cargo run -p demo-win -- --browser-test              # history / settings / visibility
+cargo run -p demo-win -- --cookie-test               # WebView2 cookie read / write / delete
+cargo run -p demo-win -- --profile-test              # persistent user_data_dir survives producer recreation
+cargo run -p demo-win -- --incognito-test            # InPrivate profile isolation
+cargo run -p demo-win -- --popup-test                # host-owned target-blank / window.open routing
+cargo run -p demo-win -- --routing-test              # WebResourceRequested virtual-host app content
+cargo run -p demo-win -- --process-test              # ProcessFailed event + fresh navigation recovery
 # macOS — overlay mode (default)
 cargo run -p demo-mac
 # macOS — automated runtime tests

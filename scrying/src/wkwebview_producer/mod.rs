@@ -89,12 +89,12 @@ mod title_observer;
 mod trait_impl;
 mod ui_delegate;
 
+pub use crate::{UrlSchemeHandlerFn, UrlSchemeResponse};
 pub use api::FindOptions;
 pub use capture::{CaptureMetrics, CaptureStatus};
-pub use cookie_observer::CookieChangeHandlerFn;
 pub use config::WkWebViewProducerConfig;
+pub use cookie_observer::CookieChangeHandlerFn;
 pub use download_handler::DownloadHandlerFn;
 pub use nav_delegate::AuthHandlerFn;
 pub use producer::{CursorHandlerFn, WkWebViewProducer};
-pub use scheme_handler::{UrlSchemeHandlerFn, UrlSchemeResponse};
 pub use ui_delegate::PermissionHandlerFn;

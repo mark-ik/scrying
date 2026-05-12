@@ -266,6 +266,37 @@ pub enum WebSurfaceError {
     Platform(String),
 }
 
+/// Response served by a host-owned web resource handler — MIME type plus the
+/// raw bytes that should appear as the resource body to the WebView.
+///
+/// `headers` contributes extra HTTP response headers (`Content-Disposition`,
+/// `Cache-Control`, etc.). Producers always set `Content-Type` from
+/// `mime_type` and `Content-Length` from `body.len()`. Use
+/// [`Self::with_header`] for the common case.
+#[derive(Clone, Debug)]
+pub struct UrlSchemeResponse {
+    pub mime_type: String,
+    pub body: Vec<u8>,
+    pub headers: Vec<(String, String)>,
+}
+
+impl UrlSchemeResponse {
+    /// Append an extra HTTP header to this response.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+}
+
+/// Closure type registered on a producer to serve app-owned resources.
+///
+/// macOS uses this for custom URL schemes such as `mere://settings`. Windows
+/// uses the same response shape for virtual HTTPS hosts such as
+/// `https://mere.local/settings`, routed through WebView2's
+/// `WebResourceRequested` event.
+pub type UrlSchemeHandlerFn =
+    std::sync::Arc<dyn Fn(&str) -> UrlSchemeResponse + Send + Sync + 'static>;
+
 /// Lifecycle / state event emitted by the underlying webview.
 ///
 /// Drained from a producer via [`WebSurfaceProducer::poll_navigation_event`].
