@@ -29,6 +29,9 @@ One-shot smoke modes:
 
 ```bash
 cargo run -p demo-win -- --scripted
+cargo run -p demo-win -- --cookie-test
 ```
 
 `--scripted` loads a deterministic inline page, asserts a host-to-JS-to-host message round-trip, verifies mouse/keyboard forwarding APIs accept synthetic events, and requests process shutdown after the synchronous probe. It deliberately does not require the DOM keyboard effect to round-trip; the stricter `WEBVIEW_KEYBOARD_VALIDATE=1` smoke remains opt-in until the Windows message-loop path is tightened.
+
+`--cookie-test` verifies the WebView2 profile cookie manager by setting a unique HttpOnly cookie, querying it back through `request_all_cookies` / `poll_cookies`, deleting it, and confirming the next query no longer sees it.

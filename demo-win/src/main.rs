@@ -7,8 +7,8 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 #[cfg(target_os = "windows")]
 use scrying::Dx12FenceSynchronizer;
 use scrying::{
-    HostWgpuContext, ImportOptions, TextureImporter, WebSurfaceCapabilities, WebSurfaceFrame,
-    WgpuTextureImporter,
+    Cookie, HostWgpuContext, ImportOptions, TextureImporter, WebSurfaceCapabilities,
+    WebSurfaceFrame, WgpuTextureImporter,
 };
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -26,6 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 struct Cli {
     probe_only: bool,
     scripted: bool,
+    cookie_test: bool,
 }
 
 impl Cli {
@@ -35,10 +36,15 @@ impl Cli {
             match arg.as_str() {
                 "--probe-only" => cli.probe_only = true,
                 "--scripted" => cli.scripted = true,
+                "--cookie-test" => cli.cookie_test = true,
                 _ => eprintln!("demo-win: unknown arg: {arg}"),
             }
         }
         cli
+    }
+
+    fn one_shot(&self) -> bool {
+        self.probe_only || self.scripted || self.cookie_test
     }
 }
 
@@ -71,7 +77,7 @@ impl ApplicationHandler for App {
             return;
         }
 
-        let one_shot = self.cli.probe_only || self.cli.scripted;
+        let one_shot = self.cli.one_shot();
         match AppState::new(event_loop, &self.cli) {
             Ok(state) => {
                 if one_shot {
@@ -293,11 +299,10 @@ impl AppState {
             .map(|s| s.shared_handle().0 as *mut std::ffi::c_void);
 
         #[cfg(target_os = "windows")]
-        let captured =
-            run_platform_composition_visual_probe(&window, &host, fence_handle, cli.scripted)?;
+        let captured = run_platform_composition_visual_probe(&window, &host, fence_handle, cli)?;
 
         #[cfg(target_os = "windows")]
-        let renderer = if cli.scripted {
+        let renderer = if cli.one_shot() {
             None
         } else {
             match captured {
@@ -672,7 +677,7 @@ fn run_platform_composition_visual_probe(
     window: &Window,
     host: &HostWgpuContext,
     fence_shared_handle: Option<*mut std::ffi::c_void>,
-    scripted: bool,
+    cli: &Cli,
 ) -> Result<Option<CapturedComposition>, Box<dyn std::error::Error>> {
     use scrying::windows_capture::close_shared_handle;
     use windows::Win32::System::WinRT::{
@@ -713,14 +718,17 @@ fn run_platform_composition_visual_probe(
 
     let producer = unsafe { scrying::PlatformWebSurfaceProducer::new(parent_hwnd, config)? };
     producer.navigate_to_string(
-        composition_probe_html(scripted),
+        composition_probe_html(cli.scripted),
         std::time::Duration::from_secs(5),
     )?;
     println!("CompositionController visual probe: navigation completed");
 
     let mut producer = producer;
-    if scripted {
+    if cli.scripted {
         validate_platform_scripted(&mut producer)?;
+    }
+    if cli.cookie_test {
+        validate_platform_cookie_store(&mut producer)?;
     }
     if keyboard_validate_enabled() {
         validate_platform_keyboard_smoke(&mut producer)?;
@@ -769,6 +777,94 @@ fn run_platform_composition_visual_probe(
         producer,
         dispatcher_queue,
     }))
+}
+
+#[cfg(target_os = "windows")]
+fn validate_platform_cookie_store(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cookie_name = format!("demo_win_cookie_{}", std::process::id());
+    let cookie = Cookie {
+        name: cookie_name.clone(),
+        value: "cookie-test".into(),
+        domain: "example.com".into(),
+        path: "/".into(),
+        expires_at: None,
+        is_secure: false,
+        is_http_only: true,
+    };
+
+    let _ = producer.delete_cookie(&cookie.name, &cookie.domain, &cookie.path);
+    producer.set_cookie(&cookie)?;
+    pump_windows_messages_for(std::time::Duration::from_millis(250));
+
+    let cookies = request_cookies(producer, std::time::Duration::from_secs(3))?;
+    let observed = cookies
+        .iter()
+        .find(|candidate| {
+            candidate.name == cookie.name
+                && candidate.domain.trim_start_matches('.') == cookie.domain
+                && candidate.path == cookie.path
+        })
+        .ok_or_else(|| {
+            format!(
+                "cookie-test: cookie {:?} was not visible after set_cookie ({} cookies observed)",
+                cookie.name,
+                cookies.len()
+            )
+        })?;
+
+    if observed.value != cookie.value {
+        return Err(format!(
+            "cookie-test: cookie value mismatch: expected {:?}, got {:?}",
+            cookie.value, observed.value
+        )
+        .into());
+    }
+    if !observed.is_http_only {
+        return Err("cookie-test: HttpOnly flag did not round-trip".into());
+    }
+
+    producer.delete_cookie(&cookie.name, &cookie.domain, &cookie.path)?;
+    pump_windows_messages_for(std::time::Duration::from_millis(250));
+    let cookies_after_delete = request_cookies(producer, std::time::Duration::from_secs(3))?;
+    let still_present = cookies_after_delete.iter().any(|candidate| {
+        candidate.name == cookie.name
+            && candidate.domain.trim_start_matches('.') == cookie.domain
+            && candidate.path == cookie.path
+    });
+    if still_present {
+        return Err(format!(
+            "cookie-test: cookie {:?} was still visible after delete_cookie",
+            cookie.name
+        )
+        .into());
+    }
+
+    println!(
+        "demo-win: cookie-test: PASS - set/read/delete round-trip verified for {}",
+        cookie.name
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn request_cookies(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    timeout: std::time::Duration,
+) -> Result<Vec<Cookie>, Box<dyn std::error::Error>> {
+    while producer.poll_cookies().is_some() {}
+    producer.request_all_cookies()?;
+
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        pump_windows_messages_for(std::time::Duration::from_millis(16));
+        if let Some(cookies) = producer.poll_cookies() {
+            return Ok(cookies);
+        }
+    }
+
+    Err(format!("timed out waiting {timeout:?} for cookie query result").into())
 }
 
 #[cfg(target_os = "windows")]
