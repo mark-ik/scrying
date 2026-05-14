@@ -16,9 +16,7 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLTexture, MTLTextureType};
 
-use super::{
-    HostWgpuContext, ImportedTexture, InteropBackend, InteropError, MetalTextureRef,
-};
+use super::{HostWgpuContext, ImportedTexture, InteropBackend, InteropError, MetalTextureRef};
 
 pub(super) fn import(
     frame: &MetalTextureRef,
@@ -54,23 +52,24 @@ pub(super) fn import(
             },
         );
 
-        host.device.create_texture_from_hal::<wgpu::wgc::api::Metal>(
-            hal_texture,
-            &wgpu::TextureDescriptor {
-                label: Some("scrying-metal-texture-ref-import"),
-                size: wgpu::Extent3d {
-                    width: frame.size.width,
-                    height: frame.size.height,
-                    depth_or_array_layers: 1,
+        host.device
+            .create_texture_from_hal::<wgpu::wgc::api::Metal>(
+                hal_texture,
+                &wgpu::TextureDescriptor {
+                    label: Some("scrying-metal-texture-ref-import"),
+                    size: wgpu::Extent3d {
+                        width: frame.size.width,
+                        height: frame.size.height,
+                        depth_or_array_layers: 1,
+                    },
+                    format: frame.format,
+                    dimension: wgpu::TextureDimension::D2,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
                 },
-                format: frame.format,
-                dimension: wgpu::TextureDimension::D2,
-                mip_level_count: 1,
-                sample_count: 1,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            },
-        )
+            )
     };
 
     Ok(ImportedTexture {

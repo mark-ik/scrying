@@ -240,6 +240,196 @@ pub(super) fn install_media_capture_bridge(webview: &ICoreWebView2) -> Result<()
     add_script_to_execute_on_document_created_blocking(webview, script)
 }
 
+pub(super) fn install_text_input_bridge(webview: &ICoreWebView2) -> Result<(), WebSurfaceError> {
+    let script = format!(
+        r##"(() => {{
+            if (window.__scryingTextInputBridgeInstalled) return;
+            Object.defineProperty(window, "__scryingTextInputBridgeInstalled", {{ value: true }});
+            const prefix = {prefix:?};
+            let active = null;
+            let lastPayload = "";
+            let scheduled = false;
+            const emit = body => {{
+                // Always emit focus transitions: the host needs them to set up
+                // IME state even if the per-element payload happens to repeat.
+                // Dedup the noisy cases: consecutive blurs (password keeps
+                // re-publishing) and identical change pulses (selectionchange
+                // / scroll storms with no actual movement).
+                if (body === "blurred" && lastPayload === "blurred") return;
+                if (body.startsWith("changed\t") && body === lastPayload) return;
+                lastPayload = body;
+                try {{ window.chrome.webview.postMessage(prefix + body); }} catch (_) {{}}
+            }};
+            const clean = value => String(value || "").replace(/[\t\r\n]/g, " ");
+            const editable = element => {{
+                if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
+                const tag = element.tagName ? element.tagName.toLowerCase() : "";
+                if (tag === "textarea") return element;
+                if (tag === "input") {{
+                    const type = (element.getAttribute("type") || "text").toLowerCase();
+                    if (!["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(type)) return element;
+                }}
+                for (let current = element; current && current !== document.documentElement; current = current.parentElement) {{
+                    if (current.isContentEditable) return current;
+                }}
+                return null;
+            }};
+            const textInputKind = element => {{
+                const tag = element.tagName ? element.tagName.toLowerCase() : "";
+                if (tag === "textarea") return "textarea";
+                if (tag === "input") return "input";
+                return "contenteditable";
+            }};
+            const inputType = element => {{
+                const tag = element && element.tagName ? element.tagName.toLowerCase() : "";
+                return tag === "input" ? (element.getAttribute("type") || "text").toLowerCase() : "";
+            }};
+            const autocomplete = element => String(element.getAttribute("autocomplete") || "").toLowerCase();
+            const isPasswordLike = element => {{
+                const type = inputType(element);
+                const complete = autocomplete(element);
+                return type === "password" || complete.includes("password") || complete === "one-time-code";
+            }};
+            const selectionOffsets = element => {{
+                if (typeof element.selectionStart === "number" && typeof element.selectionEnd === "number") {{
+                    return [element.selectionStart, element.selectionEnd];
+                }}
+                const selection = window.getSelection && window.getSelection();
+                if (!selection || selection.rangeCount === 0) return [0, 0];
+                return [0, selection.focusOffset || 0];
+            }};
+            const caretRectForContentEditable = element => {{
+                const selection = window.getSelection && window.getSelection();
+                if (!selection || selection.rangeCount === 0) return element.getBoundingClientRect();
+                const range = selection.getRangeAt(0).cloneRange();
+                range.collapse(false);
+                const rect = range.getClientRects()[0] || range.getBoundingClientRect();
+                if (rect && (rect.width || rect.height)) return rect;
+                return element.getBoundingClientRect();
+            }};
+            const caretRectForTextControl = element => {{
+                const rect = element.getBoundingClientRect();
+                const style = getComputedStyle(element);
+                const mirror = document.createElement("div");
+                const props = [
+                    "boxSizing", "width", "height", "overflowX", "overflowY",
+                    "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
+                    "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+                    "fontFamily", "fontSize", "fontStyle", "fontWeight", "lineHeight",
+                    "letterSpacing", "textTransform", "textIndent", "textAlign",
+                    "whiteSpace", "wordSpacing", "wordBreak", "overflowWrap"
+                ];
+                const tag = element.tagName.toLowerCase();
+                const lineHeight = parseFloat(style.lineHeight) || Math.ceil((parseFloat(style.fontSize) || 16) * 1.2);
+                mirror.style.position = "fixed";
+                mirror.style.visibility = "hidden";
+                mirror.style.left = `${{rect.left}}px`;
+                mirror.style.top = `${{rect.top}}px`;
+                mirror.style.minHeight = `${{rect.height}}px`;
+                mirror.style.overflow = "hidden";
+                mirror.style.whiteSpace = tag === "textarea" ? "pre-wrap" : "pre";
+                mirror.style.overflowWrap = tag === "textarea" ? "break-word" : "normal";
+                for (const prop of props) mirror.style[prop] = style[prop];
+                const selectionEnd = typeof element.selectionEnd === "number" ? element.selectionEnd : 0;
+                let before = (element.value || "").slice(0, selectionEnd);
+                if (tag === "textarea" && before.endsWith("\n")) before += "\u200b";
+                mirror.textContent = before;
+                const marker = document.createElement("span");
+                marker.textContent = "\u200b";
+                mirror.appendChild(marker);
+                document.body.appendChild(mirror);
+                const markerRect = marker.getBoundingClientRect();
+                document.body.removeChild(mirror);
+                const x = markerRect.left - (element.scrollLeft || 0);
+                const y = markerRect.top - (element.scrollTop || 0);
+                return {{
+                    left: Math.max(rect.left, Math.min(rect.right, x)),
+                    top: Math.max(rect.top, Math.min(rect.bottom, y)),
+                    width: Math.max(1, markerRect.width || 1),
+                    height: Math.max(1, markerRect.height || lineHeight)
+                }};
+            }};
+            const caretRect = element => {{
+                try {{
+                    return element.isContentEditable ? caretRectForContentEditable(element) : caretRectForTextControl(element);
+                }} catch (_) {{
+                    return element.getBoundingClientRect();
+                }}
+            }};
+            const publish = reason => {{
+                if (!active) active = editable(document.activeElement);
+                if (!active) return;
+                if (isPasswordLike(active)) {{
+                    active = null;
+                    emit("blurred");
+                    return;
+                }}
+                const rect = caretRect(active);
+                const [selectionStart, selectionEnd] = selectionOffsets(active);
+                const type = inputType(active);
+                const inputMode = active.getAttribute("inputmode") || "";
+                const complete = autocomplete(active);
+                const kind = textInputKind(active);
+                const multiline = kind === "textarea" || kind === "contenteditable";
+                emit([
+                    reason,
+                    clean(kind),
+                    clean(type),
+                    clean(inputMode),
+                    clean(complete),
+                    multiline ? "1" : "0",
+                    "0",
+                    Math.max(0, selectionStart | 0),
+                    Math.max(0, selectionEnd | 0),
+                    Math.round(rect.left * 1000) / 1000,
+                    Math.round(rect.top * 1000) / 1000,
+                    Math.round(Math.max(1, rect.width || 1) * 1000) / 1000,
+                    Math.round(Math.max(1, rect.height || 1) * 1000) / 1000
+                ].join("\t"));
+            }};
+            const schedule = reason => {{
+                if (scheduled) return;
+                scheduled = true;
+                requestAnimationFrame(() => {{
+                    scheduled = false;
+                    publish(reason);
+                }});
+            }};
+            document.addEventListener("focusin", event => {{
+                const next = editable(event.target);
+                if (!next) return;
+                if (isPasswordLike(next)) {{
+                    active = null;
+                    emit("blurred");
+                    return;
+                }}
+                active = next;
+                publish("focused");
+            }}, true);
+            document.addEventListener("focusout", event => {{
+                if (!active || event.target !== active) return;
+                const next = editable(document.activeElement);
+                if (next === active) return;
+                active = null;
+                emit("blurred");
+            }}, true);
+            for (const type of ["selectionchange", "input", "compositionstart", "compositionupdate", "compositionend", "scroll", "resize"]) {{
+                window.addEventListener(type, () => schedule("changed"), true);
+                document.addEventListener(type, () => schedule("changed"), true);
+            }}
+            try {{
+                window.chrome.webview.addEventListener("message", () => schedule(active ? "changed" : "focused"));
+            }} catch (_) {{}}
+            if (editable(document.activeElement)) {{
+                active = editable(document.activeElement);
+                publish("focused");
+            }}
+        }})()"##,
+        prefix = TEXT_INPUT_BRIDGE_PREFIX,
+    );
+    add_script_to_execute_on_document_created_blocking(webview, script)
+}
+
 pub(super) fn register_context_menu_requested_handler(
     webview: &ICoreWebView2,
     nav_queue: Arc<Mutex<VecDeque<NavigationEvent>>>,
@@ -373,6 +563,36 @@ pub(super) fn parse_media_capture_bridge_message(message: &str) -> Option<Naviga
     })
 }
 
+pub(super) fn parse_text_input_bridge_message(message: &str) -> Option<NavigationEvent> {
+    let payload = message.strip_prefix(TEXT_INPUT_BRIDGE_PREFIX)?;
+    if payload == "blurred" {
+        return Some(NavigationEvent::TextInputBlurred);
+    }
+    let mut parts = payload.splitn(13, '\t');
+    let reason = parts.next()?;
+    let state = TextInputState {
+        element_kind: parts.next()?.to_string(),
+        input_type: parts.next()?.to_string(),
+        input_mode: parts.next()?.to_string(),
+        autocomplete: parts.next()?.to_string(),
+        is_multiline: parts.next()? == "1",
+        is_password: parts.next()? == "1",
+        selection_start: parts.next()?.parse().ok()?,
+        selection_end: parts.next()?.parse().ok()?,
+        caret_rect: TextInputRect {
+            x: parts.next()?.parse().ok()?,
+            y: parts.next()?.parse().ok()?,
+            width: parts.next()?.parse().ok()?,
+            height: parts.next()?.parse().ok()?,
+        },
+    };
+    match reason {
+        "focused" => Some(NavigationEvent::TextInputFocused { state }),
+        "changed" => Some(NavigationEvent::TextInputChanged { state }),
+        _ => None,
+    }
+}
+
 pub(super) fn parse_context_menu_bridge_message(message: &str) -> Option<NavigationEvent> {
     let payload = message.strip_prefix(CONTEXT_MENU_BRIDGE_PREFIX)?;
     let mut parts = payload.splitn(5, '\t');
@@ -410,5 +630,125 @@ fn optional_bridge_string(value: &str) -> Option<String> {
         None
     } else {
         Some(value.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{InputPurpose, NavigationEvent, TextInputState};
+
+    fn focused_payload(
+        kind: &str,
+        input_type: &str,
+        input_mode: &str,
+        autocomplete: &str,
+    ) -> String {
+        format!(
+            "{prefix}focused\t{kind}\t{input_type}\t{input_mode}\t{autocomplete}\t0\t0\t0\t0\t12.5\t34.0\t100.0\t18.0",
+            prefix = TEXT_INPUT_BRIDGE_PREFIX,
+        )
+    }
+
+    fn parse_focus(payload: &str) -> TextInputState {
+        match parse_text_input_bridge_message(payload).expect("parsed event") {
+            NavigationEvent::TextInputFocused { state }
+            | NavigationEvent::TextInputChanged { state } => state,
+            other => panic!("expected text-input state, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_focused_state_with_autocomplete() {
+        let payload = focused_payload("input", "email", "", "username");
+        let state = parse_focus(&payload);
+        assert_eq!(state.element_kind, "input");
+        assert_eq!(state.input_type, "email");
+        assert_eq!(state.autocomplete, "username");
+        assert!(!state.is_multiline);
+        assert!(!state.is_password);
+        assert_eq!(state.caret_rect.width, 100.0);
+        assert_eq!(state.caret_rect.height, 18.0);
+    }
+
+    #[test]
+    fn parses_blurred_event() {
+        let payload = format!("{prefix}blurred", prefix = TEXT_INPUT_BRIDGE_PREFIX);
+        let event = parse_text_input_bridge_message(&payload).expect("parsed event");
+        assert!(matches!(event, NavigationEvent::TextInputBlurred));
+    }
+
+    #[test]
+    fn rejects_unknown_reason() {
+        let payload = format!(
+            "{prefix}weird\tinput\ttext\t\t\t0\t0\t0\t0\t0\t0\t1\t1",
+            prefix = TEXT_INPUT_BRIDGE_PREFIX,
+        );
+        assert!(parse_text_input_bridge_message(&payload).is_none());
+    }
+
+    #[test]
+    fn purpose_prefers_inputmode_over_type() {
+        let state = parse_focus(&focused_payload("input", "text", "email", ""));
+        assert_eq!(state.purpose(), InputPurpose::Email);
+
+        let state = parse_focus(&focused_payload("input", "email", "tel", ""));
+        assert_eq!(state.purpose(), InputPurpose::Tel);
+    }
+
+    #[test]
+    fn purpose_falls_back_to_input_type() {
+        for (input_type, expected) in [
+            ("text", InputPurpose::Text),
+            ("search", InputPurpose::Search),
+            ("email", InputPurpose::Email),
+            ("url", InputPurpose::Url),
+            ("tel", InputPurpose::Tel),
+            ("number", InputPurpose::Decimal),
+        ] {
+            let state = parse_focus(&focused_payload("input", input_type, "", ""));
+            assert_eq!(state.purpose(), expected, "input type {input_type}");
+        }
+    }
+
+    #[test]
+    fn purpose_inputmode_numeric_and_decimal_split() {
+        let numeric = parse_focus(&focused_payload("input", "text", "numeric", ""));
+        assert_eq!(numeric.purpose(), InputPurpose::Numeric);
+
+        let decimal = parse_focus(&focused_payload("input", "text", "decimal", ""));
+        assert_eq!(decimal.purpose(), InputPurpose::Decimal);
+    }
+
+    #[test]
+    fn purpose_inputmode_none_disables_ime() {
+        let state = parse_focus(&focused_payload("input", "text", "none", ""));
+        assert_eq!(state.purpose(), InputPurpose::Disabled);
+    }
+
+    #[test]
+    fn purpose_one_time_code_autocomplete() {
+        let state = parse_focus(&focused_payload("input", "text", "", "one-time-code"));
+        assert_eq!(state.purpose(), InputPurpose::OneTimeCode);
+    }
+
+    #[test]
+    fn purpose_password_autocomplete_wins_over_type() {
+        let state = parse_focus(&focused_payload(
+            "input",
+            "text",
+            "email",
+            "current-password",
+        ));
+        assert_eq!(state.purpose(), InputPurpose::Password);
+    }
+
+    #[test]
+    fn purpose_defaults_to_text_for_textarea_and_contenteditable() {
+        let textarea = parse_focus(&focused_payload("textarea", "", "", ""));
+        assert_eq!(textarea.purpose(), InputPurpose::Text);
+
+        let contenteditable = parse_focus(&focused_payload("contenteditable", "", "", ""));
+        assert_eq!(contenteditable.purpose(), InputPurpose::Text);
     }
 }

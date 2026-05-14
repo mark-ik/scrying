@@ -152,6 +152,72 @@ pub(crate) fn wait_for_media_capture_state(
     .into())
 }
 
+pub(crate) fn wait_for_accelerator_key(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    virtual_key_code: u32,
+    timeout: std::time::Duration,
+) -> Result<scrying::AcceleratorKeyEvent, Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last_event = String::new();
+    while std::time::Instant::now() < deadline {
+        pump_windows_messages_for(std::time::Duration::from_millis(16));
+        while let Some(event) = producer.poll_navigation_event() {
+            match event {
+                NavigationEvent::AcceleratorKeyPressed { event }
+                    if event.virtual_key_code == virtual_key_code =>
+                {
+                    return Ok(event);
+                }
+                other => last_event = format!("{other:?}"),
+            }
+        }
+    }
+
+    Err(format!(
+        "timed out waiting for AcceleratorKeyPressed virtual key {virtual_key_code}; last navigation event {last_event:?}"
+    )
+    .into())
+}
+
+pub(crate) fn wait_for_text_input_focus(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    timeout: std::time::Duration,
+) -> Result<scrying::TextInputState, Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last_event = String::new();
+    while std::time::Instant::now() < deadline {
+        pump_windows_messages_for(std::time::Duration::from_millis(16));
+        while let Some(event) = producer.poll_navigation_event() {
+            match event {
+                NavigationEvent::TextInputFocused { state }
+                | NavigationEvent::TextInputChanged { state } => return Ok(state),
+                other => last_event = format!("{other:?}"),
+            }
+        }
+    }
+
+    Err(format!("timed out waiting for TextInputFocused; last event {last_event:?}").into())
+}
+
+pub(crate) fn wait_for_text_input_blur(
+    producer: &mut scrying::PlatformWebSurfaceProducer,
+    timeout: std::time::Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last_event = String::new();
+    while std::time::Instant::now() < deadline {
+        pump_windows_messages_for(std::time::Duration::from_millis(16));
+        while let Some(event) = producer.poll_navigation_event() {
+            match event {
+                NavigationEvent::TextInputBlurred => return Ok(()),
+                other => last_event = format!("{other:?}"),
+            }
+        }
+    }
+
+    Err(format!("timed out waiting for TextInputBlurred; last event {last_event:?}").into())
+}
+
 pub(crate) fn wait_for_title(
     producer: &mut scrying::PlatformWebSurfaceProducer,
     expected: &str,

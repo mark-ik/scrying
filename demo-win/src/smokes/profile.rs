@@ -35,14 +35,14 @@ pub(crate) fn validate_platform_profile_store(
 
     let secondary_config = scrying::PlatformWebSurfaceConfig::new(
         winit::dpi::PhysicalSize::new(
-            COMPOSITION_PROBE_WIDTH as u32,
-            COMPOSITION_PROBE_HEIGHT as u32,
+            SMOKE_PROBE_WIDTH as u32,
+            SMOKE_PROBE_HEIGHT as u32,
         ),
         user_data_dir,
     )
     .with_offset(
-        COMPOSITION_PROBE_X + COMPOSITION_PROBE_WIDTH + 24.0,
-        COMPOSITION_PROBE_Y,
+        SMOKE_PROBE_X + SMOKE_PROBE_WIDTH + 24.0,
+        SMOKE_PROBE_Y,
     )
     .with_diagnostic_backdrop((67, 61, 89));
     let mut secondary =
@@ -108,14 +108,14 @@ pub(crate) fn validate_platform_incognito_store(
 
     let persistent_config = scrying::PlatformWebSurfaceConfig::new(
         winit::dpi::PhysicalSize::new(
-            COMPOSITION_PROBE_WIDTH as u32,
-            COMPOSITION_PROBE_HEIGHT as u32,
+            SMOKE_PROBE_WIDTH as u32,
+            SMOKE_PROBE_HEIGHT as u32,
         ),
         user_data_dir,
     )
     .with_offset(
-        COMPOSITION_PROBE_X + COMPOSITION_PROBE_WIDTH + 24.0,
-        COMPOSITION_PROBE_Y,
+        SMOKE_PROBE_X + SMOKE_PROBE_WIDTH + 24.0,
+        SMOKE_PROBE_Y,
     )
     .with_diagnostic_backdrop((59, 92, 72));
     let mut persistent =

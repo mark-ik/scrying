@@ -6,11 +6,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use scrying::{
-    HostWgpuContext, ImportOptions, ImportedTexture, NativeFrame, TextureImporter,
-    WgpuTextureImporter, WebSurfaceFrame,
-};
 use scrying::WkWebViewProducer;
+use scrying::{
+    HostWgpuContext, ImportOptions, ImportedTexture, NativeFrame, TextureImporter, WebSurfaceFrame,
+    WgpuTextureImporter,
+};
 use winit::window::Window;
 
 const SHADER_SRC: &str = r#"
@@ -346,7 +346,10 @@ impl WgpuRender {
         let new_imported = match frame_result {
             Ok(Some(WebSurfaceFrame::Native(NativeFrame::MetalTextureRef(frame)))) => {
                 let native = NativeFrame::MetalTextureRef(frame);
-                match self.importer.import_frame(&native, &ImportOptions::default()) {
+                match self
+                    .importer
+                    .import_frame(&native, &ImportOptions::default())
+                {
                     Ok(imported) => Some(imported),
                     Err(e) => {
                         eprintln!("demo-mac: import_frame failed: {e}");
@@ -372,7 +375,8 @@ impl WgpuRender {
         }
 
         let surface_texture = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.device, &self.surface_config);
                 return Ok(());
@@ -490,8 +494,12 @@ impl WgpuRender {
         }
         let m = producer.capture_metrics();
         let dt = elapsed.as_secs_f64();
-        let recv_delta = m.samples_received.saturating_sub(self.last_samples_received);
-        let cons_delta = m.samples_consumed.saturating_sub(self.last_samples_consumed);
+        let recv_delta = m
+            .samples_received
+            .saturating_sub(self.last_samples_received);
+        let cons_delta = m
+            .samples_consumed
+            .saturating_sub(self.last_samples_consumed);
         let render_delta = self
             .frames_drawn
             .saturating_sub(self.last_frames_drawn_at_metrics);

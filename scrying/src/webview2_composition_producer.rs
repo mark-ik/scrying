@@ -29,6 +29,8 @@ mod settings;
 mod setup;
 mod teardown;
 
+pub use setup::CompositionRoot;
+
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,28 +43,32 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED,
     COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED, COREWEBVIEW2_DOWNLOAD_STATE,
     COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED, COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED,
-    COREWEBVIEW2_MOUSE_EVENT_KIND, COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS,
-    COREWEBVIEW2_MOVE_FOCUS_REASON, COREWEBVIEW2_PERMISSION_KIND,
-    COREWEBVIEW2_PERMISSION_KIND_CAMERA, COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
-    COREWEBVIEW2_PERMISSION_KIND_OTHER_SENSORS, COREWEBVIEW2_PERMISSION_STATE,
-    COREWEBVIEW2_PERMISSION_STATE_ALLOW, COREWEBVIEW2_PERMISSION_STATE_DEFAULT,
-    COREWEBVIEW2_PERMISSION_STATE_DENY, COREWEBVIEW2_PRINT_DIALOG_KIND_BROWSER,
+    COREWEBVIEW2_KEY_EVENT_KIND, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
+    COREWEBVIEW2_KEY_EVENT_KIND_KEY_UP, COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
+    COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_UP, COREWEBVIEW2_MOUSE_EVENT_KIND,
+    COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS, COREWEBVIEW2_MOVE_FOCUS_REASON,
+    COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_CAMERA,
+    COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_KIND_OTHER_SENSORS,
+    COREWEBVIEW2_PERMISSION_STATE, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+    COREWEBVIEW2_PERMISSION_STATE_DEFAULT, COREWEBVIEW2_PERMISSION_STATE_DENY,
+    COREWEBVIEW2_PHYSICAL_KEY_STATUS, COREWEBVIEW2_PRINT_DIALOG_KIND_BROWSER,
     COREWEBVIEW2_PROCESS_FAILED_KIND, COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
     COREWEBVIEW2_PROCESS_FAILED_KIND_UNKNOWN_PROCESS_EXITED, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
     ICoreWebView2, ICoreWebView2_2, ICoreWebView2_4, ICoreWebView2_10, ICoreWebView2_11,
-    ICoreWebView2_16, ICoreWebView2_28, ICoreWebView2CompositionController,
-    ICoreWebView2Controller, ICoreWebView2Cookie, ICoreWebView2CookieManager,
-    ICoreWebView2DownloadOperation, ICoreWebView2Environment, ICoreWebView2Environment3,
-    ICoreWebView2Environment6, ICoreWebView2Environment10, ICoreWebView2Environment15,
-    ICoreWebView2EnvironmentOptions, ICoreWebView2PermissionRequestedEventArgs2,
+    ICoreWebView2_16, ICoreWebView2_28, ICoreWebView2AcceleratorKeyPressedEventArgs2,
+    ICoreWebView2CompositionController, ICoreWebView2Controller, ICoreWebView2Cookie,
+    ICoreWebView2CookieManager, ICoreWebView2DownloadOperation, ICoreWebView2Environment,
+    ICoreWebView2Environment3, ICoreWebView2Environment6, ICoreWebView2Environment10,
+    ICoreWebView2Environment15, ICoreWebView2EnvironmentOptions,
+    ICoreWebView2PermissionRequestedEventArgs2,
 };
 use webview2_com::{
-    AddScriptToExecuteOnDocumentCreatedCompletedHandler, BasicAuthenticationRequestedEventHandler,
-    BytesReceivedChangedEventHandler, CallDevToolsProtocolMethodCompletedHandler, CoTaskMemPWSTR,
-    ContextMenuRequestedEventHandler, CoreWebView2EnvironmentOptions,
-    CreateCoreWebView2CompositionControllerCompletedHandler,
+    AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler,
+    BasicAuthenticationRequestedEventHandler, BytesReceivedChangedEventHandler,
+    CallDevToolsProtocolMethodCompletedHandler, CoTaskMemPWSTR, ContextMenuRequestedEventHandler,
+    CoreWebView2EnvironmentOptions, CreateCoreWebView2CompositionControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, DocumentTitleChangedEventHandler,
     DownloadStartingEventHandler, ExecuteScriptCompletedHandler, FindStartCompletedHandler,
     GetCookiesCompletedHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler,
@@ -97,10 +103,11 @@ use windows::core::{IInspectable, Interface, PCWSTR, PWSTR};
 use windows_numerics::{Vector2, Vector3};
 
 use crate::{
-    AuthChallenge, AuthDisposition, AuthSource, ColorPipeline, Cookie, CursorShape,
-    DownloadDecision, DownloadDestinationRequest, DownloadId, FocusReason, KeyEventKind,
-    KeyboardInput, MouseEventKind, MouseInput, NavigationEvent, PermissionDecision, PermissionKind,
-    PermissionRequest, UrlSchemeHandlerFn, UrlSchemeResponse,
+    AcceleratorKeyEvent, AuthChallenge, AuthDisposition, AuthSource, ColorPipeline, Cookie,
+    CursorShape, DownloadDecision, DownloadDestinationRequest, DownloadId, FocusReason,
+    KeyEventKind, KeyboardInput, MouseEventKind, MouseInput, NavigationEvent, PermissionDecision,
+    PermissionKind, PermissionRequest, PhysicalKeyStatus, TextInputRect, TextInputState,
+    UrlSchemeHandlerFn, UrlSchemeResponse,
 };
 
 use crate::windows_capture::{
@@ -118,6 +125,7 @@ const COOKIE_CHANGE_BRIDGE_MESSAGE: &str = "\0scrying:cookie-change";
 const CONTEXT_MENU_BRIDGE_PREFIX: &str = "scrying:context-menu:";
 const DROP_DETECTED_BRIDGE_PREFIX: &str = "scrying:drop-detected:";
 const MEDIA_CAPTURE_BRIDGE_PREFIX: &str = "scrying:media-capture:";
+const TEXT_INPUT_BRIDGE_PREFIX: &str = "scrying:text-input:";
 const MAX_MESSAGES_PER_PUMP_SLICE: usize = 256;
 
 pub type WebView2CookieChangeHandlerFn = Box<dyn Fn() + Send + Sync + 'static>;
@@ -285,11 +293,15 @@ pub struct WebView2CompositionProducer {
     size: PhysicalSize<u32>,
     generation: u64,
 
+    /// Shared per-HWND composition target. Held so the `DesktopWindowTarget`
+    /// outlives every producer attached to it; for a single-pane producer the
+    /// `Arc` refcount is 1.
     #[allow(dead_code)]
-    compositor: Compositor,
-    #[allow(dead_code)]
-    desktop_target: windows::UI::Composition::Desktop::DesktopWindowTarget,
-    root_visual: ContainerVisual,
+    composition_root: Arc<setup::CompositionRoot>,
+    /// This producer's pane container — a child of the shared root visual.
+    /// Carries the pane's offset and size; `set_offset` / `resize` operate on
+    /// it so one pane moves without disturbing siblings.
+    pane_container: ContainerVisual,
     webview_visual: ContainerVisual,
 
     #[allow(dead_code)]
@@ -336,6 +348,7 @@ pub struct WebView2CompositionProducer {
     web_message_token: i64,
     web_resource_response_received_token: i64,
     web_resource_requested_token: Option<i64>,
+    accelerator_key_pressed_token: i64,
     cursor_changed_token: i64,
 }
 
@@ -380,7 +393,7 @@ impl crate::WebSurfaceProducer for WebView2CompositionProducer {
             native_child_overlay: crate::native_frame::CapabilityStatus::Supported,
             cpu_snapshot: crate::native_frame::CapabilityStatus::Supported,
             supported_frames: vec![crate::native_frame::NativeFrameKind::Dx12SharedTexture],
-            reason: "WebView2 CompositionController visual + Windows.Graphics.Capture + shared D3D11 NT-handle texture imported as Dx12SharedTexture.",
+            reason: "WebView2 CompositionController visual + Windows.Graphics.Capture + shared D3D11 NT-handle texture imported as Dx12SharedTexture; keyboard/text uses WebView2 CDP Input on the pure visual-hosted path.",
         }
     }
 

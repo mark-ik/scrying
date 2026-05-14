@@ -67,9 +67,9 @@ impl WebView2CompositionProducer {
     }
 
     pub fn set_offset(&self, x: f32, y: f32) -> Result<(), WebSurfaceError> {
-        self.root_visual
+        self.pane_container
             .SetOffset(Vector3 { X: x, Y: y, Z: 0.0 })
-            .map_err(platform("root.SetOffset"))
+            .map_err(platform("pane_container.SetOffset"))
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) -> Result<(), WebSurfaceError> {
@@ -90,9 +90,9 @@ impl WebView2CompositionProducer {
             X: size.width as f32,
             Y: size.height as f32,
         };
-        self.root_visual
+        self.pane_container
             .SetSize(visual_size)
-            .map_err(platform("root.SetSize"))?;
+            .map_err(platform("pane_container.SetSize"))?;
         self.webview_visual
             .SetSize(visual_size)
             .map_err(platform("webview_visual.SetSize"))?;

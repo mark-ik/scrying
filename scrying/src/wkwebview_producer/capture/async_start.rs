@@ -12,22 +12,22 @@ use std::sync::{Arc, Mutex};
 
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
+use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::AnyThread;
 use objc2_foundation::{MainThreadMarker, NSArray, NSError};
 use objc2_metal::MTLDevice;
 use objc2_screen_capture_kit::{
     SCContentFilter, SCShareableContent, SCStream, SCStreamOutputType, SCWindow,
 };
 
-use crate::{HostWgpuContext, InteropBackend, WebSurfaceMode, WebSurfaceError};
+use crate::{HostWgpuContext, InteropBackend, WebSurfaceError, WebSurfaceMode};
 
 use super::super::producer::WkWebViewProducer;
 use super::{
-    host_window_pixel_size, make_stream_configuration, write_pending, CaptureMetrics,
-    CaptureState, CaptureStatus, InProgressCaptureState, LatestSample, PendingCaptureSlot,
-    SendOnly, StreamErrorDelegate, StreamOutputDelegate,
+    CaptureMetrics, CaptureState, CaptureStatus, InProgressCaptureState, LatestSample,
+    PendingCaptureSlot, SendOnly, StreamErrorDelegate, StreamOutputDelegate,
+    host_window_pixel_size, make_stream_configuration, write_pending,
 };
 
 impl WkWebViewProducer {
@@ -46,19 +46,17 @@ impl WkWebViewProducer {
     ///
     /// Idempotent: returns `Ok(())` if a capture is already live or
     /// in progress.
-    pub fn start_capture_async(
-        &mut self,
-        host: HostWgpuContext,
-    ) -> Result<(), WebSurfaceError> {
+    pub fn start_capture_async(&mut self, host: HostWgpuContext) -> Result<(), WebSurfaceError> {
         if self.capture.is_some() {
             return Ok(());
         }
         // Reset / advance the state machine. If we're already in
         // Starting, return without restarting.
         {
-            let p = self.pending_capture.lock().map_err(|_| {
-                WebSurfaceError::Platform("pending_capture lock poisoned".into())
-            })?;
+            let p = self
+                .pending_capture
+                .lock()
+                .map_err(|_| WebSurfaceError::Platform("pending_capture lock poisoned".into()))?;
             if matches!(*p, PendingCaptureSlot::Starting) {
                 return Ok(());
             }
@@ -80,9 +78,7 @@ impl WkWebViewProducer {
             host.device
                 .as_hal::<wgpu::wgc::api::Metal>()
                 .ok_or_else(|| {
-                    WebSurfaceError::Platform(
-                        "host wgpu device is not on the Metal backend".into(),
-                    )
+                    WebSurfaceError::Platform("host wgpu device is not on the Metal backend".into())
                 })?
                 .raw_device()
                 .clone()
@@ -112,22 +108,17 @@ impl WkWebViewProducer {
         // buffer on the main thread; both ferry across to the
         // SCK completion via `SendOnly`.
         let command_queue = metal_device.newCommandQueue().ok_or_else(|| {
-            WebSurfaceError::Platform(
-                "MTLDevice::newCommandQueue returned nil".into(),
-            )
+            WebSurfaceError::Platform("MTLDevice::newCommandQueue returned nil".into())
         })?;
         let shared_event = metal_device.newSharedEvent().ok_or_else(|| {
-            WebSurfaceError::Platform(
-                "MTLDevice::newSharedEvent returned nil".into(),
-            )
+            WebSurfaceError::Platform("MTLDevice::newSharedEvent returned nil".into())
         })?;
 
         *self
             .pending_capture
             .lock()
-            .map_err(|_| {
-                WebSurfaceError::Platform("pending_capture lock poisoned".into())
-            })? = PendingCaptureSlot::Starting;
+            .map_err(|_| WebSurfaceError::Platform("pending_capture lock poisoned".into()))? =
+            PendingCaptureSlot::Starting;
 
         let pending = Arc::clone(&self.pending_capture);
         let metal_device_for_block = SendOnly(metal_device);
@@ -138,24 +129,20 @@ impl WkWebViewProducer {
         // doesn't need to reach back into `self`.
         let color_pipeline = self.config.color_pipeline;
 
-        let outer_block = RcBlock::new(
-            move |content: *mut SCShareableContent, err: *mut NSError| {
+        let outer_block =
+            RcBlock::new(move |content: *mut SCShareableContent, err: *mut NSError| {
                 if !err.is_null() {
                     let msg = unsafe { (*err).localizedDescription().to_string() };
                     write_pending(
                         &pending,
-                        PendingCaptureSlot::Failed(format!(
-                            "SCShareableContent failed: {msg}"
-                        )),
+                        PendingCaptureSlot::Failed(format!("SCShareableContent failed: {msg}")),
                     );
                     return;
                 }
                 let Some(non_null) = NonNull::new(content) else {
                     write_pending(
                         &pending,
-                        PendingCaptureSlot::Failed(
-                            "SCShareableContent returned null".into(),
-                        ),
+                        PendingCaptureSlot::Failed("SCShareableContent returned null".into()),
                     );
                     return;
                 };
@@ -168,8 +155,7 @@ impl WkWebViewProducer {
                             write_pending(
                                 &pending,
                                 PendingCaptureSlot::Failed(
-                                    "Retained::retain on SCShareableContent returned None"
-                                        .into(),
+                                    "Retained::retain on SCShareableContent returned None".into(),
                                 ),
                             );
                             return;
@@ -207,8 +193,7 @@ impl WkWebViewProducer {
                         &target_window,
                     )
                 };
-                let stream_config =
-                    make_stream_configuration(window_pixel_size, color_pipeline);
+                let stream_config = make_stream_configuration(window_pixel_size, color_pipeline);
                 let stream_error = Arc::new(Mutex::new(None::<String>));
                 let error_delegate = StreamErrorDelegate::new(Arc::clone(&stream_error));
                 let stream = unsafe {
@@ -222,12 +207,9 @@ impl WkWebViewProducer {
                 let latest: Arc<LatestSample> = Arc::new(Mutex::new(None));
                 let samples_received = Arc::new(AtomicU64::new(0));
                 let samples_consumed = Arc::new(AtomicU64::new(0));
-                let output_delegate = StreamOutputDelegate::new(
-                    Arc::clone(&latest),
-                    Arc::clone(&samples_received),
-                );
-                let sample_queue =
-                    DispatchQueue::new("scrying.wkwebview.sck-sample", None);
+                let output_delegate =
+                    StreamOutputDelegate::new(Arc::clone(&latest), Arc::clone(&samples_received));
+                let sample_queue = DispatchQueue::new("scrying.wkwebview.sck-sample", None);
                 if let Err(e) = unsafe {
                     stream.addStreamOutput_type_sampleHandlerQueue_error(
                         ProtocolObject::from_ref(&*output_delegate),
@@ -270,13 +252,10 @@ impl WkWebViewProducer {
 
                 let inner_block = RcBlock::new(move |err: *mut NSError| {
                     if !err.is_null() {
-                        let msg =
-                            unsafe { (*err).localizedDescription().to_string() };
+                        let msg = unsafe { (*err).localizedDescription().to_string() };
                         write_pending(
                             &pending_inner,
-                            PendingCaptureSlot::Failed(format!(
-                                "startCapture failed: {msg}"
-                            )),
+                            PendingCaptureSlot::Failed(format!("startCapture failed: {msg}")),
                         );
                         return;
                     }
@@ -295,22 +274,16 @@ impl WkWebViewProducer {
                         last_emitted: None,
                         generation: AtomicU64::new(0),
                         config_revision: Arc::clone(&parts.config_revision),
-                        applied_config_revision: Arc::clone(
-                            &parts.applied_config_revision,
-                        ),
+                        applied_config_revision: Arc::clone(&parts.applied_config_revision),
                         shared_event: parts.shared_event.clone(),
                         next_signal_value: AtomicU64::new(0),
                     };
-                    write_pending(
-                        &pending_inner,
-                        PendingCaptureSlot::Ready(SendOnly(cap)),
-                    );
+                    write_pending(&pending_inner, PendingCaptureSlot::Ready(SendOnly(cap)));
                 });
                 unsafe {
                     stream.startCaptureWithCompletionHandler(Some(&inner_block));
                 }
-            },
-        );
+            });
 
         unsafe {
             SCShareableContent::getShareableContentWithCompletionHandler(&outer_block);
@@ -408,10 +381,8 @@ impl WkWebViewProducer {
     fn install_capture_state(&mut self, state: CaptureState) {
         self.capture = Some(state);
         self.capabilities.preferred_mode = WebSurfaceMode::ImportedTexture;
-        self.capabilities.imported_texture =
-            crate::native_frame::CapabilityStatus::Supported;
-        self.capabilities.reason =
-            "WkWebViewProducer slice B: ScreenCaptureKit → IOSurface → MetalTextureRef capture is live; consumer should render the imported texture each frame.";
+        self.capabilities.imported_texture = crate::native_frame::CapabilityStatus::Supported;
+        self.capabilities.reason = "WkWebViewProducer slice B: ScreenCaptureKit → IOSurface → MetalTextureRef capture is live; consumer should render the imported texture each frame.";
         // Advance the slot to "consumed" so subsequent polls don't
         // re-promote the same state.
         if let Ok(mut p) = self.pending_capture.lock() {

@@ -16,10 +16,12 @@ use std::time::Duration;
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use dpi::PhysicalSize;
+use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::AnyThread;
-use objc2_core_video::{CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetIOSurface, CVPixelBufferGetWidth};
+use objc2_core_video::{
+    CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetIOSurface, CVPixelBufferGetWidth,
+};
 use objc2_foundation::{MainThreadMarker, NSArray, NSError};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLDevice,
@@ -31,15 +33,15 @@ use objc2_screen_capture_kit::{
 
 use crate::native_frame::MetalTextureRef as NativeMetalTextureRef;
 use crate::{
-    HostWgpuContext, InteropBackend, NativeFrame, SyncMechanism, WebSurfaceMode,
-    WebSurfaceError, WebSurfaceFrame,
+    HostWgpuContext, InteropBackend, NativeFrame, SyncMechanism, WebSurfaceError, WebSurfaceFrame,
+    WebSurfaceMode,
 };
 
 use super::super::helpers::pump_until;
 use super::super::producer::WkWebViewProducer;
 use super::{
-    host_window_pixel_size, make_stream_configuration, CaptureSignal, CaptureState,
-    LatestSample, SendCFRetained, StreamErrorDelegate, StreamOutputDelegate,
+    CaptureSignal, CaptureState, LatestSample, SendCFRetained, StreamErrorDelegate,
+    StreamOutputDelegate, host_window_pixel_size, make_stream_configuration,
 };
 
 impl WkWebViewProducer {
@@ -83,9 +85,7 @@ impl WkWebViewProducer {
         }
 
         let mtm = MainThreadMarker::new().ok_or_else(|| {
-            WebSurfaceError::Platform(
-                "start_capture must be called on the main thread".into(),
-            )
+            WebSurfaceError::Platform("start_capture must be called on the main thread".into())
         })?;
 
         if host.backend != InteropBackend::Metal {
@@ -102,9 +102,7 @@ impl WkWebViewProducer {
             host.device
                 .as_hal::<wgpu::wgc::api::Metal>()
                 .ok_or_else(|| {
-                    WebSurfaceError::Platform(
-                        "host wgpu device is not on the Metal backend".into(),
-                    )
+                    WebSurfaceError::Platform("host wgpu device is not on the Metal backend".into())
                 })?
                 .raw_device()
                 .clone()
@@ -122,14 +120,10 @@ impl WkWebViewProducer {
         let window_pixel_size = host_window_pixel_size(&host_window);
 
         let command_queue = metal_device.newCommandQueue().ok_or_else(|| {
-            WebSurfaceError::Platform(
-                "MTLDevice::newCommandQueue returned nil".into(),
-            )
+            WebSurfaceError::Platform("MTLDevice::newCommandQueue returned nil".into())
         })?;
         let shared_event = metal_device.newSharedEvent().ok_or_else(|| {
-            WebSurfaceError::Platform(
-                "MTLDevice::newSharedEvent returned nil".into(),
-            )
+            WebSurfaceError::Platform("MTLDevice::newSharedEvent returned nil".into())
         })?;
 
         let filter = unsafe {
@@ -197,7 +191,9 @@ impl WkWebViewProducer {
         // Pump the main run loop until the start completion handler
         // fires (it runs on a background queue but the signal is
         // observed on the main thread via the Mutex).
-        match pump_until(timeout, || signal.lock().ok().and_then(|s| s.result.clone())) {
+        match pump_until(timeout, || {
+            signal.lock().ok().and_then(|s| s.result.clone())
+        }) {
             Ok(Ok(())) => {}
             Ok(Err(msg)) => {
                 return Err(WebSurfaceError::Platform(format!(
@@ -238,10 +234,8 @@ impl WkWebViewProducer {
         // Capture is live — flip the advertised capability so consumers
         // know the GPU-handoff path is now preferred over overlay.
         self.capabilities.preferred_mode = WebSurfaceMode::ImportedTexture;
-        self.capabilities.imported_texture =
-            crate::native_frame::CapabilityStatus::Supported;
-        self.capabilities.reason =
-            "WkWebViewProducer slice B: ScreenCaptureKit → IOSurface → MetalTextureRef capture is live; consumer should render the imported texture each frame.";
+        self.capabilities.imported_texture = crate::native_frame::CapabilityStatus::Supported;
+        self.capabilities.reason = "WkWebViewProducer slice B: ScreenCaptureKit → IOSurface → MetalTextureRef capture is live; consumer should render the imported texture each frame.";
         let _ = mtm;
         Ok(())
     }
@@ -288,54 +282,50 @@ impl WkWebViewProducer {
         let target_id = target_window_number as u32;
         {
             let signal = Arc::clone(&signal);
-            let block = RcBlock::new(
-                move |content: *mut SCShareableContent, err: *mut NSError| {
-                    let result = if !err.is_null() {
-                        WindowQueryResult {
-                            matched: None,
-                            error: Some(unsafe {
-                                (*err).localizedDescription().to_string()
-                            }),
-                        }
-                    } else if let Some(non_null) = NonNull::new(content) {
-                        // SAFETY: SCShareableContent hands us a +0
-                        // borrow; retain to extend lifetime past the
-                        // callback long enough to walk the windows
-                        // array.
-                        let content: Option<Retained<SCShareableContent>> =
-                            unsafe { Retained::retain(non_null.as_ptr()) };
-                        match content {
-                            Some(content) => {
-                                let windows: Retained<NSArray<SCWindow>> =
-                                    unsafe { content.windows() };
-                                let mut matched: Option<Retained<SCWindow>> = None;
-                                for i in 0..windows.count() {
-                                    let window = windows.objectAtIndex(i);
-                                    if unsafe { window.windowID() } == target_id {
-                                        matched = Some(window);
-                                        break;
-                                    }
-                                }
-                                WindowQueryResult { matched, error: None }
-                            }
-                            None => WindowQueryResult {
-                                matched: None,
-                                error: Some(
-                                    "Retained<SCShareableContent> failed".into(),
-                                ),
-                            },
-                        }
-                    } else {
-                        WindowQueryResult {
-                            matched: None,
-                            error: Some("SCShareableContent was null".into()),
-                        }
-                    };
-                    if let Ok(mut s) = signal.lock() {
-                        *s = Some(result);
+            let block = RcBlock::new(move |content: *mut SCShareableContent, err: *mut NSError| {
+                let result = if !err.is_null() {
+                    WindowQueryResult {
+                        matched: None,
+                        error: Some(unsafe { (*err).localizedDescription().to_string() }),
                     }
-                },
-            );
+                } else if let Some(non_null) = NonNull::new(content) {
+                    // SAFETY: SCShareableContent hands us a +0
+                    // borrow; retain to extend lifetime past the
+                    // callback long enough to walk the windows
+                    // array.
+                    let content: Option<Retained<SCShareableContent>> =
+                        unsafe { Retained::retain(non_null.as_ptr()) };
+                    match content {
+                        Some(content) => {
+                            let windows: Retained<NSArray<SCWindow>> = unsafe { content.windows() };
+                            let mut matched: Option<Retained<SCWindow>> = None;
+                            for i in 0..windows.count() {
+                                let window = windows.objectAtIndex(i);
+                                if unsafe { window.windowID() } == target_id {
+                                    matched = Some(window);
+                                    break;
+                                }
+                            }
+                            WindowQueryResult {
+                                matched,
+                                error: None,
+                            }
+                        }
+                        None => WindowQueryResult {
+                            matched: None,
+                            error: Some("Retained<SCShareableContent> failed".into()),
+                        },
+                    }
+                } else {
+                    WindowQueryResult {
+                        matched: None,
+                        error: Some("SCShareableContent was null".into()),
+                    }
+                };
+                if let Ok(mut s) = signal.lock() {
+                    *s = Some(result);
+                }
+            });
             unsafe {
                 SCShareableContent::getShareableContentWithCompletionHandler(&block);
             }
@@ -374,9 +364,7 @@ impl WkWebViewProducer {
     ///   to overlay-only rendering via [`Self::acquire_frame`]).
     /// - `Err(...)` if the stream has reported a fatal error since the
     ///   last call.
-    pub fn try_acquire_frame(
-        &mut self,
-    ) -> Result<Option<WebSurfaceFrame>, WebSurfaceError> {
+    pub fn try_acquire_frame(&mut self) -> Result<Option<WebSurfaceFrame>, WebSurfaceError> {
         // Re-apply size if the host window crossed a backing-scale
         // boundary since the last call. Cheap when no change is
         // pending.
@@ -402,7 +390,7 @@ impl WkWebViewProducer {
             Err(_) => {
                 return Err(WebSurfaceError::Platform(
                     "latest-sample lock poisoned".into(),
-                ))
+                ));
             }
         };
 
@@ -459,9 +447,7 @@ impl WkWebViewProducer {
         // bug, or a config-change path that didn't go through
         // `update_capture_for_layout_change`). Cheap to keep.
         let host_window_for_dims = self.webview.window().ok_or_else(|| {
-            WebSurfaceError::Platform(
-                "WKWebView's host window vanished mid-capture".into(),
-            )
+            WebSurfaceError::Platform("WKWebView's host window vanished mid-capture".into())
         })?;
         let expected_dims = super::host_window_pixel_size(&host_window_for_dims);
         if source_width as u32 != expected_dims.width
@@ -505,8 +491,7 @@ impl WkWebViewProducer {
         // scaling), so the source rect is just the webview's
         // window-coords rect × backing scale.
         let host_window = host_window_for_dims;
-        let webview_rect_pts =
-            super::webview_window_rect(&self.webview, &host_window);
+        let webview_rect_pts = super::webview_window_rect(&self.webview, &host_window);
         let scale = host_window.backingScaleFactor().max(1.0);
         let crop_x = (webview_rect_pts.origin.x * scale).round().max(0.0) as usize;
         let crop_y = (webview_rect_pts.origin.y * scale).round().max(0.0) as usize;
@@ -551,14 +536,10 @@ impl WkWebViewProducer {
         // offset within the captured window; dest origin is the
         // top-left of the cropped texture.
         let cmd_buf = capture.command_queue.commandBuffer().ok_or_else(|| {
-            WebSurfaceError::Platform(
-                "MTLCommandQueue::commandBuffer returned nil".into(),
-            )
+            WebSurfaceError::Platform("MTLCommandQueue::commandBuffer returned nil".into())
         })?;
         let blit = cmd_buf.blitCommandEncoder().ok_or_else(|| {
-            WebSurfaceError::Platform(
-                "MTLCommandBuffer::blitCommandEncoder returned nil".into(),
-            )
+            WebSurfaceError::Platform("MTLCommandBuffer::blitCommandEncoder returned nil".into())
         })?;
         unsafe {
             blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
@@ -583,10 +564,7 @@ impl WkWebViewProducer {
         // own queue. Producers without an explicit-sync consumer
         // pay only the cost of a u64 GPU write — implicit
         // IOSurface coherence still does the work.
-        let signal_value = capture
-            .next_signal_value
-            .fetch_add(1, Ordering::Relaxed)
-            + 1;
+        let signal_value = capture.next_signal_value.fetch_add(1, Ordering::Relaxed) + 1;
         cmd_buf.encodeSignalEvent_value(
             ProtocolObject::from_ref(&*capture.shared_event),
             signal_value,
@@ -613,8 +591,7 @@ impl WkWebViewProducer {
         // consumer-side-only change.
         cmd_buf.waitUntilCompleted();
 
-        let raw_metal_texture =
-            Retained::as_ptr(&dest_texture) as *mut std::ffi::c_void;
+        let raw_metal_texture = Retained::as_ptr(&dest_texture) as *mut std::ffi::c_void;
         let frame = NativeMetalTextureRef {
             size: PhysicalSize::new(crop_w as u32, crop_h as u32),
             format: super::wgpu_format_for(self.config.color_pipeline),
@@ -642,7 +619,8 @@ impl WkWebViewProducer {
         capture.last_emitted = Some(dest_texture);
         capture.samples_consumed.fetch_add(1, Ordering::Relaxed);
 
-        Ok(Some(WebSurfaceFrame::Native(NativeFrame::MetalTextureRef(frame))))
+        Ok(Some(WebSurfaceFrame::Native(NativeFrame::MetalTextureRef(
+            frame,
+        ))))
     }
 }
-

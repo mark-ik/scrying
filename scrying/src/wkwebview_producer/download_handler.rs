@@ -22,13 +22,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use objc2::rc::Retained;
 use objc2::AnyThread;
-use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
+use objc2::rc::Retained;
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_foundation::{
-    MainThreadMarker, NSData, NSError, NSObject, NSObjectProtocol, NSString,
+    MainThreadMarker, NSData, NSError, NSObject, NSObjectProtocol, NSString, NSURL,
     NSURLAuthenticationChallenge, NSURLCredential, NSURLCredentialPersistence, NSURLResponse,
-    NSURLSessionAuthChallengeDisposition, NSURL,
+    NSURLSessionAuthChallengeDisposition,
 };
 use objc2_web_kit::{WKDownload, WKDownloadDelegate};
 
@@ -37,15 +37,14 @@ use crate::{
     NavigationEvent,
 };
 
-use super::nav_delegate::{read_protection_space, AuthHandlerFn, NavState};
+use super::nav_delegate::{AuthHandlerFn, NavState, read_protection_space};
 
 /// Host-registered destination handler. Called synchronously inside
 /// the WKDownload `decideDestination` callback. `None` falls back
 /// to the default `unique_destination(config.download_dir, ...)`
 /// policy.
-pub type DownloadHandlerFn = Box<
-    dyn Fn(DownloadDestinationRequest) -> DownloadDecision + Send + Sync + 'static,
->;
+pub type DownloadHandlerFn =
+    Box<dyn Fn(DownloadDestinationRequest) -> DownloadDecision + Send + Sync + 'static>;
 
 /// Throttling threshold for `DownloadProgress` events: don't emit
 /// more than one per 100ms per download.
@@ -232,10 +231,7 @@ define_class!(
                     // Use an empty placeholder path.
                     (PathBuf::new(), true)
                 }
-                None => (
-                    unique_destination(&ivars.download_dir, &suggested),
-                    false,
-                ),
+                None => (unique_destination(&ivars.download_dir, &suggested), false),
             };
 
             // Best-effort `mkdir -p` on the parent dir. Failure
@@ -251,10 +247,9 @@ define_class!(
             // SAFETY: `download` is a live `&WKDownload` from
             // Apple's callback; retaining is the standard way to
             // extend its lifetime past the callback.
-            let download_strong: Retained<WKDownload> = unsafe {
-                Retained::retain(NonNull::from(download).as_ptr())
-            }
-            .expect("Retained::retain on WKDownload returned None");
+            let download_strong: Retained<WKDownload> =
+                unsafe { Retained::retain(NonNull::from(download).as_ptr()) }
+                    .expect("Retained::retain on WKDownload returned None");
             let pointer_key = Retained::as_ptr(&download_strong) as usize;
 
             if let Ok(mut registry) = ivars.registry.lock() {
@@ -273,9 +268,7 @@ define_class!(
                 );
             }
 
-            if !cancelled_by_host
-                && let Ok(mut state) = ivars.state.lock()
-            {
+            if !cancelled_by_host && let Ok(mut state) = ivars.state.lock() {
                 state.events.push_back(NavigationEvent::DownloadStarted {
                     id,
                     url,
@@ -294,8 +287,7 @@ define_class!(
             if cancelled_by_host {
                 completion_handler.call((std::ptr::null_mut(),));
             } else {
-                let path_ns =
-                    NSString::from_str(&destination_path_for_handoff(ivars, id));
+                let path_ns = NSString::from_str(&destination_path_for_handoff(ivars, id));
                 let file_url = NSURL::fileURLWithPath(&path_ns);
                 completion_handler.call((Retained::as_ptr(&file_url) as *mut _,));
             }
@@ -367,14 +359,15 @@ define_class!(
             // see a clean "complete" tick before the
             // `DownloadFinished` lands.
             if let Ok(meta) = std::fs::metadata(&destination_path)
-                && let Ok(mut state) = ivars.state.lock() {
-                    let bytes_written = meta.len();
-                    state.events.push_back(NavigationEvent::DownloadProgress {
-                        id,
-                        bytes_written,
-                        total_bytes_expected: total_bytes,
-                    });
-                }
+                && let Ok(mut state) = ivars.state.lock()
+            {
+                let bytes_written = meta.len();
+                state.events.push_back(NavigationEvent::DownloadProgress {
+                    id,
+                    bytes_written,
+                    total_bytes_expected: total_bytes,
+                });
+            }
             if let Ok(mut state) = ivars.state.lock() {
                 state.events.push_back(NavigationEvent::DownloadFinished {
                     id,
@@ -385,12 +378,7 @@ define_class!(
         }
 
         #[unsafe(method(download:didFailWithError:resumeData:))]
-        fn did_fail(
-            &self,
-            download: &WKDownload,
-            error: &NSError,
-            resume_data: Option<&NSData>,
-        ) {
+        fn did_fail(&self, download: &WKDownload, error: &NSError, resume_data: Option<&NSData>) {
             let ivars = self.ivars();
             let pointer_key = download as *const WKDownload as usize;
 
@@ -402,8 +390,7 @@ define_class!(
                     Ok(g) => g,
                     Err(_) => return,
                 };
-                let Some(&id) = registry.by_pointer.remove(&pointer_key).as_ref()
-                else {
+                let Some(&id) = registry.by_pointer.remove(&pointer_key).as_ref() else {
                     return;
                 };
                 registry.by_id.remove(&id)
@@ -471,8 +458,7 @@ define_class!(
                 Some(ps) => {
                     let host = ps.host().to_string();
                     let auth_method = ps.authenticationMethod().to_string();
-                    let realm =
-                        ps.realm().map(|r| r.to_string()).unwrap_or_default();
+                    let realm = ps.realm().map(|r| r.to_string()).unwrap_or_default();
                     (host, auth_method, realm)
                 }
                 None => (String::new(), String::new(), String::new()),

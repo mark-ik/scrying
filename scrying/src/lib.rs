@@ -21,7 +21,8 @@ pub mod webview2_composition_producer;
 
 #[cfg(target_os = "windows")]
 pub use webview2_composition_producer::{
-    CaptureMetrics, WebView2CompositionConfig as PlatformWebSurfaceConfig,
+    CaptureMetrics, CompositionRoot as PlatformCompositionRoot,
+    WebView2CompositionConfig as PlatformWebSurfaceConfig,
     WebView2CompositionProducer as PlatformWebSurfaceProducer,
 };
 
@@ -223,7 +224,7 @@ fn probe_webview2(host: Option<&HostWgpuContext>) -> WebSurfaceCapabilities {
         native_child_overlay: CapabilityStatus::Supported,
         cpu_snapshot: CapabilityStatus::Supported,
         supported_frames: vec![NativeFrameKind::Dx12SharedTexture],
-        reason: "Windows target path is WebView2 CompositionController visual capture into a D3D texture, then Dx12SharedTexture import.",
+        reason: "Windows target path is WebView2 CompositionController visual capture into a D3D texture, then Dx12SharedTexture import. Pure visual hosting uses WebView2 CDP Input for keyboard/text; native OS IME ownership remains host-driven.",
     }
 }
 
@@ -296,6 +297,132 @@ impl UrlSchemeResponse {
 /// `WebResourceRequested` event.
 pub type UrlSchemeHandlerFn =
     std::sync::Arc<dyn Fn(&str) -> UrlSchemeResponse + Send + Sync + 'static>;
+
+/// Win32 physical-key metadata reported by WebView2 for an accelerator event.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PhysicalKeyStatus {
+    pub repeat_count: u32,
+    pub scan_code: u32,
+    pub is_extended_key: bool,
+    pub is_menu_key_down: bool,
+    pub was_key_down: bool,
+    pub is_key_released: bool,
+}
+
+/// Host-observable WebView2 accelerator key event.
+///
+/// This is emitted before WebView2's browser accelerator handling and DOM
+/// propagation. The producer only observes and forwards the event; it does not
+/// mark keys handled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AcceleratorKeyEvent {
+    pub kind: KeyEventKind,
+    pub is_system_key: bool,
+    pub virtual_key_code: u32,
+    pub key_event_lparam: i32,
+    pub physical_key_status: PhysicalKeyStatus,
+    pub browser_accelerator_key_enabled: Option<bool>,
+}
+
+/// CSS-pixel rectangle reported by a system webview for text input UI.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TextInputRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Focused editable state reported by the system webview.
+///
+/// Rect coordinates are CSS pixels relative to the webview viewport. Hosts that
+/// own native IME should map them through the producer placement and DPI scale
+/// before calling windowing APIs such as winit's `set_ime_cursor_area`.
+///
+/// Raw DOM strings (`input_type`, `input_mode`, `autocomplete`) are preserved
+/// for richer hosts (TSF text stores, future TextInputClient). Thin hosts
+/// that only need a coarse IME hint should call [`TextInputState::purpose`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextInputState {
+    pub element_kind: String,
+    pub input_type: String,
+    pub input_mode: String,
+    pub autocomplete: String,
+    pub is_multiline: bool,
+    pub is_password: bool,
+    pub selection_start: u32,
+    pub selection_end: u32,
+    pub caret_rect: TextInputRect,
+}
+
+/// Coarse classification of a focused editable, derived from
+/// [`TextInputState`] for hosts whose windowing API exposes only a small
+/// "input purpose" surface (e.g. winit's `ImePurpose`).
+///
+/// Richer hosts should consult the raw `input_type` / `input_mode` /
+/// `autocomplete` fields directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputPurpose {
+    /// Plain text — default IME treatment.
+    Text,
+    /// Search field — single-line, free text, search-shaped UX hints.
+    Search,
+    /// Email address — host may surface an email-shaped soft keyboard.
+    Email,
+    /// URL — host may surface a URL-shaped soft keyboard.
+    Url,
+    /// Telephone number — host may surface a dial-pad soft keyboard.
+    Tel,
+    /// Integer-only input (`inputmode="numeric"`).
+    Numeric,
+    /// Decimal input (`inputmode="decimal"` or `input type="number"`).
+    Decimal,
+    /// Password-like field. Today the WebView2 producer suppresses these at
+    /// the document bridge before emitting state, so this variant is reserved
+    /// for future producers (e.g. TSF) that surface password focus.
+    Password,
+    /// One-time code / SMS code (`autocomplete="one-time-code"`). Also
+    /// suppressed at the document bridge today.
+    OneTimeCode,
+    /// Author explicitly asked for no software keyboard (`inputmode="none"`).
+    /// Hosts should refrain from enabling native IME.
+    Disabled,
+}
+
+impl TextInputState {
+    /// Derive the coarse [`InputPurpose`] for this state.
+    ///
+    /// Precedence: `inputmode` (explicit author signal) > `input_type` >
+    /// default `Text`. Password and one-time-code signals win over both.
+    pub fn purpose(&self) -> InputPurpose {
+        let autocomplete = self.autocomplete.as_str();
+        if self.is_password || autocomplete.contains("password") {
+            return InputPurpose::Password;
+        }
+        if autocomplete == "one-time-code" {
+            return InputPurpose::OneTimeCode;
+        }
+        match self.input_mode.as_str() {
+            "none" => return InputPurpose::Disabled,
+            "tel" => return InputPurpose::Tel,
+            "email" => return InputPurpose::Email,
+            "url" => return InputPurpose::Url,
+            "search" => return InputPurpose::Search,
+            "numeric" => return InputPurpose::Numeric,
+            "decimal" => return InputPurpose::Decimal,
+            "text" => return InputPurpose::Text,
+            _ => {}
+        }
+        match self.input_type.as_str() {
+            "search" => InputPurpose::Search,
+            "email" => InputPurpose::Email,
+            "url" => InputPurpose::Url,
+            "tel" => InputPurpose::Tel,
+            "number" => InputPurpose::Decimal,
+            _ => InputPurpose::Text,
+        }
+    }
+}
 
 /// Lifecycle / state event emitted by the underlying webview.
 ///
@@ -483,6 +610,16 @@ pub enum NavigationEvent {
         link_url: Option<String>,
         image_url: Option<String>,
     },
+    /// WebView2 observed a browser accelerator key before its browser-feature
+    /// handling and DOM propagation stages.
+    AcceleratorKeyPressed { event: AcceleratorKeyEvent },
+    /// A DOM editable element gained focus and should receive native text input.
+    TextInputFocused { state: TextInputState },
+    /// The focused DOM editable element's selection, caret rect, or input
+    /// metadata changed.
+    TextInputChanged { state: TextInputState },
+    /// DOM focus left the editable element Scrying was tracking.
+    TextInputBlurred,
 }
 
 /// Opaque per-producer identifier for a download. Issued when

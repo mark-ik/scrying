@@ -60,15 +60,21 @@ pub(super) fn synthesize_mouse_event(
     let window_number = window.windowNumber();
 
     let (event_type, target, click_count, button_number, pressure) = match event.kind {
-        MouseEventKind::LeftButtonDown => {
-            (NSEventType::LeftMouseDown, MouseTarget::MouseDown, 1, 0, 1.0)
-        }
-        MouseEventKind::LeftButtonUp => {
-            (NSEventType::LeftMouseUp, MouseTarget::MouseUp, 1, 0, 0.0)
-        }
-        MouseEventKind::LeftButtonDoubleClick => {
-            (NSEventType::LeftMouseDown, MouseTarget::MouseDown, 2, 0, 1.0)
-        }
+        MouseEventKind::LeftButtonDown => (
+            NSEventType::LeftMouseDown,
+            MouseTarget::MouseDown,
+            1,
+            0,
+            1.0,
+        ),
+        MouseEventKind::LeftButtonUp => (NSEventType::LeftMouseUp, MouseTarget::MouseUp, 1, 0, 0.0),
+        MouseEventKind::LeftButtonDoubleClick => (
+            NSEventType::LeftMouseDown,
+            MouseTarget::MouseDown,
+            2,
+            0,
+            1.0,
+        ),
         MouseEventKind::RightButtonDown => (
             NSEventType::RightMouseDown,
             MouseTarget::RightMouseDown,
@@ -164,9 +170,13 @@ pub(super) fn synthesize_mouse_event(
                 (NSEventType::MouseMoved, MouseTarget::MouseMoved, 0, 0, 0.0)
             }
         }
-        MouseEventKind::Leave => {
-            (NSEventType::MouseExited, MouseTarget::MouseExited, 0, 0, 0.0)
-        }
+        MouseEventKind::Leave => (
+            NSEventType::MouseExited,
+            MouseTarget::MouseExited,
+            0,
+            0,
+            0.0,
+        ),
         MouseEventKind::Wheel | MouseEventKind::HorizontalWheel => {
             // Scroll wheel events have no `NSEvent` factory — build a
             // CGEvent and round-trip through `eventWithCGEvent:`.
@@ -262,9 +272,7 @@ pub(super) fn synthesize_scroll_wheel_event(
         0,
     )
     .ok_or_else(|| {
-        WebSurfaceError::Platform(
-            "CGEventCreateScrollWheelEvent2 returned nil".into(),
-        )
+        WebSurfaceError::Platform("CGEventCreateScrollWheelEvent2 returned nil".into())
     })?;
 
     // Compute the event location in CGEvent's coordinate system:
@@ -317,9 +325,7 @@ pub(super) fn synthesize_scroll_wheel_event(
     })
 }
 
-pub(super) fn modifier_flags_from_virtual_keys(
-    keys: MouseVirtualKeys,
-) -> NSEventModifierFlags {
+pub(super) fn modifier_flags_from_virtual_keys(keys: MouseVirtualKeys) -> NSEventModifierFlags {
     let mut flags = NSEventModifierFlags::empty();
     if keys.shift {
         flags |= NSEventModifierFlags::Shift;

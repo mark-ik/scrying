@@ -46,6 +46,9 @@ impl Drop for WebView2CompositionProducer {
                 let _ = webview11.remove_ContextMenuRequested(self.context_menu_requested_token);
             }
             let _ = self
+                .controller
+                .remove_AcceleratorKeyPressed(self.accelerator_key_pressed_token);
+            let _ = self
                 .composition_controller
                 .remove_CursorChanged(self.cursor_changed_token);
             if let Ok(mut registry) = self.download_registry.lock() {
@@ -59,6 +62,11 @@ impl Drop for WebView2CompositionProducer {
                 }
             }
             let _ = self.controller.Close();
+        }
+        // Detach this pane from the shared root so a dropped producer doesn't
+        // leave a stale visual behind for the other panes on the same HWND.
+        if let Ok(children) = self.composition_root.root_visual.Children() {
+            let _ = children.Remove(&self.pane_container);
         }
     }
 }

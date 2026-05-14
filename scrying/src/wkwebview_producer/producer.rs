@@ -11,24 +11,22 @@ use std::sync::{Arc, Mutex};
 
 use block2::RcBlock;
 use dpi::PhysicalSize;
+use objc2::MainThreadOnly;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::MainThreadOnly;
 use objc2_app_kit::{NSImage, NSView};
+use objc2_foundation::NSKeyValueObservingOptions;
 use objc2_foundation::{
-    ns_string, MainThreadMarker, NSNotification, NSNotificationCenter,
-    NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSSize, NSString,
+    MainThreadMarker, NSNotification, NSNotificationCenter, NSObjectNSKeyValueObserverRegistration,
+    NSObjectProtocol, NSSize, NSString, ns_string,
 };
 use objc2_web_kit::{
-    WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration,
-    WKWebsiteDataStore,
+    WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
 };
-use objc2_foundation::NSKeyValueObservingOptions;
 
 use crate::native_frame;
 use crate::{
-    CursorShape, SystemWebviewBackend, WebSurfaceMode, WebSurfaceCapabilities,
-    WebSurfaceError,
+    CursorShape, SystemWebviewBackend, WebSurfaceCapabilities, WebSurfaceError, WebSurfaceMode,
 };
 
 use super::capture::{CaptureState, PendingCaptureSlot};
@@ -49,10 +47,10 @@ use super::nav_delegate::{AuthHandlerFn, NavDelegate, NavState};
 pub type CursorHandlerFn = Box<dyn Fn(crate::CursorShape) + Send + Sync + 'static>;
 use super::scheme_handler::{SchemeHandler, UrlSchemeHandlerFn};
 use super::script_message::{
-    ContextMenuMessageHandler, DropMessageHandler, MediaCaptureMessageHandler,
-    ScriptMessageHandler, CONTEXT_MENU_HANDLER_NAME, CONTEXT_MENU_USER_SCRIPT,
-    DROP_HANDLER_NAME, DROP_USER_SCRIPT, HOST_BRIDGE_HANDLER_NAME, HOST_BRIDGE_USER_SCRIPT,
-    MEDIA_CAPTURE_HANDLER_NAME, MEDIA_CAPTURE_USER_SCRIPT,
+    CONTEXT_MENU_HANDLER_NAME, CONTEXT_MENU_USER_SCRIPT, ContextMenuMessageHandler,
+    DROP_HANDLER_NAME, DROP_USER_SCRIPT, DropMessageHandler, HOST_BRIDGE_HANDLER_NAME,
+    HOST_BRIDGE_USER_SCRIPT, MEDIA_CAPTURE_HANDLER_NAME, MEDIA_CAPTURE_USER_SCRIPT,
+    MediaCaptureMessageHandler, ScriptMessageHandler,
 };
 use super::title_observer::TitleObserver;
 use super::ui_delegate::{PermissionHandlerFn, UiDelegate};
@@ -266,14 +264,14 @@ impl WkWebViewProducer {
         ))?;
 
         let parent_view: Retained<NSView> = {
-            let ptr = NonNull::new(parent_view as *mut NSView).ok_or(
-                WebSurfaceError::Platform("parent_view pointer was null".into()),
-            )?;
+            let ptr = NonNull::new(parent_view as *mut NSView).ok_or(WebSurfaceError::Platform(
+                "parent_view pointer was null".into(),
+            ))?;
             // SAFETY: caller-asserted: parent_view is a valid NSView*
             // that outlives this call.
-            unsafe { Retained::retain(ptr.as_ptr()) }.ok_or(
-                WebSurfaceError::Platform("failed to retain parent NSView".into()),
-            )?
+            unsafe { Retained::retain(ptr.as_ptr()) }.ok_or(WebSurfaceError::Platform(
+                "failed to retain parent NSView".into(),
+            ))?
         };
 
         let backing_scale = backing_scale_for(&parent_view);
@@ -295,9 +293,8 @@ impl WkWebViewProducer {
             }
         } else if !config.data_dir.as_os_str().is_empty() {
             let identifier = profile_uuid_for_path(&config.data_dir, mtm);
-            let data_store = unsafe {
-                WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm)
-            };
+            let data_store =
+                unsafe { WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm) };
             unsafe {
                 webview_config.setWebsiteDataStore(&data_store);
             }
@@ -329,12 +326,9 @@ impl WkWebViewProducer {
         // when the WKWebView is initialized.
         let nav_state = Arc::new(Mutex::new(NavState::default()));
         let web_messages: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
-        let script_message_handler =
-            ScriptMessageHandler::new(mtm, Arc::clone(&web_messages));
-        let context_menu_handler =
-            ContextMenuMessageHandler::new(mtm, Arc::clone(&nav_state));
-        let media_capture_handler =
-            MediaCaptureMessageHandler::new(mtm, Arc::clone(&nav_state));
+        let script_message_handler = ScriptMessageHandler::new(mtm, Arc::clone(&web_messages));
+        let context_menu_handler = ContextMenuMessageHandler::new(mtm, Arc::clone(&nav_state));
+        let media_capture_handler = MediaCaptureMessageHandler::new(mtm, Arc::clone(&nav_state));
         let drop_handler = DropMessageHandler::new(mtm, Arc::clone(&nav_state));
         let bridge_handler_name = NSString::from_str(HOST_BRIDGE_HANDLER_NAME);
         let bridge_user_script_source = NSString::from_str(HOST_BRIDGE_USER_SCRIPT);
@@ -429,13 +423,12 @@ impl WkWebViewProducer {
 }})();"#
                 );
                 let source_ns = NSString::from_str(&source);
-                let spellcheck_script =
-                    WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
-                        WKUserScript::alloc(mtm),
-                        &source_ns,
-                        WKUserScriptInjectionTime::AtDocumentStart,
-                        false,
-                    );
+                let spellcheck_script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                    WKUserScript::alloc(mtm),
+                    &source_ns,
+                    WKUserScriptInjectionTime::AtDocumentStart,
+                    false,
+                );
                 user_content_controller.addUserScript(&spellcheck_script);
             }
         }
@@ -448,8 +441,7 @@ impl WkWebViewProducer {
         let download_id_allocator = Arc::new(DownloadIdAllocator::new());
         let download_host_handler: Arc<Mutex<Option<DownloadHandlerFn>>> =
             Arc::new(Mutex::new(None));
-        let cursor_handler: Arc<Mutex<Option<CursorHandlerFn>>> =
-            Arc::new(Mutex::new(None));
+        let cursor_handler: Arc<Mutex<Option<CursorHandlerFn>>> = Arc::new(Mutex::new(None));
         // Allocated before `DownloadHandler::new` so the same handler
         // can route both page-level and download-level auth
         // challenges. Hosts that need to differentiate can branch
@@ -470,15 +462,11 @@ impl WkWebViewProducer {
             download_handler.clone(),
             Arc::clone(&auth_handler),
         );
-        let title_observer =
-            TitleObserver::new(mtm, Arc::clone(&nav_state), webview.clone());
+        let title_observer = TitleObserver::new(mtm, Arc::clone(&nav_state), webview.clone());
         let permission_handler: Arc<Mutex<Option<PermissionHandlerFn>>> =
             Arc::new(Mutex::new(None));
-        let ui_delegate = UiDelegate::new(
-            mtm,
-            Arc::clone(&nav_state),
-            Arc::clone(&permission_handler),
-        );
+        let ui_delegate =
+            UiDelegate::new(mtm, Arc::clone(&nav_state), Arc::clone(&permission_handler));
         unsafe {
             webview.setNavigationDelegate(Some(ProtocolObject::from_ref(&*nav_delegate)));
             webview.setUIDelegate(Some(ProtocolObject::from_ref(&*ui_delegate)));
@@ -509,10 +497,7 @@ impl WkWebViewProducer {
             Arc::clone(&cookie_change_handler),
         );
         unsafe {
-            let store = webview
-                .configuration()
-                .websiteDataStore()
-                .httpCookieStore();
+            let store = webview.configuration().websiteDataStore().httpCookieStore();
             store.addObserver(ProtocolObject::from_ref(&*cookie_observer));
         }
 
@@ -615,9 +600,7 @@ impl WkWebViewProducer {
         // `setFrameSize` and `stream.updateConfiguration:`.
         let size = self.config.size;
         if let Err(error) = self.resize_internal(size) {
-            eprintln!(
-                "scrying: flush_pending_dpi_change: resize failed: {error}"
-            );
+            eprintln!("scrying: flush_pending_dpi_change: resize failed: {error}");
         }
     }
 
@@ -737,9 +720,7 @@ impl WkWebViewProducer {
             let state = self.nav_state.lock().ok()?;
             state.result.clone()
         })
-        .map_err(|_| {
-            WebSurfaceError::Platform(format!("{op_name} timed out after {timeout:?}"))
-        })?
+        .map_err(|_| WebSurfaceError::Platform(format!("{op_name} timed out after {timeout:?}")))?
         .map_err(WebSurfaceError::Platform)
     }
 
@@ -803,4 +784,3 @@ impl Drop for WkWebViewProducer {
         let _ = self.mtm;
     }
 }
-

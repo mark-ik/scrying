@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_foundation::{
     MainThreadMarker, NSDictionary, NSKeyValueChangeKey, NSObject, NSObjectProtocol, NSString,
 };
@@ -83,8 +83,7 @@ impl TitleObserver {
         nav_state: Arc<Mutex<NavState>>,
         webview: Retained<WKWebView>,
     ) -> Retained<Self> {
-        let this =
-            Self::alloc(mtm).set_ivars(TitleObserverIvars { nav_state, webview });
+        let this = Self::alloc(mtm).set_ivars(TitleObserverIvars { nav_state, webview });
         unsafe { msg_send![super(this), init] }
     }
 }

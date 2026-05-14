@@ -1,8 +1,64 @@
 use super::*;
 
+/// Shared per-HWND composition resources. Windows allows exactly one
+/// `DesktopWindowTarget` per HWND — a second `CreateDesktopWindowTarget` on the
+/// same HWND fails with `DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED`. To host
+/// several WebViews under one OS window, attach multiple producers to a single
+/// `CompositionRoot` via [`WebView2CompositionProducer::new_attached`] rather
+/// than giving each producer its own target.
+pub struct CompositionRoot {
+    pub(super) parent_hwnd: HWND,
+    pub(super) compositor: Compositor,
+    /// Held to keep the per-HWND target alive for the lifetime of every
+    /// attached producer; not otherwise read after construction.
+    #[allow(dead_code)]
+    desktop_target: windows::UI::Composition::Desktop::DesktopWindowTarget,
+    pub(super) root_visual: ContainerVisual,
+}
+
+impl CompositionRoot {
+    /// Create the shared composition tree for `parent_hwnd` and bind it to the
+    /// HWND's (single) `DesktopWindowTarget`.
+    ///
+    /// # Safety
+    ///
+    /// `parent_hwnd` must be a live top-level HWND for the lifetime of the
+    /// returned root and every producer attached to it.
+    pub unsafe fn new(
+        parent_hwnd: *mut std::ffi::c_void,
+    ) -> Result<Arc<Self>, WebSurfaceError> {
+        if parent_hwnd.is_null() {
+            return Err(WebSurfaceError::Platform(
+                "parent HWND was null".to_string(),
+            ));
+        }
+        let parent_hwnd = HWND(parent_hwnd);
+        let compositor = Compositor::new().map_err(platform("Compositor::new"))?;
+        let desktop_interop: ICompositorDesktopInterop = compositor
+            .cast()
+            .map_err(platform("Compositor cast to ICompositorDesktopInterop"))?;
+        let desktop_target =
+            unsafe { desktop_interop.CreateDesktopWindowTarget(parent_hwnd, false) }
+                .map_err(platform("CreateDesktopWindowTarget"))?;
+        let root_visual = compositor
+            .CreateContainerVisual()
+            .map_err(platform("CreateContainerVisual (root)"))?;
+        desktop_target
+            .SetRoot(&root_visual)
+            .map_err(platform("DesktopWindowTarget::SetRoot"))?;
+        Ok(Arc::new(Self {
+            parent_hwnd,
+            compositor,
+            desktop_target,
+            root_visual,
+        }))
+    }
+}
+
 impl WebView2CompositionProducer {
-    /// Build the composition tree, the WebView2 controller, and prepare for
-    /// capture. Capture is not started until the first `acquire_frame` call.
+    /// Build a single-pane producer: create a private [`CompositionRoot`] for
+    /// `parent_hwnd`, then attach one WebView to it. Capture is not started
+    /// until the first `acquire_frame` call.
     ///
     /// # Safety
     ///
@@ -12,11 +68,23 @@ impl WebView2CompositionProducer {
         parent_hwnd: *mut std::ffi::c_void,
         config: WebView2CompositionConfig,
     ) -> Result<Self, WebSurfaceError> {
-        if parent_hwnd.is_null() {
-            return Err(WebSurfaceError::Platform(
-                "parent HWND was null".to_string(),
-            ));
-        }
+        let composition_root = unsafe { CompositionRoot::new(parent_hwnd)? };
+        unsafe { Self::new_attached(&composition_root, config) }
+    }
+
+    /// Attach a WebView to an existing [`CompositionRoot`] so several producers
+    /// can share one HWND's `DesktopWindowTarget`. Each producer gets its own
+    /// pane container visual (positioned by `config.offset`), WebView2
+    /// environment, controller, and capture pipeline.
+    ///
+    /// # Safety
+    ///
+    /// The `CompositionRoot`'s parent HWND must remain a live top-level HWND
+    /// for the lifetime of the returned producer.
+    pub unsafe fn new_attached(
+        composition_root: &Arc<CompositionRoot>,
+        config: WebView2CompositionConfig,
+    ) -> Result<Self, WebSurfaceError> {
         if config.size.width == 0 || config.size.height == 0 {
             return Err(WebSurfaceError::Platform(format!(
                 "WebView2 producer size must be non-zero, got {}x{}",
@@ -24,32 +92,30 @@ impl WebView2CompositionProducer {
             )));
         }
 
-        let parent_hwnd = HWND(parent_hwnd);
-        let compositor = Compositor::new().map_err(platform("Compositor::new"))?;
-        let desktop_interop: ICompositorDesktopInterop = compositor
-            .cast()
-            .map_err(platform("Compositor cast to ICompositorDesktopInterop"))?;
-        let desktop_target =
-            unsafe { desktop_interop.CreateDesktopWindowTarget(parent_hwnd, false) }
-                .map_err(platform("CreateDesktopWindowTarget"))?;
+        let parent_hwnd = composition_root.parent_hwnd;
+        let compositor = &composition_root.compositor;
 
-        let root_visual = compositor
+        // Per-pane container: a child of the shared root carrying this pane's
+        // offset and size. The diagnostic sprite and the webview visual live
+        // inside it, so `set_offset` / `resize` move/resize one pane without
+        // disturbing siblings.
+        let pane_container = compositor
             .CreateContainerVisual()
-            .map_err(platform("CreateContainerVisual (root)"))?;
-        root_visual
+            .map_err(platform("CreateContainerVisual (pane)"))?;
+        pane_container
             .SetOffset(Vector3 {
                 X: config.offset.0,
                 Y: config.offset.1,
                 Z: 0.0,
             })
-            .map_err(platform("ContainerVisual::SetOffset"))?;
+            .map_err(platform("ContainerVisual::SetOffset (pane)"))?;
         let visual_size = Vector2 {
             X: config.size.width as f32,
             Y: config.size.height as f32,
         };
-        root_visual
+        pane_container
             .SetSize(visual_size)
-            .map_err(platform("ContainerVisual::SetSize (root)"))?;
+            .map_err(platform("ContainerVisual::SetSize (pane)"))?;
 
         if let Some((r, g, b)) = config.diagnostic_backdrop {
             let sprite = compositor
@@ -69,9 +135,9 @@ impl WebView2CompositionProducer {
             sprite
                 .SetBrush(&brush)
                 .map_err(platform("SpriteVisual::SetBrush"))?;
-            root_visual
+            pane_container
                 .Children()
-                .map_err(platform("root.Children()"))?
+                .map_err(platform("pane.Children()"))?
                 .InsertAtBottom(&sprite)
                 .map_err(platform("Children::InsertAtBottom"))?;
         }
@@ -82,14 +148,17 @@ impl WebView2CompositionProducer {
         webview_visual
             .SetSize(visual_size)
             .map_err(platform("ContainerVisual::SetSize (webview)"))?;
-        root_visual
+        pane_container
             .Children()
-            .map_err(platform("root.Children() (webview)"))?
+            .map_err(platform("pane.Children() (webview)"))?
             .InsertAtTop(&webview_visual)
             .map_err(platform("Children::InsertAtTop (webview)"))?;
-        desktop_target
-            .SetRoot(&root_visual)
-            .map_err(platform("DesktopWindowTarget::SetRoot"))?;
+        composition_root
+            .root_visual
+            .Children()
+            .map_err(platform("root.Children() (pane)"))?
+            .InsertAtTop(&pane_container)
+            .map_err(platform("Children::InsertAtTop (pane)"))?;
 
         let environment = create_environment(&config.user_data_dir)?;
         let composition_controller =
@@ -144,6 +213,7 @@ impl WebView2CompositionProducer {
         browser::install_context_menu_bridge(&webview)?;
         browser::install_drop_detected_bridge(&webview)?;
         browser::install_media_capture_bridge(&webview)?;
+        browser::install_text_input_bridge(&webview)?;
 
         let (
             nav_starting_token,
@@ -164,6 +234,8 @@ impl WebView2CompositionProducer {
             nav_event_queue.clone(),
             default_context_menus_enabled.clone(),
         )?;
+        let accelerator_key_pressed_token =
+            input::register_accelerator_key_pressed_handler(&controller, nav_event_queue.clone())?;
         let cursor_changed_token =
             input::register_cursor_changed_handler(&composition_controller, cursor_queue.clone())?;
         let download_starting_token = downloads::register_download_starting_handler(
@@ -194,9 +266,8 @@ impl WebView2CompositionProducer {
             parent_hwnd,
             size: config.size,
             generation: 0,
-            compositor,
-            desktop_target,
-            root_visual,
+            composition_root: composition_root.clone(),
+            pane_container,
             webview_visual,
             environment,
             composition_controller,
@@ -235,6 +306,7 @@ impl WebView2CompositionProducer {
             web_message_token,
             web_resource_response_received_token,
             web_resource_requested_token: None,
+            accelerator_key_pressed_token,
             cursor_changed_token,
         })
     }

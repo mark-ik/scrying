@@ -12,7 +12,7 @@ use dispatch2::{DispatchQueue, DispatchRetained};
 use dpi::PhysicalSize;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{define_class, msg_send, AnyThread, DefinedClass};
+use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_core_foundation::CFRetained;
 use objc2_core_media::CMSampleBuffer;
 use objc2_core_video::kCVPixelFormatType_32BGRA;
@@ -234,10 +234,7 @@ pub(super) struct InProgressCaptureState {
 /// the next [`super::WkWebViewProducer::capture_status`] poll will
 /// surface the prior state (or `Failed` if a poisoned lock makes
 /// things inconsistent).
-pub(super) fn write_pending(
-    pending: &Arc<Mutex<PendingCaptureSlot>>,
-    state: PendingCaptureSlot,
-) {
+pub(super) fn write_pending(pending: &Arc<Mutex<PendingCaptureSlot>>, state: PendingCaptureSlot) {
     if let Ok(mut s) = pending.lock() {
         *s = state;
     }
@@ -277,7 +274,8 @@ pub(super) struct CaptureState {
     /// is a raw pointer; the consumer's [`crate::native_frame`]
     /// importer re-retains the object during import. Replaced on
     /// each successful `try_acquire_frame`.
-    pub(super) last_emitted: Option<Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLTexture>>>,
+    pub(super) last_emitted:
+        Option<Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLTexture>>>,
     pub(super) generation: AtomicU64,
     /// `MTLSharedEvent` allocated against `metal_device` and
     /// signalled inside `try_acquire_frame`'s per-frame blit
@@ -355,9 +353,7 @@ pub(super) fn make_stream_configuration(
         // formats applied later in `try_acquire_frame`.
         let (cv_pixel_format, color_space_name) = match color_pipeline {
             crate::ColorPipeline::Srgb => (kCVPixelFormatType_32BGRA, kCGColorSpaceSRGB),
-            crate::ColorPipeline::DisplayP3 => {
-                (kCVPixelFormatType_32BGRA, kCGColorSpaceDisplayP3)
-            }
+            crate::ColorPipeline::DisplayP3 => (kCVPixelFormatType_32BGRA, kCGColorSpaceDisplayP3),
             crate::ColorPipeline::Hdr16f => (
                 // 16-bit float per channel, RGBA channel order
                 // (note: not BGRA). The consumer's
@@ -426,9 +422,7 @@ pub(super) fn wgpu_format_for(pipeline: crate::ColorPipeline) -> wgpu::TextureFo
 /// coordinates (and bleeding the title bar into the imported
 /// texture). At full frame size SCK doesn't scale, and our crop
 /// can pin the webview's region precisely.
-pub(super) fn host_window_pixel_size(
-    window: &objc2_app_kit::NSWindow,
-) -> PhysicalSize<u32> {
+pub(super) fn host_window_pixel_size(window: &objc2_app_kit::NSWindow) -> PhysicalSize<u32> {
     let scale = window.backingScaleFactor().max(1.0);
     let frame = window.frame();
     PhysicalSize::new(
@@ -459,16 +453,14 @@ pub(super) fn webview_window_rect(
     window: &objc2_app_kit::NSWindow,
 ) -> objc2_core_foundation::CGRect {
     let local_bounds = webview.bounds();
-    let window_pt_rect =
-        webview.convertRect_toView(local_bounds, None);
+    let window_pt_rect = webview.convertRect_toView(local_bounds, None);
     let frame_height = window.frame().size.height;
     let content_height = window
         .contentView()
         .map(|cv| cv.frame().size.height)
         .unwrap_or(frame_height);
     let chrome_height = (frame_height - content_height).max(0.0);
-    let y_in_content_top =
-        content_height - window_pt_rect.origin.y - window_pt_rect.size.height;
+    let y_in_content_top = content_height - window_pt_rect.origin.y - window_pt_rect.size.height;
     let y_in_frame_top = y_in_content_top + chrome_height;
     objc2_core_foundation::CGRect {
         origin: objc2_core_foundation::CGPoint {
@@ -504,10 +496,9 @@ impl WkWebViewProducer {
         // Walk back the advertised capability so a future
         // `start_capture` correctly re-flips it.
         self.capabilities.preferred_mode = WebSurfaceMode::NativeChildOverlay;
-        self.capabilities.imported_texture =
-            crate::native_frame::CapabilityStatus::Unsupported(
-                crate::native_frame::UnsupportedReason::PlatformNotImplemented,
-            );
+        self.capabilities.imported_texture = crate::native_frame::CapabilityStatus::Unsupported(
+            crate::native_frame::UnsupportedReason::PlatformNotImplemented,
+        );
         self.capabilities.reason =
             "WkWebViewProducer slice B: capture stopped; reverting to overlay surface.";
         if let Ok(mut p) = self.pending_capture.lock() {

@@ -21,8 +21,8 @@
 
 #![cfg(target_os = "macos")]
 
-use crate::native_frame::{ImportedTexture, InteropError, NativeFrame, SyncMechanism};
 use crate::native_frame::sync::InteropSynchronizer;
+use crate::native_frame::{ImportedTexture, InteropError, NativeFrame, SyncMechanism};
 
 /// Placeholder synchronizer that accepts both
 /// [`SyncMechanism::None`] and [`SyncMechanism::ExplicitMetalEvent`]

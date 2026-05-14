@@ -18,12 +18,12 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use objc2::rc::Retained;
-use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSString};
 use objc2_web_kit::{WKScriptMessage, WKScriptMessageHandler, WKUserContentController};
 
-use crate::NavigationEvent;
 use super::nav_delegate::NavState;
+use crate::NavigationEvent;
 
 /// JS bridge handler name. JS-side code reaches the host via
 /// `window.webkit.messageHandlers.<NAME>.postMessage(...)`. The shim
@@ -238,10 +238,7 @@ define_class!(
 );
 
 impl ContextMenuMessageHandler {
-    pub(super) fn new(
-        mtm: MainThreadMarker,
-        nav_state: Arc<Mutex<NavState>>,
-    ) -> Retained<Self> {
+    pub(super) fn new(mtm: MainThreadMarker, nav_state: Arc<Mutex<NavState>>) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(nav_state);
         // SAFETY: NSObject's `init` returns a valid initialized instance.
         unsafe { msg_send![super(this), init] }
@@ -359,10 +356,7 @@ define_class!(
 );
 
 impl MediaCaptureMessageHandler {
-    pub(super) fn new(
-        mtm: MainThreadMarker,
-        nav_state: Arc<Mutex<NavState>>,
-    ) -> Retained<Self> {
+    pub(super) fn new(mtm: MainThreadMarker, nav_state: Arc<Mutex<NavState>>) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(nav_state);
         // SAFETY: NSObject's `init` returns a valid initialized instance.
         unsafe { msg_send![super(this), init] }
@@ -474,10 +468,7 @@ define_class!(
 );
 
 impl DropMessageHandler {
-    pub(super) fn new(
-        mtm: MainThreadMarker,
-        nav_state: Arc<Mutex<NavState>>,
-    ) -> Retained<Self> {
+    pub(super) fn new(mtm: MainThreadMarker, nav_state: Arc<Mutex<NavState>>) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(nav_state);
         // SAFETY: NSObject's `init` returns a valid initialized instance.
         unsafe { msg_send![super(this), init] }

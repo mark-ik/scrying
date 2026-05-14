@@ -14,12 +14,12 @@ use objc2_foundation::{
 use crate::{
     CursorShape, DragInput, FocusReason, KeyEventKind, KeyboardInput, MouseEventKind, MouseInput,
     MouseVirtualKeys, NavigationEvent, PointerDevice, PointerEventKind, PointerInput,
-    WebSurfaceSettings, WebSurfaceCapabilities, WebSurfaceError, WebSurfaceFrame,
-    WebSurfaceProducer,
+    WebSurfaceCapabilities, WebSurfaceError, WebSurfaceFrame, WebSurfaceProducer,
+    WebSurfaceSettings,
 };
 
 use super::helpers::{js_string_literal, key_modifier_flags};
-use super::input::{synthesize_mouse_event, MouseTarget};
+use super::input::{MouseTarget, synthesize_mouse_event};
 use super::producer::WkWebViewProducer;
 
 impl WebSurfaceProducer for WkWebViewProducer {
@@ -87,9 +87,8 @@ impl WebSurfaceProducer for WkWebViewProducer {
         }
 
         let url_ns = NSString::from_str(url);
-        let ns_url = NSURL::URLWithString(&url_ns).ok_or_else(|| {
-            WebSurfaceError::Platform(format!("could not parse URL: {url}"))
-        })?;
+        let ns_url = NSURL::URLWithString(&url_ns)
+            .ok_or_else(|| WebSurfaceError::Platform(format!("could not parse URL: {url}")))?;
         let request = NSURLRequest::requestWithURL(&ns_url);
 
         self.reset_nav_result()?;
@@ -211,10 +210,7 @@ impl WebSurfaceProducer for WkWebViewProducer {
         Ok(())
     }
 
-    fn apply_settings(
-        &mut self,
-        settings: &WebSurfaceSettings,
-    ) -> Result<(), WebSurfaceError> {
+    fn apply_settings(&mut self, settings: &WebSurfaceSettings) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
             return Err(WebSurfaceError::Platform(
                 "apply_settings must be called on the main thread".into(),
@@ -362,8 +358,7 @@ impl WebSurfaceProducer for WkWebViewProducer {
         };
         let modifier_flags = key_modifier_flags(event.modifiers);
         let characters = NSString::from_str(&event.characters);
-        let characters_ignoring =
-            NSString::from_str(&event.characters_ignoring_modifiers);
+        let characters_ignoring = NSString::from_str(&event.characters_ignoring_modifiers);
 
         // For `flagsChanged:` AppKit ignores the characters fields and
         // relies on `keyCode` + `modifierFlags` — match that behavior.
@@ -500,9 +495,7 @@ impl WebSurfaceProducer for WkWebViewProducer {
         let _ = event.tilt;
 
         let kind = match event.kind {
-            PointerEventKind::Activate | PointerEventKind::Down => {
-                MouseEventKind::LeftButtonDown
-            }
+            PointerEventKind::Activate | PointerEventKind::Down => MouseEventKind::LeftButtonDown,
             PointerEventKind::Up => MouseEventKind::LeftButtonUp,
             PointerEventKind::Update | PointerEventKind::Enter => MouseEventKind::Move,
             PointerEventKind::Leave => MouseEventKind::Leave,
@@ -518,9 +511,7 @@ impl WebSurfaceProducer for WkWebViewProducer {
         let mut virtual_keys = MouseVirtualKeys::default();
         if matches!(
             event.kind,
-            PointerEventKind::Down
-                | PointerEventKind::Update
-                | PointerEventKind::Activate
+            PointerEventKind::Down | PointerEventKind::Update | PointerEventKind::Activate
         ) && event.device != PointerDevice::Mouse
         {
             virtual_keys.left_button = true;

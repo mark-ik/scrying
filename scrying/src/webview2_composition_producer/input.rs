@@ -202,7 +202,12 @@ impl WebView2CompositionProducer {
         }
     }
 
-    /// Forward one raw Win32 keyboard / IME message to the WebView2 parent HWND.
+    /// Post one raw Win32 keyboard / IME message to the WebView2 parent HWND.
+    ///
+    /// This is a diagnostic escape hatch, not a supported browser-grade input
+    /// route. Current WebView2 CompositionController runtime probes show that
+    /// posted `WM_KEY*`, `WM_CHAR`, and `WM_IME*` messages do not produce DOM
+    /// keyboard/text/IME input in the visual-hosted WebView.
     pub fn forward_keyboard_message(
         &self,
         message: u32,
@@ -217,24 +222,93 @@ impl WebView2CompositionProducer {
         self.post_keyboard_message(message, wparam, lparam)
     }
 
-    /// Best-effort portable keyboard bridge. For full IME fidelity on Windows,
-    /// prefer [`Self::forward_keyboard_message`] with the host's native Win32
-    /// message stream.
+    /// Forward a keyboard / modifier-state event through WebView2's public CDP
+    /// bridge.
+    ///
+    /// WebView2 exposes public mouse, pointer, drag, focus, and cursor APIs for
+    /// visual hosting, but not a CompositionController-specific keyboard API.
+    /// `Input.dispatchKeyEvent` is the public route that can deliver synthetic
+    /// keyboard DOM input to a visual-hosted WebView.
     pub fn send_keyboard_input(&self, event: KeyboardInput) -> Result<(), WebSurfaceError> {
-        let message = keyboard_message_for(&event);
-        let lparam = keyboard_lparam(&event);
-        self.post_keyboard_message(message, event.virtual_key_code as usize, lparam)?;
-
-        if event.kind == KeyEventKind::Down && !event.characters.is_empty() {
-            let char_message = if event.modifiers.alt {
-                WM_SYSCHAR
-            } else {
-                WM_CHAR
-            };
-            for unit in event.characters.encode_utf16() {
-                self.post_keyboard_message(char_message, unit as usize, lparam)?;
+        match event.kind {
+            KeyEventKind::Down => {
+                let key_down = cdp_dispatch_key_event_params("rawKeyDown", &event, None);
+                self.call_devtools_protocol_method_blocking(
+                    "Input.dispatchKeyEvent",
+                    &key_down,
+                    std::time::Duration::from_secs(2),
+                )?;
+                if !event.characters.is_empty() {
+                    let char_event =
+                        cdp_dispatch_key_event_params("char", &event, Some(&event.characters));
+                    self.call_devtools_protocol_method_blocking(
+                        "Input.dispatchKeyEvent",
+                        &char_event,
+                        std::time::Duration::from_secs(2),
+                    )?;
+                }
+            }
+            KeyEventKind::Up => {
+                let key_up = cdp_dispatch_key_event_params("keyUp", &event, None);
+                self.call_devtools_protocol_method_blocking(
+                    "Input.dispatchKeyEvent",
+                    &key_up,
+                    std::time::Duration::from_secs(2),
+                )?;
+            }
+            KeyEventKind::ModifiersChanged => {
+                let event_type = if modifier_is_down(event.virtual_key_code, event.modifiers) {
+                    "rawKeyDown"
+                } else {
+                    "keyUp"
+                };
+                let params = cdp_dispatch_key_event_params(event_type, &event, None);
+                self.call_devtools_protocol_method_blocking(
+                    "Input.dispatchKeyEvent",
+                    &params,
+                    std::time::Duration::from_secs(2),
+                )?;
             }
         }
+        Ok(())
+    }
+
+    /// Insert text through CDP `Input.insertText`.
+    ///
+    /// This is useful for host-controlled form fill and committed IME text.
+    /// It is not the same as handing WebView2 the OS IME/candidate UI.
+    pub fn insert_text(&self, text: &str) -> Result<(), WebSurfaceError> {
+        let params = format!(r#"{{"text":{}}}"#, json_string(text));
+        self.call_devtools_protocol_method_blocking(
+            "Input.insertText",
+            &params,
+            std::time::Duration::from_secs(2),
+        )?;
+        Ok(())
+    }
+
+    /// Set the current IME composition through CDP `Input.imeSetComposition`.
+    ///
+    /// Hosts that own IME state can use this to mirror marked/preedit text into
+    /// the page. WebView2 still does not provide native OS IME ownership for the
+    /// visual-hosted CompositionController path.
+    pub fn set_ime_composition(
+        &self,
+        text: &str,
+        selection_start: i32,
+        selection_end: i32,
+        replacement_start: i32,
+        replacement_end: i32,
+    ) -> Result<(), WebSurfaceError> {
+        let params = format!(
+            r#"{{"text":{},"selectionStart":{selection_start},"selectionEnd":{selection_end},"replacementStart":{replacement_start},"replacementEnd":{replacement_end}}}"#,
+            json_string(text)
+        );
+        self.call_devtools_protocol_method_blocking(
+            "Input.imeSetComposition",
+            &params,
+            std::time::Duration::from_secs(2),
+        )?;
         Ok(())
     }
 
@@ -385,43 +459,86 @@ fn focus_reason(reason: FocusReason) -> COREWEBVIEW2_MOVE_FOCUS_REASON {
     }
 }
 
-fn keyboard_message_for(event: &KeyboardInput) -> u32 {
-    match event.kind {
-        KeyEventKind::Down => {
-            if event.modifiers.alt {
-                WM_SYSKEYDOWN
-            } else {
-                WM_KEYDOWN
-            }
+fn cdp_dispatch_key_event_params(
+    event_type: &str,
+    event: &KeyboardInput,
+    text: Option<&str>,
+) -> String {
+    let (key, code) = cdp_key_identity(event);
+    let modifiers = cdp_modifiers(event.modifiers);
+    let mut params = format!(
+        r#"{{"type":{},"windowsVirtualKeyCode":{},"nativeVirtualKeyCode":{},"code":{},"key":{},"modifiers":{},"autoRepeat":{}"#,
+        json_string(event_type),
+        event.virtual_key_code,
+        event.virtual_key_code,
+        json_string(&code),
+        json_string(&key),
+        modifiers,
+        event.is_repeat
+    );
+    if let Some(text) = text {
+        params.push_str(&format!(
+            r#","text":{},"unmodifiedText":{}"#,
+            json_string(text),
+            json_string(&event.characters_ignoring_modifiers)
+        ));
+    }
+    params.push('}');
+    params
+}
+
+fn cdp_key_identity(event: &KeyboardInput) -> (String, String) {
+    match event.virtual_key_code {
+        0x30..=0x39 => {
+            let ch = char::from_u32(event.virtual_key_code).unwrap_or('0');
+            (ch.to_string(), format!("Digit{ch}"))
         }
-        KeyEventKind::Up => {
-            if event.modifiers.alt {
-                WM_SYSKEYUP
-            } else {
-                WM_KEYUP
-            }
+        0x41..=0x5A => {
+            let upper = char::from_u32(event.virtual_key_code).unwrap_or('A');
+            let key = event
+                .characters_ignoring_modifiers
+                .chars()
+                .next()
+                .map(|ch| ch.to_string())
+                .unwrap_or_else(|| upper.to_ascii_lowercase().to_string());
+            (key, format!("Key{upper}"))
         }
-        KeyEventKind::ModifiersChanged => {
-            if modifier_is_down(event.virtual_key_code, event.modifiers) {
-                WM_KEYDOWN
-            } else {
-                WM_KEYUP
-            }
-        }
+        0x10 | 0xA0 | 0xA1 => ("Shift".into(), "ShiftLeft".into()),
+        0x11 | 0xA2 | 0xA3 => ("Control".into(), "ControlLeft".into()),
+        0x12 | 0xA4 | 0xA5 => ("Alt".into(), "AltLeft".into()),
+        0x5B | 0x5C => ("Meta".into(), "MetaLeft".into()),
+        0x0D => ("Enter".into(), "Enter".into()),
+        0x08 => ("Backspace".into(), "Backspace".into()),
+        0x09 => ("Tab".into(), "Tab".into()),
+        0x1B => ("Escape".into(), "Escape".into()),
+        0x20 => (" ".into(), "Space".into()),
+        _ => (
+            event
+                .characters_ignoring_modifiers
+                .chars()
+                .next()
+                .map(|ch| ch.to_string())
+                .unwrap_or_else(|| format!("Unidentified")),
+            String::new(),
+        ),
     }
 }
 
-fn keyboard_lparam(event: &KeyboardInput) -> isize {
-    let repeat_count = 1isize;
-    let previous_down = match event.kind {
-        KeyEventKind::Down => event.is_repeat,
-        KeyEventKind::Up => true,
-        KeyEventKind::ModifiersChanged => {
-            !modifier_is_down(event.virtual_key_code, event.modifiers)
-        }
-    };
-    let transition_up = matches!(keyboard_message_for(event), WM_KEYUP | WM_SYSKEYUP);
-    repeat_count | ((previous_down as isize) << 30) | ((transition_up as isize) << 31)
+fn cdp_modifiers(modifiers: crate::KeyModifierFlags) -> u32 {
+    let mut bits = 0u32;
+    if modifiers.alt {
+        bits |= 1;
+    }
+    if modifiers.control {
+        bits |= 2;
+    }
+    if modifiers.meta {
+        bits |= 4;
+    }
+    if modifiers.shift {
+        bits |= 8;
+    }
+    bits
 }
 
 fn modifier_is_down(virtual_key_code: u32, modifiers: crate::KeyModifierFlags) -> bool {
@@ -433,6 +550,26 @@ fn modifier_is_down(virtual_key_code: u32, modifiers: crate::KeyModifierFlags) -
         0x14 => modifiers.caps_lock,
         _ => false,
     }
+}
+
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch.is_control() => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn is_webview2_keyboard_message(message: u32) -> bool {
@@ -484,6 +621,77 @@ pub(super) fn register_cursor_changed_handler(
             .map_err(platform("add_CursorChanged"))?;
     }
     Ok(token)
+}
+
+pub(super) fn register_accelerator_key_pressed_handler(
+    controller: &ICoreWebView2Controller,
+    nav_queue: Arc<Mutex<VecDeque<NavigationEvent>>>,
+) -> Result<i64, WebSurfaceError> {
+    let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else {
+            return Ok(());
+        };
+        let mut raw_kind = COREWEBVIEW2_KEY_EVENT_KIND(0);
+        let mut virtual_key_code = 0u32;
+        let mut key_event_lparam = 0i32;
+        let mut raw_physical = COREWEBVIEW2_PHYSICAL_KEY_STATUS::default();
+
+        unsafe {
+            args.KeyEventKind(&mut raw_kind)?;
+            args.VirtualKey(&mut virtual_key_code)?;
+            args.KeyEventLParam(&mut key_event_lparam)?;
+            args.PhysicalKeyStatus(&mut raw_physical)?;
+        }
+
+        let browser_accelerator_key_enabled = args
+            .cast::<ICoreWebView2AcceleratorKeyPressedEventArgs2>()
+            .ok()
+            .map(|args2| unsafe {
+                read_bool_from(|value| args2.IsBrowserAcceleratorKeyEnabled(value))
+            });
+        let event = AcceleratorKeyEvent {
+            kind: key_event_kind(raw_kind),
+            is_system_key: matches!(
+                raw_kind,
+                COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN
+                    | COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_UP
+            ),
+            virtual_key_code,
+            key_event_lparam,
+            physical_key_status: PhysicalKeyStatus {
+                repeat_count: raw_physical.RepeatCount,
+                scan_code: raw_physical.ScanCode,
+                is_extended_key: raw_physical.IsExtendedKey.as_bool(),
+                is_menu_key_down: raw_physical.IsMenuKeyDown.as_bool(),
+                was_key_down: raw_physical.WasKeyDown.as_bool(),
+                is_key_released: raw_physical.IsKeyReleased.as_bool(),
+            },
+            browser_accelerator_key_enabled,
+        };
+        if let Ok(mut q) = nav_queue.lock() {
+            q.push_back(NavigationEvent::AcceleratorKeyPressed { event });
+        }
+        Ok(())
+    }));
+    let mut token = 0i64;
+    unsafe {
+        controller
+            .add_AcceleratorKeyPressed(&handler, &mut token)
+            .map_err(platform("add_AcceleratorKeyPressed"))?;
+    }
+    Ok(token)
+}
+
+fn key_event_kind(kind: COREWEBVIEW2_KEY_EVENT_KIND) -> KeyEventKind {
+    match kind {
+        COREWEBVIEW2_KEY_EVENT_KIND_KEY_UP | COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_UP => {
+            KeyEventKind::Up
+        }
+        COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN | COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN => {
+            KeyEventKind::Down
+        }
+        _ => KeyEventKind::Down,
+    }
 }
 
 fn hcursor_to_shape(cursor: HCURSOR) -> CursorShape {

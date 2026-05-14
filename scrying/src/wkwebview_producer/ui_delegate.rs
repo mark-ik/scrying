@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use objc2::rc::Retained;
-use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol};
 use objc2_web_kit::{
     WKFrameInfo, WKMediaCaptureType, WKNavigationAction, WKPermissionDecision, WKSecurityOrigin,
@@ -100,9 +100,7 @@ define_class!(
             let kind = match r#type {
                 WKMediaCaptureType::Camera => PermissionKind::Camera,
                 WKMediaCaptureType::Microphone => PermissionKind::Microphone,
-                WKMediaCaptureType::CameraAndMicrophone => {
-                    PermissionKind::CameraAndMicrophone
-                }
+                WKMediaCaptureType::CameraAndMicrophone => PermissionKind::CameraAndMicrophone,
                 _ => PermissionKind::CameraAndMicrophone,
             };
             let decision = self.consult_permission_handler(origin, frame, kind);
@@ -119,11 +117,8 @@ define_class!(
             frame: &WKFrameInfo,
             decision_handler: &block2::DynBlock<dyn Fn(WKPermissionDecision)>,
         ) {
-            let decision = self.consult_permission_handler(
-                origin,
-                frame,
-                PermissionKind::DeviceOrientation,
-            );
+            let decision =
+                self.consult_permission_handler(origin, frame, PermissionKind::DeviceOrientation);
             decision_handler.call((decision,));
         }
     }

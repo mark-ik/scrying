@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly};
+use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_foundation::{
     MainThreadMarker, NSError, NSObject, NSObjectProtocol, NSString, NSURLAuthenticationChallenge,
     NSURLCredential, NSURLCredentialPersistence, NSURLProtectionSpace,
@@ -40,8 +40,7 @@ pub(super) struct NavState {
 /// Invoked synchronously inside the navigation delegate's
 /// `webView:didReceiveAuthenticationChallenge:` callback. `None`
 /// falls back to `PerformDefaultHandling` (option A).
-pub type AuthHandlerFn =
-    Box<dyn Fn(AuthChallenge) -> AuthDisposition + Send + Sync + 'static>;
+pub type AuthHandlerFn = Box<dyn Fn(AuthChallenge) -> AuthDisposition + Send + Sync + 'static>;
 
 /// `NavDelegate`'s ivar struct. The shared `NavState` is the
 /// FIFO + completion-signal pair; `download_handler` is the strong
@@ -93,7 +92,9 @@ define_class!(
         fn did_commit(&self, web_view: &WKWebView, _navigation: Option<&WKNavigation>) {
             let url = webview_url_string(web_view);
             if let Ok(mut state) = self.ivars().state.lock() {
-                state.events.push_back(NavigationEvent::SourceChanged { url });
+                state
+                    .events
+                    .push_back(NavigationEvent::SourceChanged { url });
             }
         }
 
@@ -101,7 +102,9 @@ define_class!(
         fn did_finish(&self, web_view: &WKWebView, _navigation: Option<&WKNavigation>) {
             let url = webview_url_string(web_view);
             if let Ok(mut state) = self.ivars().state.lock() {
-                state.events.push_back(NavigationEvent::Completed { url, success: true });
+                state
+                    .events
+                    .push_back(NavigationEvent::Completed { url, success: true });
                 state.result = Some(Ok(()));
             }
         }
@@ -116,9 +119,10 @@ define_class!(
             let url = webview_url_string(web_view);
             let message = error.localizedDescription().to_string();
             if let Ok(mut state) = self.ivars().state.lock() {
-                state
-                    .events
-                    .push_back(NavigationEvent::Completed { url, success: false });
+                state.events.push_back(NavigationEvent::Completed {
+                    url,
+                    success: false,
+                });
                 state.result = Some(Err(message));
             }
         }
@@ -133,9 +137,10 @@ define_class!(
             let url = webview_url_string(web_view);
             let message = error.localizedDescription().to_string();
             if let Ok(mut state) = self.ivars().state.lock() {
-                state
-                    .events
-                    .push_back(NavigationEvent::Completed { url, success: false });
+                state.events.push_back(NavigationEvent::Completed {
+                    url,
+                    success: false,
+                });
                 state.result = Some(Err(message));
             }
         }
@@ -261,8 +266,7 @@ define_class!(
                 Some(ps) => {
                     let host = ps.host().to_string();
                     let auth_method = ps.authenticationMethod().to_string();
-                    let realm =
-                        ps.realm().map(|r| r.to_string()).unwrap_or_default();
+                    let realm = ps.realm().map(|r| r.to_string()).unwrap_or_default();
                     (host, auth_method, realm)
                 }
                 None => (String::new(), String::new(), String::new()),

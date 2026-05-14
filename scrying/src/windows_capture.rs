@@ -8,8 +8,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use dpi::PhysicalSize;
 use crate::native_frame::{Dx12SharedTexture, NativeFrame, SyncMechanism};
+use dpi::PhysicalSize;
 use windows::Win32::{
     Foundation::{CloseHandle, HANDLE, HMODULE, HWND},
     Graphics::{
@@ -21,9 +21,9 @@ use windows::Win32::{
             D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             D3D11_QUERY_DESC, D3D11_QUERY_EVENT, D3D11_RESOURCE_MISC_SHARED,
             D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX, D3D11_RESOURCE_MISC_SHARED_NTHANDLE,
-            D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-            D3D11_USAGE_DEFAULT, D3D11CreateDevice, ID3D11Device, ID3D11Device5,
-            ID3D11DeviceContext, ID3D11DeviceContext4, ID3D11Fence, ID3D11Texture2D,
+            D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11CreateDevice,
+            ID3D11Device, ID3D11Device5, ID3D11DeviceContext, ID3D11DeviceContext4, ID3D11Fence,
+            ID3D11Texture2D,
         },
         Dxgi::{
             Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC},
@@ -263,9 +263,7 @@ impl D3D11SharedTextureFactory {
 
     pub fn create_winrt_direct3d_device(&self) -> Result<IDirect3DDevice, WebSurfaceError> {
         let dxgi_device = self.device.cast::<IDXGIDevice>().map_err(|error| {
-            WebSurfaceError::Platform(format!(
-                "ID3D11Device cast to IDXGIDevice failed: {error}"
-            ))
+            WebSurfaceError::Platform(format!("ID3D11Device cast to IDXGIDevice failed: {error}"))
         })?;
         let inspectable =
             unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device) }.map_err(|error| {
@@ -428,8 +426,7 @@ impl D3D11SharedTextureFactory {
     }
 }
 
-fn create_d3d11_hardware_device() -> Result<(ID3D11Device, ID3D11DeviceContext), WebSurfaceError>
-{
+fn create_d3d11_hardware_device() -> Result<(ID3D11Device, ID3D11DeviceContext), WebSurfaceError> {
     let mut device = None;
     let mut context = None;
     let mut feature_level = D3D_FEATURE_LEVEL::default();
@@ -454,9 +451,7 @@ fn create_d3d11_hardware_device() -> Result<(ID3D11Device, ID3D11DeviceContext),
         WebSurfaceError::Platform("D3D11CreateDevice returned no device".to_string())
     })?;
     let context = context.ok_or_else(|| {
-        WebSurfaceError::Platform(
-            "D3D11CreateDevice returned no immediate context".to_string(),
-        )
+        WebSurfaceError::Platform("D3D11CreateDevice returned no immediate context".to_string())
     })?;
     Ok((device, context))
 }
@@ -623,7 +618,10 @@ pub unsafe fn capture_visual_item_size(
                 item_size.Width, item_size.Height
             )));
         }
-        Ok(PhysicalSize::new(item_size.Width as u32, item_size.Height as u32))
+        Ok(PhysicalSize::new(
+            item_size.Width as u32,
+            item_size.Height as u32,
+        ))
     })
 }
 

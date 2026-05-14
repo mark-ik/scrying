@@ -3,6 +3,8 @@
 #[cfg(target_os = "windows")]
 mod gpu;
 #[cfg(target_os = "windows")]
+mod multi_pane;
+#[cfg(target_os = "windows")]
 mod probe;
 #[cfg(target_os = "windows")]
 mod renderer;
@@ -22,7 +24,7 @@ use scrying::{
     WebSurfaceFrame, WebSurfaceSettings, WgpuTextureImporter,
 };
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{Ime, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::Window;
 
@@ -30,7 +32,7 @@ use winit::window::Window;
 use gpu::{create_host_device, validate_imported_pixels};
 #[cfg(target_os = "windows")]
 use probe::{
-    composition_contains, drain_composition_events, forward_mouse_to_composition,
+    composition_contains, drain_composition_events, forward_mouse_to_composition, hwnd_from_window,
     run_platform_composition_visual_probe, run_windows_shared_texture_probe,
     validate_platform_multi_view,
 };
@@ -46,8 +48,11 @@ use smokes::browser::{
 #[cfg(target_os = "windows")]
 use smokes::capture::{validate_platform_capture, validate_platform_scale_resize};
 #[cfg(target_os = "windows")]
+use smokes::composition_focus_hwnd::validate_platform_composition_focus_hwnd;
+#[cfg(target_os = "windows")]
 use smokes::input::{
-    keyboard_validate_enabled, validate_platform_keyboard_smoke, validate_platform_scripted,
+    keyboard_validate_enabled, validate_platform_accelerator_bridge, validate_platform_cdp_input,
+    validate_platform_ime_bridge, validate_platform_keyboard_smoke, validate_platform_scripted,
 };
 #[cfg(target_os = "windows")]
 use smokes::network::{
@@ -61,12 +66,22 @@ use smokes::profile::{
     validate_platform_profile_store,
 };
 #[cfg(target_os = "windows")]
+use smokes::window_to_visual::{
+    validate_platform_window_to_visual, validate_platform_window_to_visual_multi,
+};
+#[cfg(target_os = "windows")]
 pub(crate) use waits::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
     let cli = Cli::parse();
-    let mut app = App { cli, state: None };
+    let pending_keyboard_test = cli.keyboard_test || keyboard_validate_enabled();
+    let mut app = App {
+        cli,
+        state: None,
+        pending_keyboard_test,
+        keyboard_ready_at: None,
+    };
     Ok(event_loop.run_app(&mut app)?)
 }
 
@@ -86,6 +101,12 @@ struct Cli {
     permission_test: bool,
     visibility_test: bool,
     keyboard_test: bool,
+    cdp_input_test: bool,
+    accelerator_test: bool,
+    ime_bridge_test: bool,
+    composition_focus_hwnd_test: bool,
+    window_to_visual_test: bool,
+    window_to_visual_multi_test: bool,
     multi_view_test: bool,
     find_test: bool,
     pdf_test: bool,
@@ -94,6 +115,7 @@ struct Cli {
     media_test: bool,
     capture_test: bool,
     scale_test: bool,
+    multi_pane_input_test: bool,
 }
 
 impl Cli {
@@ -115,6 +137,12 @@ impl Cli {
                 "--permission-test" => cli.permission_test = true,
                 "--visibility-test" => cli.visibility_test = true,
                 "--keyboard-test" => cli.keyboard_test = true,
+                "--cdp-input-test" => cli.cdp_input_test = true,
+                "--accelerator-test" => cli.accelerator_test = true,
+                "--ime-bridge-test" => cli.ime_bridge_test = true,
+                "--composition-focus-hwnd-test" => cli.composition_focus_hwnd_test = true,
+                "--window-to-visual-test" => cli.window_to_visual_test = true,
+                "--window-to-visual-multi-test" => cli.window_to_visual_multi_test = true,
                 "--multi-view-test" => cli.multi_view_test = true,
                 "--find-test" => cli.find_test = true,
                 "--pdf-test" => cli.pdf_test = true,
@@ -123,6 +151,7 @@ impl Cli {
                 "--media-test" => cli.media_test = true,
                 "--capture-test" => cli.capture_test = true,
                 "--scale-test" => cli.scale_test = true,
+                "--multi-pane-input-test" => cli.multi_pane_input_test = true,
                 _ => eprintln!("demo-win: unknown arg: {arg}"),
             }
         }
@@ -143,7 +172,12 @@ impl Cli {
             || self.auth_test
             || self.permission_test
             || self.visibility_test
-            || self.keyboard_test
+            || self.cdp_input_test
+            || self.accelerator_test
+            || self.ime_bridge_test
+            || self.composition_focus_hwnd_test
+            || self.window_to_visual_test
+            || self.window_to_visual_multi_test
             || self.multi_view_test
             || self.find_test
             || self.pdf_test
@@ -159,6 +193,10 @@ impl Cli {
 struct App {
     cli: Cli,
     state: Option<AppState>,
+    #[cfg(target_os = "windows")]
+    pending_keyboard_test: bool,
+    #[cfg(target_os = "windows")]
+    keyboard_ready_at: Option<std::time::Instant>,
 }
 
 struct AppState {
@@ -176,6 +214,11 @@ struct AppState {
     mouse_buttons: scrying::MouseVirtualKeys,
     /// Bitmask of currently-held modifier keys (Ctrl / Shift).
     modifiers: scrying::MouseVirtualKeys,
+    text_input_active: bool,
+    text_input_state: Option<scrying::TextInputState>,
+    last_cursor_shape: Option<scrying::CursorShape>,
+    #[cfg(target_os = "windows")]
+    multi_pane: Option<multi_pane::MultiPaneSession>,
 }
 
 impl ApplicationHandler for App {
@@ -191,6 +234,11 @@ impl ApplicationHandler for App {
                     drop(state);
                     event_loop.exit();
                     std::process::exit(0);
+                }
+                #[cfg(target_os = "windows")]
+                if self.pending_keyboard_test {
+                    self.keyboard_ready_at =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(250));
                 }
                 self.state = Some(state);
             }
@@ -240,7 +288,18 @@ impl ApplicationHandler for App {
                         if let Err(error) = renderer.render() {
                             eprintln!("demo-win: render failed: {error}");
                         }
-                        drain_composition_events(renderer);
+                    }
+                    drain_composition_events(state);
+                    if let Some(session) = state.multi_pane.as_mut() {
+                        session.drain_messages();
+                    }
+                }
+            }
+            #[cfg(target_os = "windows")]
+            WindowEvent::Ime(ime) => {
+                if let Some(state) = self.state.as_mut() {
+                    if let Err(error) = forward_ime_to_composition(state, ime) {
+                        eprintln!("demo-win: IME bridge failed: {error}");
                     }
                 }
             }
@@ -248,7 +307,20 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some(state) = self.state.as_mut() {
                     state.cursor = Some(position);
-                    forward_mouse_to_composition(state, scrying::MouseEventKind::Move, 0);
+                    if state.multi_pane.is_some() {
+                        let virtual_keys = multi_pane_virtual_keys(state);
+                        if let Some(session) = state.multi_pane.as_mut() {
+                            session.forward_mouse(
+                                position,
+                                scrying::MouseEventKind::Move,
+                                0,
+                                virtual_keys,
+                                false,
+                            );
+                        }
+                    } else {
+                        forward_mouse_to_composition(state, scrying::MouseEventKind::Move, 0);
+                    }
                 }
             }
             #[cfg(target_os = "windows")]
@@ -287,19 +359,32 @@ impl ApplicationHandler for App {
                         }
                         _ => return,
                     };
-                    if pressed {
-                        // Click into the composition WebView region also
-                        // hands keyboard focus to it.
-                        if let (Some(pos), Some(renderer)) = (state.cursor, state.renderer.as_mut())
-                            && composition_contains(pos)
-                        {
-                            let _ = renderer
-                                .captured
-                                .producer
-                                .move_focus(scrying::FocusReason::Programmatic);
+                    if state.multi_pane.is_some() {
+                        // Multi-pane: route the click to whichever pane's rect
+                        // contains the cursor; `forward_mouse` does the
+                        // per-pane `move_focus` on press itself.
+                        if let Some(cursor) = state.cursor {
+                            let virtual_keys = multi_pane_virtual_keys(state);
+                            if let Some(session) = state.multi_pane.as_mut() {
+                                session.forward_mouse(cursor, kind, 0, virtual_keys, pressed);
+                            }
                         }
+                    } else {
+                        if pressed {
+                            // Click into the composition WebView region also
+                            // hands keyboard focus to it.
+                            if let (Some(pos), Some(renderer)) =
+                                (state.cursor, state.renderer.as_mut())
+                                && composition_contains(pos, state.window.inner_size())
+                            {
+                                let _ = renderer
+                                    .captured
+                                    .producer
+                                    .move_focus(scrying::FocusReason::Programmatic);
+                            }
+                        }
+                        forward_mouse_to_composition(state, kind, 0);
                     }
-                    forward_mouse_to_composition(state, kind, 0);
                 }
             }
             #[cfg(target_os = "windows")]
@@ -323,7 +408,22 @@ impl ApplicationHandler for App {
                             }
                         }
                     };
-                    forward_mouse_to_composition(state, kind, mouse_data);
+                    if state.multi_pane.is_some() {
+                        if let Some(cursor) = state.cursor {
+                            let virtual_keys = multi_pane_virtual_keys(state);
+                            if let Some(session) = state.multi_pane.as_mut() {
+                                session.forward_mouse(
+                                    cursor,
+                                    kind,
+                                    mouse_data,
+                                    virtual_keys,
+                                    false,
+                                );
+                            }
+                        }
+                    } else {
+                        forward_mouse_to_composition(state, kind, mouse_data);
+                    }
                 }
             }
             #[cfg(target_os = "windows")]
@@ -339,6 +439,23 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "windows")]
+        if self.pending_keyboard_test {
+            if let (Some(state), Some(ready_at)) = (self.state.as_mut(), self.keyboard_ready_at) {
+                if std::time::Instant::now() >= ready_at {
+                    self.pending_keyboard_test = false;
+                    let result = state.run_keyboard_smoke();
+                    match result {
+                        Ok(()) => std::process::exit(0),
+                        Err(error) => {
+                            eprintln!("demo-win: keyboard smoke failed: {error}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(state) = &self.state {
             state.window.request_redraw();
         }
@@ -346,12 +463,31 @@ impl ApplicationHandler for App {
 }
 
 impl AppState {
+    #[cfg(target_os = "windows")]
+    fn run_keyboard_smoke(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let parent_hwnd = hwnd_from_window(&self.window)?;
+        let Some(renderer) = self.renderer.as_mut() else {
+            return Err("keyboard-test requires a live WebView2 renderer".into());
+        };
+        validate_platform_keyboard_smoke(
+            &mut renderer.captured.producer,
+            windows::Win32::Foundation::HWND(parent_hwnd),
+        )
+    }
+
     fn new(event_loop: &ActiveEventLoop, cli: &Cli) -> Result<Self, Box<dyn std::error::Error>> {
+        // Multi-pane mode lays out N panes side by side, so it wants a wider
+        // window than the single-pane default.
+        let initial_inner_size = if cli.multi_pane_input_test {
+            winit::dpi::PhysicalSize::new(1280, 720)
+        } else {
+            winit::dpi::PhysicalSize::new(900, 600)
+        };
         let window = Arc::new(
             event_loop.create_window(
                 Window::default_attributes()
                     .with_title("demo-win")
-                    .with_inner_size(winit::dpi::PhysicalSize::new(900, 600)),
+                    .with_inner_size(initial_inner_size),
             )?,
         );
 
@@ -419,15 +555,37 @@ impl AppState {
             .map(|s| s.shared_handle().0 as *mut std::ffi::c_void);
 
         #[cfg(target_os = "windows")]
-        let captured = if cli.multi_view_test {
+        let multi_pane = if cli.multi_pane_input_test {
+            let parent_hwnd = windows::Win32::Foundation::HWND(hwnd_from_window(&window)?);
+            Some(multi_pane::MultiPaneSession::new(
+                parent_hwnd,
+                window.inner_size(),
+            )?)
+        } else {
+            None
+        };
+
+        #[cfg(target_os = "windows")]
+        let captured = if cli.multi_pane_input_test {
+            None
+        } else if cli.multi_view_test {
             validate_platform_multi_view(event_loop, &window)?;
+            None
+        } else if cli.composition_focus_hwnd_test {
+            validate_platform_composition_focus_hwnd(&window, &host)?;
+            None
+        } else if cli.window_to_visual_multi_test {
+            validate_platform_window_to_visual_multi(&window, &host)?;
+            None
+        } else if cli.window_to_visual_test {
+            validate_platform_window_to_visual(&window, &host)?;
             None
         } else {
             run_platform_composition_visual_probe(&window, &host, fence_handle, cli)?
         };
 
         #[cfg(target_os = "windows")]
-        let renderer = if cli.one_shot() {
+        let renderer = if cli.one_shot() || cli.multi_pane_input_test {
             None
         } else {
             match captured {
@@ -454,18 +612,115 @@ impl AppState {
             cursor: None,
             mouse_buttons: scrying::MouseVirtualKeys::default(),
             modifiers: scrying::MouseVirtualKeys::default(),
+            text_input_active: false,
+            text_input_state: None,
+            last_cursor_shape: None,
+            #[cfg(target_os = "windows")]
+            multi_pane,
         })
     }
 }
 
+/// Build the `MouseVirtualKeys` mask for a multi-pane mouse event from the
+/// host's tracked modifier and button state — mirrors the inline construction
+/// in `probe::forward_mouse_to_composition` for the single-pane path.
 #[cfg(target_os = "windows")]
-const COMPOSITION_PROBE_X: f32 = 450.0;
+fn multi_pane_virtual_keys(state: &AppState) -> scrying::MouseVirtualKeys {
+    let mut virtual_keys = state.modifiers;
+    virtual_keys.left_button = state.mouse_buttons.left_button;
+    virtual_keys.right_button = state.mouse_buttons.right_button;
+    virtual_keys.middle_button = state.mouse_buttons.middle_button;
+    virtual_keys
+}
+
 #[cfg(target_os = "windows")]
-const COMPOSITION_PROBE_Y: f32 = 48.0;
+fn forward_ime_to_composition(
+    state: &mut AppState,
+    ime: Ime,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !state.text_input_active {
+        // Surfacing this is load-bearing for the manual real-IME run: if the
+        // host window receives WM_IME_COMPOSITION before TextInputFocused has
+        // fired, we silently drop the composition.
+        println!("[ime] dropped (no text-input focus): {ime:?}");
+        return Ok(());
+    }
+    let Some(renderer) = state.renderer.as_mut() else {
+        return Ok(());
+    };
+    match ime {
+        Ime::Enabled => {
+            println!("[ime] enabled");
+        }
+        Ime::Disabled => {
+            println!("[ime] disabled — clearing composition");
+            renderer
+                .captured
+                .producer
+                .set_ime_composition("", 0, 0, 0, 0)?;
+        }
+        Ime::Preedit(text, cursor_range) => {
+            if text.is_empty() {
+                println!("[ime] preedit cleared");
+                renderer
+                    .captured
+                    .producer
+                    .set_ime_composition("", 0, 0, 0, 0)?;
+            } else {
+                let (start, end) = cursor_range.unwrap_or((text.len(), text.len()));
+                let selection_start = utf16_units_for_byte_index(&text, start);
+                let selection_end = utf16_units_for_byte_index(&text, end);
+                println!(
+                    "[ime] preedit {text:?} cursor=({selection_start}..{selection_end} utf16)"
+                );
+                renderer.captured.producer.set_ime_composition(
+                    &text,
+                    selection_start,
+                    selection_end,
+                    0,
+                    0,
+                )?;
+            }
+        }
+        Ime::Commit(text) => {
+            if text.is_empty() {
+                println!("[ime] commit (empty) — ignored");
+            } else {
+                println!("[ime] commit {text:?}");
+                renderer.captured.producer.insert_text(&text)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
-const COMPOSITION_PROBE_WIDTH: f32 = 420.0;
+fn utf16_units_for_byte_index(text: &str, byte_index: usize) -> i32 {
+    let clamped = byte_index.min(text.len());
+    let boundary = if text.is_char_boundary(clamped) {
+        clamped
+    } else {
+        let mut idx = clamped;
+        while idx > 0 && !text.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        idx
+    };
+    text[..boundary].encode_utf16().count() as i32
+}
+
+// Bounded producer dimensions used by smokes that assert against fixed
+// coordinates (textarea caret bounds, profile multi-view layout,
+// capture-test resize cycles). Interactive runs size the producer to the
+// host window; see `run_platform_composition_visual_probe`.
 #[cfg(target_os = "windows")]
-const COMPOSITION_PROBE_HEIGHT: f32 = 260.0;
+const SMOKE_PROBE_X: f32 = 450.0;
+#[cfg(target_os = "windows")]
+const SMOKE_PROBE_Y: f32 = 48.0;
+#[cfg(target_os = "windows")]
+const SMOKE_PROBE_WIDTH: f32 = 420.0;
+#[cfg(target_os = "windows")]
+const SMOKE_PROBE_HEIGHT: f32 = 260.0;
 
 #[cfg(target_os = "windows")]
 fn browser_test_html(label: &str) -> String {

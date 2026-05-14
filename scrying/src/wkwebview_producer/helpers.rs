@@ -8,8 +8,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use dpi::PhysicalSize;
-use objc2::rc::Retained;
 use objc2::AnyThread;
+use objc2::rc::Retained;
 use objc2_app_kit::{NSCursor, NSEventModifierFlags, NSView};
 use objc2_foundation::{
     MainThreadMarker, NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSRunLoop, NSSize, NSString,
@@ -29,10 +29,7 @@ use crate::CursorShape;
 /// "these bits are not derived from a recognised algorithm" (we're
 /// using FNV-1a, not the SHA-1 / SHA-256 the named UUID versions
 /// require).
-pub(super) fn profile_uuid_for_path(
-    path: &Path,
-    _mtm: MainThreadMarker,
-) -> Retained<NSUUID> {
+pub(super) fn profile_uuid_for_path(path: &Path, _mtm: MainThreadMarker) -> Retained<NSUUID> {
     let bytes = path.as_os_str().as_encoded_bytes();
     let mut h = profile_uuid_helpers::FNV1A_128_OFFSET;
     for &b in bytes {
@@ -44,11 +41,22 @@ pub(super) fn profile_uuid_for_path(
     out[8] = (out[8] & 0x3F) | 0x80;
     let formatted = format!(
         "{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
-        out[0], out[1], out[2], out[3],
-        out[4], out[5],
-        out[6], out[7],
-        out[8], out[9],
-        out[10], out[11], out[12], out[13], out[14], out[15],
+        out[0],
+        out[1],
+        out[2],
+        out[3],
+        out[4],
+        out[5],
+        out[6],
+        out[7],
+        out[8],
+        out[9],
+        out[10],
+        out[11],
+        out[12],
+        out[13],
+        out[14],
+        out[15],
     );
     let ns_string = NSString::from_str(&formatted);
     NSUUID::initWithUUIDString(NSUUID::alloc(), &ns_string)
@@ -121,7 +129,10 @@ pub(super) fn current_cursor_shape() -> CursorShape {
         (CursorShape::Crosshair, NSCursor::crosshairCursor()),
         (CursorShape::Grab, NSCursor::openHandCursor()),
         (CursorShape::Grabbing, NSCursor::closedHandCursor()),
-        (CursorShape::NotAllowed, NSCursor::operationNotAllowedCursor()),
+        (
+            CursorShape::NotAllowed,
+            NSCursor::operationNotAllowedCursor(),
+        ),
         (CursorShape::Help, NSCursor::contextualMenuCursor()),
         (CursorShape::ResizeNs, NSCursor::resizeUpDownCursor()),
         (CursorShape::ResizeEw, NSCursor::resizeLeftRightCursor()),

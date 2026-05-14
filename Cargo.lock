@@ -589,6 +589,7 @@ dependencies = [
  "pollster",
  "raw-window-handle",
  "scrying",
+ "webview2-com",
  "wgpu",
  "windows",
  "winit",

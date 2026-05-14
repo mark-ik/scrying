@@ -13,6 +13,7 @@ scrying = { path = "../scrying" }
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
+webview2-com = "0.39.1"
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
@@ -28,5 +29,6 @@ features = [
 	"Win32_System_Memory",
 	"Win32_System_WinRT",
 	"Win32_System_WinRT_Composition",
+	"Win32_UI_Input_KeyboardAndMouse",
 	"Win32_UI_WindowsAndMessaging",
 ]

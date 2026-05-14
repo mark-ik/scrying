@@ -9,11 +9,11 @@ use std::sync::{Arc, Mutex};
 
 use block2::RcBlock;
 use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSData, NSError, NSHTTPCookie, NSKeyedArchiver, NSKeyedUnarchiver,
     NSString, NSURL, NSURLRequest,
 };
-use objc2::runtime::ProtocolObject;
 use objc2_web_kit::{
     WKContentRuleList, WKContentRuleListStore, WKDownload, WKFindConfiguration, WKFindResult,
     WKHTTPCookieStore, WKPDFConfiguration,
@@ -55,9 +55,8 @@ impl WkWebViewProducer {
             ));
         }
         let url_ns = NSString::from_str(url);
-        let ns_url = NSURL::URLWithString(&url_ns).ok_or_else(|| {
-            WebSurfaceError::Platform(format!("could not parse URL: {url}"))
-        })?;
+        let ns_url = NSURL::URLWithString(&url_ns)
+            .ok_or_else(|| WebSurfaceError::Platform(format!("could not parse URL: {url}")))?;
         let request = NSURLRequest::requestWithURL(&ns_url);
         unsafe { self.webview().loadRequest(&request) };
         Ok(())
@@ -92,11 +91,7 @@ impl WkWebViewProducer {
         self.load_html_inner(html, Some(&parsed))
     }
 
-    fn load_html_inner(
-        &self,
-        html: &str,
-        base_url: Option<&NSURL>,
-    ) -> Result<(), WebSurfaceError> {
+    fn load_html_inner(&self, html: &str, base_url: Option<&NSURL>) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
             return Err(WebSurfaceError::Platform(
                 "load_html must be called on the main thread".into(),
@@ -119,9 +114,7 @@ impl WkWebViewProducer {
         options: FindOptions,
     ) -> Result<(), WebSurfaceError> {
         let mtm = MainThreadMarker::new().ok_or_else(|| {
-            WebSurfaceError::Platform(
-                "find_in_page must be called on the main thread".into(),
-            )
+            WebSurfaceError::Platform("find_in_page must be called on the main thread".into())
         })?;
         let query_ns = NSString::from_str(query);
         let config = unsafe {
@@ -139,11 +132,8 @@ impl WkWebViewProducer {
             }
         });
         unsafe {
-            self.webview().findString_withConfiguration_completionHandler(
-                &query_ns,
-                Some(&config),
-                &block,
-            );
+            self.webview()
+                .findString_withConfiguration_completionHandler(&query_ns, Some(&config), &block);
         }
         Ok(())
     }
@@ -161,9 +151,7 @@ impl WkWebViewProducer {
     /// PDF" / "export" / mere's print-preview path.
     pub fn request_pdf(&mut self) -> Result<(), WebSurfaceError> {
         let mtm = MainThreadMarker::new().ok_or_else(|| {
-            WebSurfaceError::Platform(
-                "request_pdf must be called on the main thread".into(),
-            )
+            WebSurfaceError::Platform("request_pdf must be called on the main thread".into())
         })?;
         let pdf_config = unsafe { WKPDFConfiguration::new(mtm) };
         let slot = Arc::clone(&self.pending_pdf);
@@ -277,10 +265,7 @@ impl WkWebViewProducer {
     /// chosen path through whatever your re-fetch mechanism is.
     pub fn set_download_handler<F>(&mut self, handler: F)
     where
-        F: Fn(DownloadDestinationRequest) -> DownloadDecision
-            + Send
-            + Sync
-            + 'static,
+        F: Fn(DownloadDestinationRequest) -> DownloadDecision + Send + Sync + 'static,
     {
         if let Ok(mut h) = self.download_host_handler.lock() {
             *h = Some(Box::new(handler));
@@ -352,9 +337,8 @@ impl WkWebViewProducer {
             ));
         }
         let url_ns = NSString::from_str(url);
-        let ns_url = NSURL::URLWithString(&url_ns).ok_or_else(|| {
-            WebSurfaceError::Platform(format!("could not parse URL: {url}"))
-        })?;
+        let ns_url = NSURL::URLWithString(&url_ns)
+            .ok_or_else(|| WebSurfaceError::Platform(format!("could not parse URL: {url}")))?;
         let request = NSURLRequest::requestWithURL(&ns_url);
 
         // Wrap the `Retained<DownloadHandler>` so the closure can
@@ -376,8 +360,7 @@ impl WkWebViewProducer {
             // ref-keeping is what matters past this call.
             let download_ref = unsafe { download.as_ref() };
             unsafe {
-                download_ref
-                    .setDelegate(Some(ProtocolObject::from_ref(&*delegate.0)));
+                download_ref.setDelegate(Some(ProtocolObject::from_ref(&*delegate.0)));
             }
         });
 
@@ -446,16 +429,18 @@ impl WkWebViewProducer {
         // size; expressing it as "we'll see when the bytes
         // land" matches WebKit's actual behavior.
         if let Ok(mut state) = self.nav_state.lock() {
-            state.events.push_back(crate::NavigationEvent::DownloadStarted {
-                id,
-                url: String::new(),
-                suggested_filename: destination_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                destination_path: destination_path.clone(),
-                total_bytes_expected: None,
-            });
+            state
+                .events
+                .push_back(crate::NavigationEvent::DownloadStarted {
+                    id,
+                    url: String::new(),
+                    suggested_filename: destination_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    destination_path: destination_path.clone(),
+                    total_bytes_expected: None,
+                });
         }
 
         struct SendBundle {
@@ -479,10 +464,8 @@ impl WkWebViewProducer {
             // retaining extends the lifetime to match our
             // registry entry.
             let download_ref = unsafe { download.as_ref() };
-            let download_strong = unsafe {
-                Retained::retain(NonNull::from(download_ref).as_ptr())
-            }
-            .expect("Retained::retain on resumed WKDownload returned None");
+            let download_strong = unsafe { Retained::retain(NonNull::from(download_ref).as_ptr()) }
+                .expect("Retained::retain on resumed WKDownload returned None");
 
             let pointer_key = Retained::as_ptr(&download_strong) as usize;
             if let Ok(mut registry) = bundle.registry.lock() {
@@ -508,8 +491,7 @@ impl WkWebViewProducer {
             }
 
             unsafe {
-                download_ref
-                    .setDelegate(Some(ProtocolObject::from_ref(&*bundle.delegate)));
+                download_ref.setDelegate(Some(ProtocolObject::from_ref(&*bundle.delegate)));
             }
         });
 
@@ -539,21 +521,17 @@ impl WkWebViewProducer {
     /// future slice (would surface the `resumeData` from
     /// `WKDownload::cancel(_:)` and add a corresponding restart
     /// API).
-    pub fn cancel_download(
-        &mut self,
-        id: crate::DownloadId,
-    ) -> Result<bool, WebSurfaceError> {
+    pub fn cancel_download(&mut self, id: crate::DownloadId) -> Result<bool, WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
             return Err(WebSurfaceError::Platform(
                 "cancel_download must be called on the main thread".into(),
             ));
         }
         let (download, destination_path) = {
-            let mut registry = self.download_registry.lock().map_err(|_| {
-                WebSurfaceError::Platform(
-                    "download registry lock poisoned".into(),
-                )
-            })?;
+            let mut registry = self
+                .download_registry
+                .lock()
+                .map_err(|_| WebSurfaceError::Platform("download registry lock poisoned".into()))?;
             let Some(entry) = registry.by_id.get(&id) else {
                 return Ok(false);
             };
@@ -586,11 +564,7 @@ impl WkWebViewProducer {
             } else {
                 let data: &NSData = unsafe { &*resume_data };
                 let v = data.to_vec();
-                if v.is_empty() {
-                    None
-                } else {
-                    Some(v)
-                }
+                if v.is_empty() { None } else { Some(v) }
             };
             if let Ok(mut state) = nav_state.lock() {
                 state
@@ -686,9 +660,7 @@ impl WkWebViewProducer {
             is_http_only: false,
         };
         let ns_cookie = ns_cookie_from(&placeholder).ok_or_else(|| {
-            WebSurfaceError::Platform(
-                "could not construct NSHTTPCookie for deletion".into(),
-            )
+            WebSurfaceError::Platform("could not construct NSHTTPCookie for deletion".into())
         })?;
         let store = unsafe { self.cookie_store() };
         unsafe { store.deleteCookie_completionHandler(&ns_cookie, None) };
@@ -718,11 +690,10 @@ impl WkWebViewProducer {
                 "set_cookie_change_handler must be called on the main thread".into(),
             ));
         }
-        let mut slot = self.cookie_change_handler.lock().map_err(|_| {
-            WebSurfaceError::Platform(
-                "cookie_change_handler lock poisoned".into(),
-            )
-        })?;
+        let mut slot = self
+            .cookie_change_handler
+            .lock()
+            .map_err(|_| WebSurfaceError::Platform("cookie_change_handler lock poisoned".into()))?;
         *slot = Some(handler);
         Ok(())
     }
@@ -759,49 +730,43 @@ impl WkWebViewProducer {
     ) -> Result<(), WebSurfaceError> {
         let mtm = MainThreadMarker::new().ok_or_else(|| {
             WebSurfaceError::Platform(
-                "compile_and_apply_content_rule_list must be called on the main thread"
-                    .into(),
+                "compile_and_apply_content_rule_list must be called on the main thread".into(),
             )
         })?;
-        let store = unsafe { WKContentRuleListStore::defaultStore(mtm) }.ok_or_else(
-            || WebSurfaceError::Platform(
-                "WKContentRuleListStore::defaultStore returned nil".into(),
-            ),
-        )?;
+        let store = unsafe { WKContentRuleListStore::defaultStore(mtm) }.ok_or_else(|| {
+            WebSurfaceError::Platform("WKContentRuleListStore::defaultStore returned nil".into())
+        })?;
         let identifier_owned = identifier.to_string();
         let identifier_ns = NSString::from_str(identifier);
         let json_ns = NSString::from_str(encoded_json);
         let ucc = unsafe { self.webview().configuration().userContentController() };
-        let block = RcBlock::new(
-            move |list: *mut WKContentRuleList, err: *mut NSError| {
-                if !err.is_null() {
-                    let msg = unsafe { (*err).localizedDescription() }.to_string();
-                    eprintln!(
-                        "scrying: WKContentRuleList compile failed for {identifier_owned:?}: {msg}"
-                    );
-                    return;
-                }
-                let Some(list_ptr) = std::ptr::NonNull::new(list) else {
-                    eprintln!(
-                        "scrying: WKContentRuleList compile returned nil with no error for {identifier_owned:?}"
-                    );
-                    return;
-                };
-                // SAFETY: WebKit hands us a +0 borrow; retain so
-                // the WKContentRuleList outlives this completion
-                // (the UCC will hold its own retain through
-                // `addContentRuleList`, but we don't strictly own
-                // a strong ref otherwise).
-                let Some(retained) = (unsafe { Retained::retain(list_ptr.as_ptr()) })
-                else {
-                    eprintln!(
-                        "scrying: Retained::retain on WKContentRuleList returned None for {identifier_owned:?}"
-                    );
-                    return;
-                };
-                unsafe { ucc.addContentRuleList(&retained) };
-            },
-        );
+        let block = RcBlock::new(move |list: *mut WKContentRuleList, err: *mut NSError| {
+            if !err.is_null() {
+                let msg = unsafe { (*err).localizedDescription() }.to_string();
+                eprintln!(
+                    "scrying: WKContentRuleList compile failed for {identifier_owned:?}: {msg}"
+                );
+                return;
+            }
+            let Some(list_ptr) = std::ptr::NonNull::new(list) else {
+                eprintln!(
+                    "scrying: WKContentRuleList compile returned nil with no error for {identifier_owned:?}"
+                );
+                return;
+            };
+            // SAFETY: WebKit hands us a +0 borrow; retain so
+            // the WKContentRuleList outlives this completion
+            // (the UCC will hold its own retain through
+            // `addContentRuleList`, but we don't strictly own
+            // a strong ref otherwise).
+            let Some(retained) = (unsafe { Retained::retain(list_ptr.as_ptr()) }) else {
+                eprintln!(
+                    "scrying: Retained::retain on WKContentRuleList returned None for {identifier_owned:?}"
+                );
+                return;
+            };
+            unsafe { ucc.addContentRuleList(&retained) };
+        });
         unsafe {
             store.compileContentRuleListForIdentifier_encodedContentRuleList_completionHandler(
                 Some(&identifier_ns),
@@ -825,10 +790,7 @@ impl WkWebViewProducer {
     /// No-op when capture isn't live; the next
     /// `start_capture` / `start_capture_async` will pick up the
     /// new value from the config.
-    pub fn set_color_pipeline(
-        &mut self,
-        pipeline: ColorPipeline,
-    ) -> Result<(), WebSurfaceError> {
+    pub fn set_color_pipeline(&mut self, pipeline: ColorPipeline) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
             return Err(WebSurfaceError::Platform(
                 "set_color_pipeline must be called on the main thread".into(),
@@ -904,11 +866,10 @@ impl WkWebViewProducer {
                 "clear_cookie_change_handler must be called on the main thread".into(),
             ));
         }
-        let mut slot = self.cookie_change_handler.lock().map_err(|_| {
-            WebSurfaceError::Platform(
-                "cookie_change_handler lock poisoned".into(),
-            )
-        })?;
+        let mut slot = self
+            .cookie_change_handler
+            .lock()
+            .map_err(|_| WebSurfaceError::Platform("cookie_change_handler lock poisoned".into()))?;
         *slot = None;
         Ok(())
     }
@@ -938,18 +899,13 @@ impl WkWebViewProducer {
     /// must come from [`Self::serialize_interaction_state`] called
     /// on a `WkWebViewProducer` running compatible WebKit; cross-
     /// version restore is allowed but not guaranteed by Apple.
-    pub fn restore_interaction_state(
-        &mut self,
-        bytes: &[u8],
-    ) -> Result<(), WebSurfaceError> {
+    pub fn restore_interaction_state(&mut self, bytes: &[u8]) -> Result<(), WebSurfaceError> {
         if MainThreadMarker::new().is_none() {
             return Err(WebSurfaceError::Platform(
                 "restore_interaction_state must be called on the main thread".into(),
             ));
         }
-        let data = unsafe {
-            NSData::dataWithBytes_length(bytes.as_ptr() as *mut _, bytes.len())
-        };
+        let data = unsafe { NSData::dataWithBytes_length(bytes.as_ptr() as *mut _, bytes.len()) };
         #[allow(deprecated)]
         let obj = unsafe { NSKeyedUnarchiver::unarchiveObjectWithData(&data) }
             .ok_or_else(|| {

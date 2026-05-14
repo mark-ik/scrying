@@ -119,21 +119,21 @@ fn start_download_test_server(body: Vec<u8>) -> std::io::Result<DownloadTestUrls
                     .unwrap_or("/");
 
                 let needs_auth = path.starts_with("/download-auth");
-                let has_valid_auth = needs_auth && request.lines().any(|h| {
-                    let lower = h.to_ascii_lowercase();
-                    lower.starts_with("authorization: basic ")
-                        && {
+                let has_valid_auth = needs_auth
+                    && request.lines().any(|h| {
+                        let lower = h.to_ascii_lowercase();
+                        lower.starts_with("authorization: basic ") && {
                             // RFC 7617: "Basic <base64(user:pass)>"
                             let token = &h[h.rfind(' ').map(|i| i + 1).unwrap_or(h.len())..];
-                            base64_decode(token.trim()).map(|decoded| {
-                                decoded
-                                    == format!(
-                                        "{DOWNLOAD_AUTH_USER}:{DOWNLOAD_AUTH_PASS}"
-                                    )
-                                    .as_bytes()
-                            }).unwrap_or(false)
+                            base64_decode(token.trim())
+                                .map(|decoded| {
+                                    decoded
+                                        == format!("{DOWNLOAD_AUTH_USER}:{DOWNLOAD_AUTH_PASS}")
+                                            .as_bytes()
+                                })
+                                .unwrap_or(false)
                         }
-                });
+                    });
 
                 if needs_auth && !has_valid_auth {
                     let header = "HTTP/1.1 401 Unauthorized\r\n\
@@ -158,12 +158,10 @@ fn start_download_test_server(body: Vec<u8>) -> std::io::Result<DownloadTestUrls
                         .lines()
                         .find_map(|l| {
                             let lower = l.to_ascii_lowercase();
-                            lower
-                                .strip_prefix("range: bytes=")
-                                .and_then(|rest| {
-                                    let end = rest.find('-').unwrap_or(rest.len());
-                                    rest[..end].trim().parse::<u64>().ok()
-                                })
+                            lower.strip_prefix("range: bytes=").and_then(|rest| {
+                                let end = rest.find('-').unwrap_or(rest.len());
+                                rest[..end].trim().parse::<u64>().ok()
+                            })
                         })
                         .unwrap_or(0) as usize
                 } else {
@@ -434,10 +432,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         event_loop.set_control_flow(ControlFlow::Wait);
     }
-    let mut app = App {
-        cli,
-        state: None,
-    };
+    let mut app = App { cli, state: None };
     Ok(event_loop.run_app(&mut app)?)
 }
 
@@ -582,9 +577,7 @@ impl Cli {
                     let value = iter.next().unwrap_or_default();
                     cli.color_pipeline = match value.as_str() {
                         "srgb" => scrying::ColorPipeline::Srgb,
-                        "p3" | "displayp3" | "display-p3" => {
-                            scrying::ColorPipeline::DisplayP3
-                        }
+                        "p3" | "displayp3" | "display-p3" => scrying::ColorPipeline::DisplayP3,
                         "hdr" | "hdr16f" => scrying::ColorPipeline::Hdr16f,
                         other => {
                             eprintln!(
@@ -1111,20 +1104,22 @@ impl ApplicationHandler for App {
         // to land first), then poll capture_status and drive
         // redraws once the stream is live.
         if let Some(kickoff) = state.capture_kickoff_at {
-            if !state.capture_started && state.started_at.elapsed() >= kickoff
-                && let Some(render) = state.render.as_ref() {
-                    let host = render.host_context.clone();
-                    match state.producer.start_capture_async(host) {
-                        Ok(()) => {
-                            println!("demo-mac: start_capture_async kicked off");
-                            state.capture_started = true;
-                        }
-                        Err(error) => {
-                            eprintln!("demo-mac: start_capture_async failed: {error}");
-                            state.capture_started = true;
-                        }
+            if !state.capture_started
+                && state.started_at.elapsed() >= kickoff
+                && let Some(render) = state.render.as_ref()
+            {
+                let host = render.host_context.clone();
+                match state.producer.start_capture_async(host) {
+                    Ok(()) => {
+                        println!("demo-mac: start_capture_async kicked off");
+                        state.capture_started = true;
+                    }
+                    Err(error) => {
+                        eprintln!("demo-mac: start_capture_async failed: {error}");
+                        state.capture_started = true;
                     }
                 }
+            }
             // Resize-test driver: programmatically resize the
             // window once each schedule step elapses. This exercises
             // both the producer's `resize` path and slice N's live
@@ -1215,26 +1210,25 @@ impl ApplicationHandler for App {
                 println!("demo-mac: probe-snapshot requested at {:?}", elapsed);
             }
             if probe.requested
-                && let Some(result) = state.producer.poll_snapshot() {
-                    match result {
-                        Ok(scrying::WebSurfaceFrame::CpuRgba { pixels, .. }) => {
-                            if let Err(error) = pixels.save("demo-mac-snapshot.png") {
-                                eprintln!("demo-mac: snapshot save failed: {error}");
-                            } else {
-                                println!(
-                                    "demo-mac: probe-snapshot saved to demo-mac-snapshot.png"
-                                );
-                            }
-                        }
-                        Ok(_) => {
-                            eprintln!("demo-mac: poll_snapshot returned non-CpuRgba frame");
-                        }
-                        Err(error) => {
-                            eprintln!("demo-mac: probe snapshot failed: {error}");
+                && let Some(result) = state.producer.poll_snapshot()
+            {
+                match result {
+                    Ok(scrying::WebSurfaceFrame::CpuRgba { pixels, .. }) => {
+                        if let Err(error) = pixels.save("demo-mac-snapshot.png") {
+                            eprintln!("demo-mac: snapshot save failed: {error}");
+                        } else {
+                            println!("demo-mac: probe-snapshot saved to demo-mac-snapshot.png");
                         }
                     }
-                    event_loop.exit();
+                    Ok(_) => {
+                        eprintln!("demo-mac: poll_snapshot returned non-CpuRgba frame");
+                    }
+                    Err(error) => {
+                        eprintln!("demo-mac: probe snapshot failed: {error}");
+                    }
                 }
+                event_loop.exit();
+            }
         }
     }
 
@@ -1280,21 +1274,13 @@ impl ApplicationHandler for App {
                 }
                 if two_tabs_layout {
                     let half_h = new_size.height / 2;
-                    if let Err(error) =
-                        state.producer.set_offset(0.0, half_h as f32)
-                    {
-                        eprintln!(
-                            "demo-mac: producer set_offset failed: {error}"
-                        );
+                    if let Err(error) = state.producer.set_offset(0.0, half_h as f32) {
+                        eprintln!("demo-mac: producer set_offset failed: {error}");
                     }
                     if let Some(second) = state.second_producer.as_mut() {
-                        if let Err(error) = second.resize(PhysicalSize::new(
-                            new_size.width,
-                            half_h,
-                        )) {
-                            eprintln!(
-                                "demo-mac: second producer resize failed: {error}"
-                            );
+                        if let Err(error) = second.resize(PhysicalSize::new(new_size.width, half_h))
+                        {
+                            eprintln!("demo-mac: second producer resize failed: {error}");
                         }
                     }
                 }
@@ -1339,15 +1325,11 @@ impl ApplicationHandler for App {
                     (MouseButton::Left, ElementState::Pressed) => MouseEventKind::LeftButtonDown,
                     (MouseButton::Left, ElementState::Released) => MouseEventKind::LeftButtonUp,
                     (MouseButton::Right, ElementState::Pressed) => MouseEventKind::RightButtonDown,
-                    (MouseButton::Right, ElementState::Released) => {
-                        MouseEventKind::RightButtonUp
-                    }
+                    (MouseButton::Right, ElementState::Released) => MouseEventKind::RightButtonUp,
                     (MouseButton::Middle, ElementState::Pressed) => {
                         MouseEventKind::MiddleButtonDown
                     }
-                    (MouseButton::Middle, ElementState::Released) => {
-                        MouseEventKind::MiddleButtonUp
-                    }
+                    (MouseButton::Middle, ElementState::Released) => MouseEventKind::MiddleButtonUp,
                     _ => return,
                 };
                 match (button, btn_state) {
@@ -1398,9 +1380,7 @@ impl ApplicationHandler for App {
                         // on most mice.
                         ((x * 16.0) as i32, (y * 16.0) as i32)
                     }
-                    winit::event::MouseScrollDelta::PixelDelta(p) => {
-                        (p.x as i32, p.y as i32)
-                    }
+                    winit::event::MouseScrollDelta::PixelDelta(p) => (p.x as i32, p.y as i32),
                 };
                 let point = state
                     .cursor
@@ -1447,32 +1427,31 @@ fn handle_key(state: &mut AppState, event: KeyEvent) {
 
     // Hotkey demo bindings: handle on key-press, swallow.
     if event.state == ElementState::Pressed
-        && let Key::Character(s) = &event.logical_key {
-            match s.as_str() {
-                "s" | "S" => {
-                    if let Err(error) = state.producer.request_snapshot() {
-                        eprintln!("demo-mac: request_snapshot failed: {error}");
-                    } else {
-                        println!(
-                            "demo-mac: snapshot requested — will save when ready"
-                        );
-                    }
-                    return;
+        && let Key::Character(s) = &event.logical_key
+    {
+        match s.as_str() {
+            "s" | "S" => {
+                if let Err(error) = state.producer.request_snapshot() {
+                    eprintln!("demo-mac: request_snapshot failed: {error}");
+                } else {
+                    println!("demo-mac: snapshot requested — will save when ready");
                 }
-                "m" | "M" => {
-                    if let Err(error) = state
-                        .producer
-                        .post_web_message("hello from demo-mac (key M)")
-                    {
-                        eprintln!("demo-mac: post_web_message failed: {error}");
-                    } else {
-                        println!("demo-mac: posted host->JS message");
-                    }
-                    return;
-                }
-                _ => {}
+                return;
             }
+            "m" | "M" => {
+                if let Err(error) = state
+                    .producer
+                    .post_web_message("hello from demo-mac (key M)")
+                {
+                    eprintln!("demo-mac: post_web_message failed: {error}");
+                } else {
+                    println!("demo-mac: posted host->JS message");
+                }
+                return;
+            }
+            _ => {}
         }
+    }
 
     // Same overlay/capture gate as mouse forwarding: in overlay
     // mode AppKit delivers keys to WKWebView via the responder
@@ -1510,8 +1489,7 @@ fn drain_events(state: &mut AppState) {
         // observed.
         if let Some(test) = state.browser_test.as_mut() {
             match &event {
-                NavigationEvent::SourceChanged { url }
-                | NavigationEvent::Completed { url, .. } => {
+                NavigationEvent::SourceChanged { url } | NavigationEvent::Completed { url, .. } => {
                     test.last_committed_url = url.clone();
                 }
                 _ => {}
@@ -1554,17 +1532,15 @@ fn drain_events(state: &mut AppState) {
                 } => {
                     test.cancelled.insert(*id, resume_data.clone());
                 }
-                NavigationEvent::AuthChallenged { source, .. } => {
-                    match source {
-                        scrying::AuthSource::Download => {
-                            test.download_level_auth_seen = true;
-                        }
-                        scrying::AuthSource::Page => {
-                            test.page_level_auth_seen = true;
-                        }
-                        _ => {}
+                NavigationEvent::AuthChallenged { source, .. } => match source {
+                    scrying::AuthSource::Download => {
+                        test.download_level_auth_seen = true;
                     }
-                }
+                    scrying::AuthSource::Page => {
+                        test.page_level_auth_seen = true;
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -1580,9 +1556,10 @@ fn drain_events(state: &mut AppState) {
                 }
             } else if let Some(rest) = message.strip_prefix("scrolled:") {
                 if let Ok(y) = rest.parse::<i64>()
-                    && y != 0 {
-                        scripted.saw_scroll = true;
-                    }
+                    && y != 0
+                {
+                    scripted.saw_scroll = true;
+                }
             } else if let Some(rest) = message.strip_prefix("typed:") {
                 scripted.saw_typed = rest.to_string();
             }
@@ -1620,9 +1597,7 @@ fn drain_events(state: &mut AppState) {
             match result {
                 Ok(scrying::WebSurfaceFrame::CpuRgba { pixels, .. }) => {
                     match pixels.save("demo-mac-snapshot.png") {
-                        Ok(()) => println!(
-                            "demo-mac: snapshot saved to demo-mac-snapshot.png"
-                        ),
+                        Ok(()) => println!("demo-mac: snapshot saved to demo-mac-snapshot.png"),
                         Err(error) => {
                             eprintln!("demo-mac: snapshot save failed: {error}")
                         }
@@ -1678,7 +1653,9 @@ fn advance_scripted(state: &mut AppState, event_loop: &ActiveEventLoop) {
                 println!("demo-mac: scripted: JS echoed host message");
                 scripted.enter(ScriptedStep::Scroll);
             } else if elapsed > Duration::from_secs(3) {
-                scripted.failures.push("JS never echoed host message".into());
+                scripted
+                    .failures
+                    .push("JS never echoed host message".into());
                 scripted.enter(ScriptedStep::Scroll);
             }
         }
@@ -1710,15 +1687,15 @@ fn advance_scripted(state: &mut AppState, event_loop: &ActiveEventLoop) {
                     mouse_data: -120,
                     point: (40, 200),
                 }) {
-                    scripted.failures.push(format!("send_mouse_input(Wheel): {e}"));
+                    scripted
+                        .failures
+                        .push(format!("send_mouse_input(Wheel): {e}"));
                     all_ok = false;
                     break;
                 }
             }
             if all_ok {
-                println!(
-                    "demo-mac: scripted: 6 ScrollWheel events dispatched without error"
-                );
+                println!("demo-mac: scripted: 6 ScrollWheel events dispatched without error");
             }
             scripted.enter(ScriptedStep::AwaitScroll);
         }
@@ -1753,7 +1730,10 @@ fn advance_scripted(state: &mut AppState, event_loop: &ActiveEventLoop) {
             });
             // Also ask the responder chain to focus the WKWebView so
             // keyDown: routes to it.
-            if let Err(e) = state.producer.move_focus(scrying::FocusReason::Programmatic) {
+            if let Err(e) = state
+                .producer
+                .move_focus(scrying::FocusReason::Programmatic)
+            {
                 eprintln!("demo-mac: scripted: move_focus failed: {e}");
             }
             scripted.enter(ScriptedStep::SendKeys);
@@ -1803,15 +1783,12 @@ fn advance_scripted(state: &mut AppState, event_loop: &ActiveEventLoop) {
                 scripted.typed_expected.push(ch);
             }
             if all_ok {
-                println!(
-                    "demo-mac: scripted: 3 KeyDown/KeyUp pairs dispatched without error"
-                );
+                println!("demo-mac: scripted: 3 KeyDown/KeyUp pairs dispatched without error");
             }
             scripted.enter(ScriptedStep::AwaitTyped);
         }
         ScriptedStep::AwaitTyped => {
-            if scripted.saw_typed == scripted.typed_expected
-                && !scripted.typed_expected.is_empty()
+            if scripted.saw_typed == scripted.typed_expected && !scripted.typed_expected.is_empty()
             {
                 println!(
                     "demo-mac: scripted: page reported typed='{}' (bonus end-to-end)",
@@ -1843,9 +1820,7 @@ fn advance_scripted(state: &mut AppState, event_loop: &ActiveEventLoop) {
                 println!(
                     "demo-mac: scripted: PASS — slices E + G + I + cursor handler verified at runtime"
                 );
-                println!(
-                    "  - cursor handler fired {cursor_calls} time(s) over the run"
-                );
+                println!("  - cursor handler fired {cursor_calls} time(s) over the run");
                 event_loop.exit();
             } else {
                 eprintln!("demo-mac: scripted: FAIL");
@@ -2118,11 +2093,10 @@ fn advance_browser_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
                 println!("demo-mac: browser-test: go_back navigated to history-1");
                 step_to!(BrowserTestStep::GoForward);
             } else if elapsed > Duration::from_secs(5) {
-                test.failures
-                    .push(format!(
-                        "go_back didn't navigate to history-1 (saw '{}')",
-                        test.last_committed_url
-                    ));
+                test.failures.push(format!(
+                    "go_back didn't navigate to history-1 (saw '{}')",
+                    test.last_committed_url
+                ));
                 step_to!(BrowserTestStep::ApplySettings);
             }
         }
@@ -2234,13 +2208,10 @@ fn advance_browser_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
                         let len = bytes.len();
                         test.pdf_bytes = Some(len);
                         if len > 100 {
-                            println!(
-                                "demo-mac: browser-test: PDF rendered ({len} bytes)"
-                            );
+                            println!("demo-mac: browser-test: PDF rendered ({len} bytes)");
                         } else {
-                            test.failures.push(format!(
-                                "PDF rendered but suspiciously small ({len} bytes)"
-                            ));
+                            test.failures
+                                .push(format!("PDF rendered but suspiciously small ({len} bytes)"));
                         }
                     }
                     Err(msg) => {
@@ -2468,7 +2439,8 @@ fn advance_interaction_state_test(state: &mut AppState, event_loop: &ActiveEvent
                     step_to!(InteractionStateStep::AwaitRestore);
                 }
                 Err(e) => {
-                    test.failures.push(format!("restore_interaction_state: {e}"));
+                    test.failures
+                        .push(format!("restore_interaction_state: {e}"));
                     step_to!(InteractionStateStep::Done);
                 }
             }
@@ -2569,7 +2541,8 @@ fn advance_pointer_input_test(state: &mut AppState, event_loop: &ActiveEventLoop
                 println!("demo-mac: pointer-input-test: page ready");
                 step_to!(PointerInputStep::SendDown);
             } else if elapsed > Duration::from_secs(5) {
-                test.failures.push("pointer page never posted 'ready'".into());
+                test.failures
+                    .push("pointer page never posted 'ready'".into());
                 step_to!(PointerInputStep::Done);
             }
         }
@@ -2607,7 +2580,8 @@ fn advance_pointer_input_test(state: &mut AppState, event_loop: &ActiveEventLoop
                 tilt: (0.0, 0.0),
             };
             if let Err(e) = state.producer.send_pointer_input(event) {
-                test.failures.push(format!("send_pointer_input(Update): {e}"));
+                test.failures
+                    .push(format!("send_pointer_input(Update): {e}"));
                 step_to!(PointerInputStep::Done);
                 return;
             }
@@ -2645,7 +2619,8 @@ fn advance_pointer_input_test(state: &mut AppState, event_loop: &ActiveEventLoop
                 tilt: (0.0, 0.0),
             };
             if let Err(e) = state.producer.send_pointer_input(event) {
-                test.failures.push(format!("send_pointer_input(Leave): {e}"));
+                test.failures
+                    .push(format!("send_pointer_input(Leave): {e}"));
                 step_to!(PointerInputStep::Done);
                 return;
             }
@@ -2769,7 +2744,8 @@ fn advance_incognito_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
         }
         IncognitoStep::QueryIncognito => {
             if let Err(e) = state.producer.request_all_cookies() {
-                test.failures.push(format!("request_all_cookies on incognito: {e}"));
+                test.failures
+                    .push(format!("request_all_cookies on incognito: {e}"));
                 step_to!(IncognitoStep::Done);
                 return;
             }
@@ -2830,8 +2806,7 @@ fn advance_incognito_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
                 .as_ref()
                 .and_then(|cs| cs.iter().find(|c| c.name == test.cookie_name));
             let in_incognito = observed.is_some();
-            let http_only_round_tripped =
-                observed.map(|c| c.is_http_only).unwrap_or(false);
+            let http_only_round_tripped = observed.map(|c| c.is_http_only).unwrap_or(false);
             let in_persistent = test
                 .persistent_cookies
                 .as_ref()
@@ -2865,9 +2840,7 @@ fn advance_incognito_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
                 println!(
                     "  - set_cookie on incognito producer was visible to its own request_all_cookies"
                 );
-                println!(
-                    "  - same cookie was absent from a separate persistent producer's store"
-                );
+                println!("  - same cookie was absent from a separate persistent producer's store");
                 event_loop.exit();
             } else {
                 eprintln!("demo-mac: incognito-test: FAIL");
@@ -2895,14 +2868,10 @@ fn finalize_two_tabs_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
     let tab2_history1 = test.tab2_urls.iter().any(|u| u.contains("history-1"));
 
     if !tab1_history1 {
-        failures.push(
-            "tab 1 never observed any nav event for scrying-test://history-1".into(),
-        );
+        failures.push("tab 1 never observed any nav event for scrying-test://history-1".into());
     }
     if !tab2_history2 {
-        failures.push(
-            "tab 2 never observed any nav event for scrying-test://history-2".into(),
-        );
+        failures.push("tab 2 never observed any nav event for scrying-test://history-2".into());
     }
     if tab1_history2 {
         failures.push(
@@ -2944,9 +2913,9 @@ fn advance_capture_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
     test.saw_live = true;
 
     match state.producer.try_acquire_frame() {
-        Ok(Some(scrying::WebSurfaceFrame::Native(
-            scrying::NativeFrame::MetalTextureRef(frame),
-        ))) => {
+        Ok(Some(scrying::WebSurfaceFrame::Native(scrying::NativeFrame::MetalTextureRef(
+            frame,
+        )))) => {
             let dims = (frame.size.width, frame.size.height);
             if let Some(test) = state.capture_test.as_mut() {
                 test.frame_dims.push(dims);
@@ -2954,9 +2923,8 @@ fn advance_capture_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
         }
         Ok(Some(_other)) => {
             if let Some(test) = state.capture_test.as_mut() {
-                test.failures.push(
-                    "try_acquire_frame returned non-Metal frame variant".into(),
-                );
+                test.failures
+                    .push("try_acquire_frame returned non-Metal frame variant".into());
             }
             finalize_capture_test(state, event_loop);
             return;
@@ -2967,7 +2935,8 @@ fn advance_capture_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
         }
         Err(error) => {
             if let Some(test) = state.capture_test.as_mut() {
-                test.failures.push(format!("try_acquire_frame error: {error}"));
+                test.failures
+                    .push(format!("try_acquire_frame error: {error}"));
             }
             finalize_capture_test(state, event_loop);
             return;
@@ -2982,9 +2951,7 @@ fn advance_capture_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
         .unwrap_or(true);
     let timed_out = state.started_at.elapsed() > Duration::from_secs(30);
     if saw_enough || timed_out {
-        if !saw_enough
-            && let Some(test) = state.capture_test.as_mut()
-        {
+        if !saw_enough && let Some(test) = state.capture_test.as_mut() {
             test.failures.push(format!(
                 "captured {} frame(s) within 30s (target: {target})",
                 test.frame_dims.len()
@@ -3084,9 +3051,8 @@ fn advance_download_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
                 .map(|(id, _)| *id);
             let Some(id) = candidate else {
                 if elapsed > Duration::from_secs(5) {
-                    test.failures.push(
-                        "phase A: no DownloadStarted observed within 5s".into(),
-                    );
+                    test.failures
+                        .push("phase A: no DownloadStarted observed within 5s".into());
                     step_to!(DownloadStep::Done);
                 }
                 return;
@@ -3191,14 +3157,11 @@ fn advance_download_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
             // or `cancelled`.
             let cancelled_max = test.cancelled.keys().map(|id| id.0).max();
             let known_phase_a = test.phase_a_id.map(|id| id.0).unwrap_or(0);
-            let Some(cancelled_id) = cancelled_max
-                .filter(|m| *m > known_phase_a)
-                .map(DownloadId)
+            let Some(cancelled_id) = cancelled_max.filter(|m| *m > known_phase_a).map(DownloadId)
             else {
                 if elapsed > Duration::from_secs(5) {
-                    test.failures.push(
-                        "phase B: no DownloadCancelled observed within 5s".into(),
-                    );
+                    test.failures
+                        .push("phase B: no DownloadCancelled observed within 5s".into());
                     step_to!(DownloadStep::Done);
                 }
                 return;
@@ -3300,10 +3263,8 @@ fn advance_download_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
                 .max();
             let Some(id) = candidate else {
                 if elapsed > Duration::from_secs(8) {
-                    test.failures.push(
-                        "phase D: no DownloadFinished after auth challenge within 8s"
-                            .into(),
-                    );
+                    test.failures
+                        .push("phase D: no DownloadFinished after auth challenge within 8s".into());
                     step_to!(DownloadStep::Done);
                 }
                 return;
@@ -3603,9 +3564,7 @@ fn advance_download_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
         }
         DownloadStep::Done => {
             if test.failures.is_empty() {
-                println!(
-                    "demo-mac: download-test: PASS — item 8 download pipeline verified"
-                );
+                println!("demo-mac: download-test: PASS — item 8 download pipeline verified");
                 println!(
                     "  - basic: DownloadStarted/Progress/Finished events landed with id {} and bytes match served payload",
                     test.phase_a_id.map(|i| i.0).unwrap_or(0)
@@ -3614,9 +3573,7 @@ fn advance_download_test(state: &mut AppState, event_loop: &ActiveEventLoop) {
                     "  - host Cancel decision: DownloadCancelled fired (no Started, no Finished) for id {}",
                     test.phase_b_id.map(|i| i.0).unwrap_or(0)
                 );
-                println!(
-                    "  - cancel_download(unknown_id): returned Ok(false) as expected"
-                );
+                println!("  - cancel_download(unknown_id): returned Ok(false) as expected");
                 println!(
                     "  - basic-auth download via start_download: shared auth handler supplied credentials, download succeeded (download-level auth callback fired = {})",
                     test.download_level_auth_seen
@@ -3658,10 +3615,7 @@ impl StartedRecordExt for Option<&StartedRecord> {
 }
 
 impl AppState {
-    fn new(
-        event_loop: &ActiveEventLoop,
-        cli: Cli,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(event_loop: &ActiveEventLoop, cli: Cli) -> Result<Self, Box<dyn std::error::Error>> {
         // Headless test runs hide the window. WKWebView still
         // composes / runs JS / processes synthesized input events
         // when its host window is hidden, so the four `--*-test`
@@ -3704,8 +3658,7 @@ impl AppState {
             // store — prior-run cookies can't false-positive the
             // "cookie X is in producer #2's store" assertion.
             let pid = std::process::id();
-            std::env::current_dir()?
-                .join(format!("target/demo-mac-profile-test-{pid}"))
+            std::env::current_dir()?.join(format!("target/demo-mac-profile-test-{pid}"))
         } else if cli.incognito_test {
             // Hint path is ignored when `non_persistent` wins, but we
             // pass a unique one anyway so the bookkeeping in the
@@ -3716,8 +3669,7 @@ impl AppState {
             // WKWebsiteDataStore (test asserts cleanly even if a
             // prior run crashed mid-download).
             let pid = std::process::id();
-            std::env::current_dir()?
-                .join(format!("target/demo-mac-download-test-{pid}"))
+            std::env::current_dir()?.join(format!("target/demo-mac-download-test-{pid}"))
         } else {
             std::env::current_dir()?.join("target/demo-mac-profile")
         };
@@ -3729,8 +3681,7 @@ impl AppState {
         if cli.download_test {
             // Override the default `<data_dir>/downloads` so we can
             // verify the file landed at a known per-run path.
-            producer_config.download_dir =
-                data_dir.join("download-output");
+            producer_config.download_dir = data_dir.join("download-output");
             // Pre-clean so prior-run file detritus can't mask a real
             // failure on the "file landed" assertion.
             let _ = std::fs::remove_dir_all(&producer_config.download_dir);
@@ -3740,27 +3691,22 @@ impl AppState {
         // custom URL scheme so the canned test pages don't depend on
         // the network and have stable origins suitable for
         // `serialize_interaction_state` round-trips.
-        let url_schemes: Vec<(String, UrlSchemeHandlerFn)> =
-            if cli.browser_test
-                || cli.interaction_state_test
-                || cli.pointer_input_test
-                || cli.download_test
-                || cli.two_tabs
-            {
-                vec![("scrying-test".to_string(), browser_test_scheme_handler())]
-            } else {
-                Vec::new()
-            };
+        let url_schemes: Vec<(String, UrlSchemeHandlerFn)> = if cli.browser_test
+            || cli.interaction_state_test
+            || cli.pointer_input_test
+            || cli.download_test
+            || cli.two_tabs
+        {
+            vec![("scrying-test".to_string(), browser_test_scheme_handler())]
+        } else {
+            Vec::new()
+        };
 
         // SAFETY: ns_view_ptr is the live NSView from winit's window,
         // which outlives the producer (window is owned by AppState
         // via Arc, dropped only when the event loop exits).
         let mut producer = unsafe {
-            WkWebViewProducer::new_with_url_schemes(
-                ns_view_ptr,
-                producer_config,
-                url_schemes,
-            )?
+            WkWebViewProducer::new_with_url_schemes(ns_view_ptr, producer_config, url_schemes)?
         };
 
         // Scripted mode loads its own offline test page once the
@@ -3815,15 +3761,11 @@ impl AppState {
             // should be visible to this one — that's the
             // "shared persistent store" property profile-test
             // asserts.
-            let second_config =
-                WkWebViewProducerConfig::new(webview_size, &data_dir);
+            let second_config = WkWebViewProducerConfig::new(webview_size, &data_dir);
             // SAFETY: same NSView the first producer was built
             // against; both drop before the window vanishes.
-            let second =
-                unsafe { WkWebViewProducer::new(ns_view_ptr, second_config)? };
-            println!(
-                "demo-mac: --profile-test: spun up persistent counterpart at same data_dir"
-            );
+            let second = unsafe { WkWebViewProducer::new(ns_view_ptr, second_config)? };
+            println!("demo-mac: --profile-test: spun up persistent counterpart at same data_dir");
             Some(second)
         } else if cli.two_tabs {
             // Position tab 1 at top-half and tab 2 at bottom-half so
@@ -3838,16 +3780,13 @@ impl AppState {
             // nav-event queue saw only its own URL.
             let _ = producer.load_url("scrying-test://history-1");
 
-            let second_data_dir =
-                std::env::current_dir()?.join("target/demo-mac-multi-tab");
+            let second_data_dir = std::env::current_dir()?.join("target/demo-mac-multi-tab");
             let second_config = WkWebViewProducerConfig::new(
                 PhysicalSize::new(inner.width, half_height),
                 &second_data_dir,
             );
-            let second_url_schemes: Vec<(String, UrlSchemeHandlerFn)> = vec![(
-                "scrying-test".to_string(),
-                browser_test_scheme_handler(),
-            )];
+            let second_url_schemes: Vec<(String, UrlSchemeHandlerFn)> =
+                vec![("scrying-test".to_string(), browser_test_scheme_handler())];
             // SAFETY: ns_view_ptr is the same valid NSView the first
             // producer was constructed against; both producers will
             // be dropped before the window vanishes.
@@ -3911,11 +3850,11 @@ impl AppState {
         };
 
         let download_test_state = if cli.download_test {
-            let urls = start_download_test_server(download_test_body())
-                .map_err(|e| -> Box<dyn std::error::Error> {
-                    format!("download-test: failed to start loopback server: {e}")
-                        .into()
-                })?;
+            let urls = start_download_test_server(download_test_body()).map_err(
+                |e| -> Box<dyn std::error::Error> {
+                    format!("download-test: failed to start loopback server: {e}").into()
+                },
+            )?;
             println!("demo-mac: download-test: serving payload at {}", urls.plain);
             println!(
                 "demo-mac: download-test: auth-required payload at {}",
@@ -3956,16 +3895,13 @@ impl AppState {
             // developer can resize / interact / screenshot without
             // racing an 8-second clock. Tests still run; they just
             // don't close the window.
-            two_tabs_deadline: (cli.two_tabs && !cli.visible)
-                .then_some(Duration::from_secs(8)),
+            two_tabs_deadline: (cli.two_tabs && !cli.visible).then_some(Duration::from_secs(8)),
             two_tabs_test: cli.two_tabs.then(TwoTabsTestState::default),
             browser_test: cli.browser_test.then(BrowserTestState::default),
             interaction_state_test: cli
                 .interaction_state_test
                 .then(InteractionStateTestState::default),
-            pointer_input_test: cli
-                .pointer_input_test
-                .then(PointerInputTestState::default),
+            pointer_input_test: cli.pointer_input_test.then(PointerInputTestState::default),
             incognito_test: cli.incognito_test.then(|| IncognitoTestState {
                 cookie_name: format!("scrying-incognito-{}", std::process::id()),
                 ..IncognitoTestState::default()

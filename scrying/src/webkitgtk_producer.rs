@@ -109,8 +109,8 @@ use std::path::PathBuf;
 use dpi::PhysicalSize;
 
 use crate::{
-    SystemWebviewBackend, WebSurfaceMode, WebSurfaceCapabilities, WebSurfaceError,
-    WebSurfaceFrame, WebSurfaceProducer,
+    SystemWebviewBackend, WebSurfaceCapabilities, WebSurfaceError, WebSurfaceFrame, WebSurfaceMode,
+    WebSurfaceProducer,
 };
 
 /// Configuration for `WebKitGtkProducer::new`. Mirrors the Windows /

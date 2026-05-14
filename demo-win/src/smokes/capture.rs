@@ -34,8 +34,8 @@ pub(crate) fn validate_platform_scale_resize(
     let samples = [
         winit::dpi::PhysicalSize::new(315, 195),
         winit::dpi::PhysicalSize::new(
-            COMPOSITION_PROBE_WIDTH as u32,
-            COMPOSITION_PROBE_HEIGHT as u32,
+            SMOKE_PROBE_WIDTH as u32,
+            SMOKE_PROBE_HEIGHT as u32,
         ),
     ];
     for target in samples {

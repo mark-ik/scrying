@@ -121,6 +121,104 @@ impl WebView2CompositionProducer {
         }
     }
 
+    /// Fire a Chrome DevTools Protocol method and block until WebView2 reports
+    /// completion or `timeout` elapses.
+    pub fn call_devtools_protocol_method_blocking(
+        &self,
+        method: &str,
+        params_json: &str,
+        timeout: Duration,
+    ) -> Result<String, WebSurfaceError> {
+        let method_name = method.to_string();
+        let (tx, rx) = mpsc::channel::<Result<String, String>>();
+        let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
+            move |result: windows::core::Result<()>, json_result: String| {
+                let payload = result
+                    .map(|()| json_result)
+                    .map_err(|error| error.message().to_string());
+                let _ = tx.send(payload);
+                Ok(())
+            },
+        ));
+
+        let method = CoTaskMemPWSTR::from(method);
+        let params = CoTaskMemPWSTR::from(params_json);
+        unsafe {
+            self.webview
+                .CallDevToolsProtocolMethod(
+                    *method.as_ref().as_pcwstr(),
+                    *params.as_ref().as_pcwstr(),
+                    &handler,
+                )
+                .map_err(platform("CallDevToolsProtocolMethod"))?;
+        }
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            match rx.try_recv() {
+                Ok(Ok(value)) => return Ok(value),
+                Ok(Err(error)) => return Err(WebSurfaceError::Platform(error)),
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(WebSurfaceError::Platform(
+                        "CallDevToolsProtocolMethod completion channel disconnected".into(),
+                    ));
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(WebSurfaceError::Platform(format!(
+                    "CallDevToolsProtocolMethod {method_name:?} did not complete within {timeout:?}"
+                )));
+            }
+            pump_messages_for(Duration::from_millis(16));
+        }
+    }
+
+    /// Execute JavaScript in the WebView2 page and block for its JSON result.
+    pub fn execute_script_with_result(
+        &self,
+        script: &str,
+        timeout: Duration,
+    ) -> Result<String, WebSurfaceError> {
+        let (tx, rx) = mpsc::channel::<Result<String, String>>();
+        let handler = ExecuteScriptCompletedHandler::create(Box::new(
+            move |result: windows::core::Result<()>, json_result: String| {
+                let payload = result
+                    .map(|()| json_result)
+                    .map_err(|error| error.message().to_string());
+                let _ = tx.send(payload);
+                Ok(())
+            },
+        ));
+
+        let script = CoTaskMemPWSTR::from(script);
+        unsafe {
+            self.webview
+                .ExecuteScript(*script.as_ref().as_pcwstr(), &handler)
+                .map_err(platform("ExecuteScript"))?;
+        }
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            match rx.try_recv() {
+                Ok(Ok(value)) => return Ok(value),
+                Ok(Err(error)) => return Err(WebSurfaceError::Platform(error)),
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(WebSurfaceError::Platform(
+                        "ExecuteScript completion channel disconnected".into(),
+                    ));
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(WebSurfaceError::Platform(format!(
+                    "ExecuteScript did not complete within {timeout:?}"
+                )));
+            }
+            pump_messages_for(Duration::from_millis(16));
+        }
+    }
+
     /// Drain the next pending message posted from JS via
     /// `window.chrome.webview.postMessage(...)`.
     pub fn poll_web_message(&self) -> Option<String> {
@@ -203,6 +301,7 @@ pub(super) fn register_persistent_handlers(
             if unsafe { args.Uri(&mut uri) }.is_ok() {
                 let url = unsafe { consume_pwstr(uri) };
                 if let Ok(mut q) = queue.lock() {
+                    q.push_back(NavigationEvent::TextInputBlurred);
                     q.push_back(NavigationEvent::Starting { url });
                 }
             }
@@ -317,6 +416,7 @@ pub(super) fn register_persistent_handlers(
                 && is_content_process_failure(kind)
                 && let Ok(mut q) = queue.lock()
             {
+                q.push_back(NavigationEvent::TextInputBlurred);
                 q.push_back(NavigationEvent::ContentProcessTerminated);
             }
         }
@@ -358,6 +458,12 @@ pub(super) fn register_persistent_handlers(
                     return Ok(());
                 }
                 if let Some(event) = browser::parse_media_capture_bridge_message(&s) {
+                    if let Ok(mut q) = nav_queue_for_messages.lock() {
+                        q.push_back(event);
+                    }
+                    return Ok(());
+                }
+                if let Some(event) = browser::parse_text_input_bridge_message(&s) {
                     if let Ok(mut q) = nav_queue_for_messages.lock() {
                         q.push_back(event);
                     }

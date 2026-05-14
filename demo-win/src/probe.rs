@@ -1,12 +1,17 @@
 use super::*;
 
-pub(crate) fn composition_contains(pos: winit::dpi::PhysicalPosition<f64>) -> bool {
+pub(crate) fn composition_contains(
+    pos: winit::dpi::PhysicalPosition<f64>,
+    window_size: winit::dpi::PhysicalSize<u32>,
+) -> bool {
     let x = pos.x as f32;
     let y = pos.y as f32;
-    x >= COMPOSITION_PROBE_X
-        && x < COMPOSITION_PROBE_X + COMPOSITION_PROBE_WIDTH
-        && y >= COMPOSITION_PROBE_Y
-        && y < COMPOSITION_PROBE_Y + COMPOSITION_PROBE_HEIGHT
+    let (offset_x, offset_y) = capture_offset_for_window(window_size);
+    let capture_size = capture_size_for_window(window_size);
+    x >= offset_x
+        && x < offset_x + capture_size.width as f32
+        && y >= offset_y
+        && y < offset_y + capture_size.height as f32
 }
 
 pub(crate) fn forward_mouse_to_composition(
@@ -20,11 +25,13 @@ pub(crate) fn forward_mouse_to_composition(
     let Some(renderer) = state.renderer.as_mut() else {
         return;
     };
-    if !composition_contains(pos) {
+    let window_size = state.window.inner_size();
+    if !composition_contains(pos, window_size) {
         return;
     }
-    let local_x = (pos.x as f32 - COMPOSITION_PROBE_X) as i32;
-    let local_y = (pos.y as f32 - COMPOSITION_PROBE_Y) as i32;
+    let (offset_x, offset_y) = capture_offset_for_window(window_size);
+    let local_x = (pos.x as f32 - offset_x) as i32;
+    let local_y = (pos.y as f32 - offset_y) as i32;
     let mut virtual_keys = state.modifiers;
     virtual_keys.left_button = state.mouse_buttons.left_button;
     virtual_keys.right_button = state.mouse_buttons.right_button;
@@ -40,10 +47,34 @@ pub(crate) fn forward_mouse_to_composition(
     }
 }
 
-pub(crate) fn drain_composition_events(renderer: &mut WebViewRenderer) {
-    while let Some(event) = renderer.captured.producer.poll_navigation_event() {
+pub(crate) fn drain_composition_events(state: &mut AppState) {
+    let mut events = Vec::new();
+    let mut cursor_shapes = Vec::new();
+    {
+        let Some(renderer) = state.renderer.as_mut() else {
+            return;
+        };
+        while let Some(event) = renderer.captured.producer.poll_navigation_event() {
+            events.push(event);
+        }
+        while let Some(message) = renderer.captured.producer.poll_web_message() {
+            println!("[web message] {message}");
+        }
+        while let Some(shape) = renderer.captured.producer.poll_cursor_shape() {
+            cursor_shapes.push(shape);
+        }
+    }
+    for shape in cursor_shapes {
+        if state.last_cursor_shape.as_ref() != Some(&shape) {
+            println!("[cursor] {shape:?}");
+            state.last_cursor_shape = Some(shape);
+        }
+    }
+
+    for event in events {
         match event {
             scrying::NavigationEvent::Starting { url } => {
+                cancel_text_input_state(state, "navigation starting");
                 println!("[nav] starting -> {url}");
             }
             scrying::NavigationEvent::SourceChanged { url } => {
@@ -59,17 +90,83 @@ pub(crate) fn drain_composition_events(renderer: &mut WebViewRenderer) {
                 println!("[nav] new window requested -> {url}");
             }
             scrying::NavigationEvent::ContentProcessTerminated => {
+                cancel_text_input_state(state, "content process terminated");
                 println!("[nav] content process terminated");
+            }
+            scrying::NavigationEvent::TextInputFocused { state: input_state }
+            | scrying::NavigationEvent::TextInputChanged { state: input_state } => {
+                apply_text_input_state(state, input_state);
+            }
+            scrying::NavigationEvent::TextInputBlurred => {
+                cancel_text_input_state(state, "blurred");
             }
             _ => {}
         }
     }
-    while let Some(message) = renderer.captured.producer.poll_web_message() {
-        println!("[web message] {message}");
+}
+
+pub(crate) fn apply_text_input_state(state: &mut AppState, input_state: scrying::TextInputState) {
+    if input_state.is_password {
+        cancel_text_input_state(state, "password-like input suppressed");
+        return;
     }
-    while let Some(shape) = renderer.captured.producer.poll_cursor_shape() {
-        println!("[cursor] {shape:?}");
+
+    let purpose = input_state.purpose();
+    if purpose == scrying::InputPurpose::Disabled {
+        cancel_text_input_state(state, "inputmode=none suppresses IME");
+        return;
     }
+
+    state.text_input_active = true;
+    state.text_input_state = Some(input_state.clone());
+    state.window.set_ime_allowed(true);
+    let (position, size) = text_input_ime_area(&state.window, input_state.caret_rect);
+    state.window.set_ime_cursor_area(position, size);
+    // winit 0.30's `set_ime_purpose` is documented as unsupported on Windows;
+    // higher-level hosts that own a TSF text store should consult
+    // `TextInputState::purpose()` directly to drive input-scope mapping.
+    println!(
+        "[text-input] {} type={} mode={} autocomplete={} purpose={:?} caret=({}, {}) {}x{}",
+        input_state.element_kind,
+        input_state.input_type,
+        input_state.input_mode,
+        input_state.autocomplete,
+        purpose,
+        position.x,
+        position.y,
+        size.width,
+        size.height
+    );
+}
+
+pub(crate) fn cancel_text_input_state(state: &mut AppState, reason: &str) {
+    if let Some(renderer) = state.renderer.as_mut() {
+        let _ = renderer
+            .captured
+            .producer
+            .set_ime_composition("", 0, 0, 0, 0);
+    }
+    state.text_input_active = false;
+    state.text_input_state = None;
+    state.window.set_ime_allowed(false);
+    println!("[text-input] {reason}");
+}
+
+pub(crate) fn text_input_ime_area(
+    window: &Window,
+    caret_rect: scrying::TextInputRect,
+) -> (
+    winit::dpi::LogicalPosition<f64>,
+    winit::dpi::LogicalSize<f64>,
+) {
+    let scale_factor = window.scale_factor().max(1.0);
+    let (offset_x, offset_y) = capture_offset_for_window(window.inner_size());
+    let position = winit::dpi::LogicalPosition::new(
+        offset_x as f64 / scale_factor + caret_rect.x,
+        offset_y as f64 / scale_factor + caret_rect.y,
+    );
+    let size = winit::dpi::LogicalSize::new(caret_rect.width.max(1.0), caret_rect.height.max(1.0));
+    (position, size)
 }
 
 const COMPOSITION_WEBVIEW_PROBE_HTML: &str = r#"<!doctype html>
@@ -108,7 +205,7 @@ const COMPOSITION_WEBVIEW_PROBE_HTML: &str = r#"<!doctype html>
             color: #ffbe70;
             font-size: 14px;
         }
-        input {
+        input, textarea {
             width: 220px;
             justify-self: center;
             box-sizing: border-box;
@@ -119,6 +216,23 @@ const COMPOSITION_WEBVIEW_PROBE_HTML: &str = r#"<!doctype html>
             padding: 6px 8px;
             font: 15px system-ui, sans-serif;
             letter-spacing: 0;
+        }
+        textarea {
+            height: 54px;
+            resize: none;
+            line-height: 20px;
+        }
+        #matrix {
+            display: grid;
+            grid-template-columns: repeat(7, minmax(0, 1fr));
+            gap: 4px;
+            justify-content: center;
+            margin-top: 4px;
+        }
+        #matrix input {
+            width: 100%;
+            padding: 2px 4px;
+            font: 11px system-ui, sans-serif;
         }
         #tick {
             position: absolute;
@@ -159,6 +273,17 @@ const COMPOSITION_WEBVIEW_PROBE_HTML: &str = r#"<!doctype html>
         <h1>Scrying Composition Probe</h1>
         <p>Rendered through the selected system-webview producer.</p>
         <input id="keyboard-smoke" autofocus autocomplete="off" spellcheck="false" aria-label="keyboard smoke input">
+        <textarea id="ime-textarea" autocomplete="off" spellcheck="false" aria-label="IME textarea">first line&#10;second line&#10;third line</textarea>
+        <input id="password-smoke" type="password" autocomplete="current-password" aria-label="password suppression input">
+        <div id="matrix">
+            <input id="purpose-search" type="search" aria-label="purpose search input">
+            <input id="purpose-email" type="email" aria-label="purpose email input">
+            <input id="purpose-url" type="url" aria-label="purpose url input">
+            <input id="purpose-tel" type="tel" aria-label="purpose tel input">
+            <input id="purpose-number" type="number" aria-label="purpose number input">
+            <input id="purpose-numeric-mode" inputmode="numeric" aria-label="purpose numeric inputmode">
+            <input id="purpose-disabled" inputmode="none" aria-label="purpose disabled inputmode">
+        </div>
     </main>
     <div id="bar"></div>
     <script>
@@ -167,8 +292,45 @@ const COMPOSITION_WEBVIEW_PROBE_HTML: &str = r#"<!doctype html>
         const input = document.getElementById("keyboard-smoke");
         input.focus();
         input.addEventListener("input", () => {
+            window.__scryingKeyboardSmokeLastInput = input.value;
             window.chrome.webview.postMessage("keyboard-smoke:" + input.value);
         });
+        input.addEventListener("keydown", event => {
+            window.chrome.webview.postMessage("keyboard-smoke:keydown:" + event.key);
+        });
+        input.addEventListener("compositionstart", event => {
+            window.chrome.webview.postMessage("keyboard-smoke:compositionstart:" + event.data);
+        });
+        input.addEventListener("compositionupdate", event => {
+            window.chrome.webview.postMessage("keyboard-smoke:compositionupdate:" + event.data);
+        });
+        input.addEventListener("compositionend", event => {
+            window.chrome.webview.postMessage("keyboard-smoke:compositionend:" + event.data);
+        });
+        window.chrome.webview.addEventListener("message", event => {
+            if (event.data === "keyboard-smoke:focus") {
+                input.focus();
+                window.chrome.webview.postMessage("keyboard-smoke:focused:" + document.activeElement.id);
+            }
+        });
+        const post = msg => { try { window.chrome.webview.postMessage(msg); } catch (_) {} };
+        const idOf = el => (el && el.id) ? el.id : (el ? el.tagName.toLowerCase() : "?");
+        const isPasswordEl = el => {
+            if (!el || el.tagName !== "INPUT") return false;
+            return (el.getAttribute("type") || "").toLowerCase() === "password";
+        };
+        document.addEventListener("keydown", event => {
+            const target = event.target;
+            const key = isPasswordEl(target) ? "<redacted>" : event.key;
+            post("dom-keydown:" + idOf(target) + ":" + key);
+        }, true);
+        document.addEventListener("input", event => {
+            const target = event.target;
+            const len = (target && typeof target.value === "string") ? target.value.length : -1;
+            post("dom-input:" + idOf(target) + ":len=" + len);
+        }, true);
+        document.addEventListener("compositionstart", event => post("dom-comp-start:" + idOf(event.target)), true);
+        document.addEventListener("compositionend", event => post("dom-comp-end:" + idOf(event.target)), true);
         function loop() {
             n++;
             tick.textContent = "frame " + n;
@@ -309,7 +471,9 @@ pub(crate) fn run_windows_shared_texture_probe(
     Ok(())
 }
 
-fn hwnd_from_window(window: &Window) -> Result<*mut std::ffi::c_void, Box<dyn std::error::Error>> {
+pub(crate) fn hwnd_from_window(
+    window: &Window,
+) -> Result<*mut std::ffi::c_void, Box<dyn std::error::Error>> {
     let handle = window.window_handle()?.as_raw();
     match handle {
         RawWindowHandle::Win32(handle) => Ok(handle.hwnd.get() as *mut std::ffi::c_void),
@@ -442,15 +606,29 @@ pub(crate) fn run_platform_composition_visual_probe(
     };
 
     let user_data_dir = std::env::temp_dir().join("demo-win-composition-webview2");
-    let mut config = scrying::PlatformWebSurfaceConfig::new(
-        winit::dpi::PhysicalSize::new(
-            COMPOSITION_PROBE_WIDTH as u32,
-            COMPOSITION_PROBE_HEIGHT as u32,
-        ),
-        user_data_dir.clone(),
-    )
-    .with_offset(COMPOSITION_PROBE_X, COMPOSITION_PROBE_Y)
-    .with_diagnostic_backdrop((27, 86, 96));
+    // Smokes assume the bounded constants (textarea caret bounds, profile
+    // multi-view layout, capture-test fixed sizes); interactive runs deserve a
+    // producer that already matches the resize-time layout (right-half of the
+    // host window) so the live visual hit-test region matches the rendered
+    // pixels without requiring a manual resize first.
+    let (initial_size, initial_offset_x, initial_offset_y) = if cli.one_shot() {
+        (
+            winit::dpi::PhysicalSize::new(
+                SMOKE_PROBE_WIDTH as u32,
+                SMOKE_PROBE_HEIGHT as u32,
+            ),
+            SMOKE_PROBE_X,
+            SMOKE_PROBE_Y,
+        )
+    } else {
+        let window_size = window.inner_size();
+        let capture = capture_size_for_window(window_size);
+        let (x, y) = capture_offset_for_window(window_size);
+        (capture, x, y)
+    };
+    let mut config = scrying::PlatformWebSurfaceConfig::new(initial_size, user_data_dir.clone())
+        .with_offset(initial_offset_x, initial_offset_y)
+        .with_diagnostic_backdrop((27, 86, 96));
     if let Some(handle) = fence_shared_handle {
         config = config.with_fence_shared_handle(handle);
     }
@@ -468,6 +646,18 @@ pub(crate) fn run_platform_composition_visual_probe(
     let mut producer = producer;
     if cli.scripted {
         validate_platform_scripted(&mut producer)?;
+    }
+    if cli.cdp_input_test {
+        validate_platform_cdp_input(&mut producer)?;
+    }
+    if cli.accelerator_test {
+        validate_platform_accelerator_bridge(
+            &mut producer,
+            windows::Win32::Foundation::HWND(parent_hwnd),
+        )?;
+    }
+    if cli.ime_bridge_test {
+        validate_platform_ime_bridge(&mut producer, window)?;
     }
     if cli.cookie_test {
         validate_platform_cookie_store(&mut producer)?;
@@ -527,10 +717,6 @@ pub(crate) fn run_platform_composition_visual_probe(
         validate_platform_incognito_store(producer, parent_hwnd, user_data_dir)?;
         return Ok(None);
     }
-    if cli.keyboard_test || keyboard_validate_enabled() {
-        validate_platform_keyboard_smoke(&mut producer)?;
-    }
-
     let imported = if std::env::var("WEBVIEW_READBACK_VALIDATE")
         .ok()
         .filter(|v| !v.is_empty() && v != "0")

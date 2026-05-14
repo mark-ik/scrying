@@ -50,11 +50,31 @@ import, with optional shared D3D12 fence sync.
 - **Input**: full mouse + scroll (`SendMouseInput`), full touch + pen
   (`SendPointerInput`), focus entry (`MoveFocus`) with focus-event
   hooks available at the WebView2 ceiling, drag-and-drop forwarding
-  (`DragEnter`/`DragOver`/`DragLeave`/`Drop`), cursor-change reporting
-  (`add_CursorChanged`), trait-level `send_keyboard_input`, and a raw
-  Win32 `WM_KEY*` / `WM_CHAR` / `WM_DEADCHAR` / `WM_IME*` forwarding
-  helper for hosts that can tap the parent HWND message stream. **IME**
-  for non-Latin input still needs real CJK round-trip validation.
+  (`DragEnter`/`DragOver`/`DragLeave`/`Drop`), and cursor-change reporting
+  (`add_CursorChanged`) on pure visual hosting. Keyboard/IME is a pure
+  CompositionController ceiling. A limited no-overlay fallback can set the
+  focused DOM input value, post through the WebView message bridge, and drive a
+  hash navigation-style state change via CDP/`ExecuteScript` DOM automation.
+  The CDP diagnostic explicitly probes `Input.dispatchKeyEvent`,
+  `Input.insertText`, and `Input.imeSetComposition`; the 2026-05-13 smoke
+  reports DOM input observed for those routes plus `Runtime.evaluate` and
+  `ExecuteScript`. Those are synthetic input routes, not OS IME/candidate UI
+  ownership. Host accelerators are separate: WebView2 `AcceleratorKeyPressed`
+  is now surfaced through `NavigationEvent::AcceleratorKeyPressed`, and
+  `demo-win --accelerator-test` observes F3 in pure CompositionController mode.
+  The first host-owned IME bridge is also proven: WebView2 emits focused
+  editable/caret state, the winit host sets native IME enablement and candidate
+  area from that state, and CDP `imeSetComposition` / `insertText` apply the
+  renderer-side composition/commit. The hardened bridge suppresses
+  password-like editables before emitting selection/caret metadata, validates
+  textarea scroll/multiline caret placement, maps through the current
+  composition offset and host scale factor, and cancels composition on
+  blur/navigation boundaries. This is a baseline bridge, not full TSF
+  `ITextStoreACP2` parity.
+  Window-to-Visual is proven for ASCII DOM input and parent-HWND WGC/wgpu
+  import, including three simultaneous animated pages,
+  but the live controllers report visible `Chrome_WidgetWin_0` child HWNDs, so
+  it is not accepted as the no-overlay composition target.
 - **Navigation / lifecycle**: complete. URL + HTML, back/forward/
   stop/reload, NavigationStarting/SourceChanged/NavigationCompleted/
   DocumentTitleChanged events, ProcessFailed for crash recovery.
@@ -75,7 +95,9 @@ Embeddable surface shipped for imported GPU frames, resize / offset,
 URL + HTML navigation, mouse + scroll, pointer / touch / pen, focus,
 navigation + title events, JS messaging, PNG snapshots, history controls,
 settings, DevTools, per-profile user-data directory, OLE drag-in helpers,
-cursor-change reporting, keyboard forwarding, and optional explicit D3D12
+cursor-change reporting, CDP-backed keyboard/text dispatch and
+accelerator-key events for pure CompositionController hosting, baseline
+host-owned IME bridge events/candidate placement, and optional explicit D3D12
 fence sync.
 
 The remaining Windows work is no longer "make the WebView2 producer
@@ -419,8 +441,8 @@ every row marked `—` is structurally not on that platform.
 | Mouse forwarding (buttons + move + leave) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | Scroll wheel forwarding | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | Touch + pen forwarding | ✅ | ✅ 0.4.x (mouse-shaped JS pointer events) | ? | ? |
-| Keyboard forwarding (basic) | 🟡 (API wired; DOM smoke blocked) | ✅ 0.4.0 | ? | ? |
-| IME (CJK / non-Latin) | 🟡 (raw `WM_IME*` forwarder wired; bounded DOM smoke still times out) | ✅ 0.4.0 (via NSTextInputClient) | ? | ? |
+| Keyboard forwarding (basic) | 🟡 (CDP-backed `send_keyboard_input` works in pure visual hosting; Window-to-Visual input passes but exposes visible child HWNDs) | ✅ 0.4.0 | ? | ? |
+| IME (CJK / non-Latin) | 🟡 (baseline host-owned bridge proven: focused editable/caret events -> winit IME area -> CDP composition/commit; full TSF text-store parity remains future work) | ✅ 0.4.0 (via NSTextInputClient) | ? | ? |
 | Drag-and-drop into webview | ✅ (concrete OLE `IDataObject` helpers; trait reports data-object requirement) | — capture (SPI-blocked) / ✅ overlay (auto) | ? | ? |
 | Focus management | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
 | Cursor-change reporting | ✅ | ✅ 0.4.0 | ? | ? |

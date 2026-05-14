@@ -17,8 +17,8 @@ use crate::native_frame::{
     CapabilityStatus, DmaBufImage, NativeFrame, NativeFrameKind, SyncMechanism, UnsupportedReason,
 };
 use crate::{
-    SystemWebviewBackend, WebSurfaceMode, WebSurfaceCapabilities, WebSurfaceError,
-    WebSurfaceFrame, WebSurfaceProducer,
+    SystemWebviewBackend, WebSurfaceCapabilities, WebSurfaceError, WebSurfaceFrame, WebSurfaceMode,
+    WebSurfaceProducer,
 };
 
 /// Configuration for [`WpeProducer`].
@@ -108,10 +108,7 @@ impl WpeProducer {
     /// `WPEViewBackendDMABuf` exports a fresh buffer. It is public so a Linux
     /// smoke harness can inject a known frame before the real callback bridge
     /// is complete.
-    pub fn enqueue_dmabuf_frame(
-        &mut self,
-        mut frame: DmaBufImage,
-    ) -> Result<(), WebSurfaceError> {
+    pub fn enqueue_dmabuf_frame(&mut self, mut frame: DmaBufImage) -> Result<(), WebSurfaceError> {
         if frame.size.width == 0 || frame.size.height == 0 {
             return Err(WebSurfaceError::Platform(
                 "WPE DMABUF frame size must be non-zero".to_string(),
