@@ -13,6 +13,7 @@ use webkit2gtk::{WebContext, WebView, WebViewExt, WebsiteDataManager};
 use crate::{UrlSchemeHandlerFn, WebSurfaceCapabilities, WebSurfaceError};
 
 use super::config::WebKitGtkProducerConfig;
+use super::downloads;
 use super::helpers::ensure_gtk_init;
 use super::navigation::{NavState, install_load_signals};
 use super::scheme_handler;
@@ -82,6 +83,12 @@ impl WebKitGtkProducer {
         if !url_schemes.is_empty() {
             scheme_handler::register_all(&context, url_schemes);
         }
+
+        let nav_state = Rc::new(RefCell::new(NavState::default()));
+        let downloads_dir = config.data_dir.join("downloads");
+        let next_download_id = Rc::new(Cell::new(0u64));
+        downloads::install(&context, downloads_dir, nav_state.clone(), next_download_id);
+
         let webview = WebView::with_context(&context);
 
         let offscreen = gtk::OffscreenWindow::new();
@@ -90,7 +97,6 @@ impl WebKitGtkProducer {
         offscreen.add(&webview);
         offscreen.show_all();
 
-        let nav_state = Rc::new(RefCell::new(NavState::default()));
         install_load_signals(&webview, &nav_state);
 
         let web_messages: Rc<RefCell<VecDeque<String>>> = Rc::new(RefCell::new(VecDeque::new()));

@@ -98,6 +98,7 @@ struct Args {
     cookie_test: bool,
     scheme_test: bool,
     popup_test: bool,
+    download_test: bool,
     width: u32,
     height: u32,
 }
@@ -115,6 +116,7 @@ impl Args {
             cookie_test: false,
             scheme_test: false,
             popup_test: false,
+            download_test: false,
             width: 800,
             height: 600,
         };
@@ -147,6 +149,7 @@ impl Args {
                 "--cookie-test" => out.cookie_test = true,
                 "--scheme-test" => out.scheme_test = true,
                 "--popup-test" => out.popup_test = true,
+                "--download-test" => out.download_test = true,
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -162,9 +165,8 @@ fn print_help() {
     println!("demo-linux — WebKitGTK runtime probe for scrying");
     println!();
     println!("USAGE: demo-linux [--url URL] [--out PATH] [--width N] [--height N]");
-    println!(
-        "                  [--snapshot-test] [--scripted] [--input-test] [--cookie-test] [--scheme-test] [--popup-test] [--probe-only]"
-    );
+    println!("                  [--snapshot-test] [--scripted] [--input-test] [--cookie-test]");
+    println!("                  [--scheme-test] [--popup-test] [--download-test] [--probe-only]");
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -184,20 +186,34 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = std::env::temp_dir().join("scrying-demo-linux-data");
     let config =
         WebKitGtkProducerConfig::new(PhysicalSize::new(args.width, args.height), &data_dir);
-    let mut producer = if args.scheme_test {
+    let mut producer = if args.scheme_test || args.download_test {
         let mut schemes: HashMap<String, UrlSchemeHandlerFn> = HashMap::new();
+        // The `scry://` scheme serves either an HTML page (for the
+        // scheme test) or a fixed-bytes attachment when the path
+        // starts with `/download/` (for the download test).
         schemes.insert(
             "scry".to_string(),
             Arc::new(|uri: &str| {
-                let body = format!(
-                    "<!doctype html><html><body><script>\
-                 window.chrome.webview.postMessage('scheme served: {uri}');\
-                 </script></body></html>"
-                );
-                UrlSchemeResponse {
-                    mime_type: "text/html".to_string(),
-                    body: body.into_bytes(),
-                    headers: vec![("X-Scry-Source".to_string(), "demo-linux".to_string())],
+                if uri.contains("/download/") {
+                    UrlSchemeResponse {
+                        mime_type: "application/octet-stream".to_string(),
+                        body: b"scrying download payload\n".to_vec(),
+                        headers: vec![(
+                            "Content-Disposition".to_string(),
+                            "attachment; filename=\"scry.bin\"".to_string(),
+                        )],
+                    }
+                } else {
+                    let body = format!(
+                        "<!doctype html><html><body><script>\
+                         window.chrome.webview.postMessage('scheme served: {uri}');\
+                         </script></body></html>"
+                    );
+                    UrlSchemeResponse {
+                        mime_type: "text/html".to_string(),
+                        body: body.into_bytes(),
+                        headers: vec![("X-Scry-Source".to_string(), "demo-linux".to_string())],
+                    }
                 }
             }),
         );
@@ -222,6 +238,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.popup_test {
         return run_popup_test(&mut producer, nav_timeout);
+    }
+    if args.download_test {
+        return run_download_test(&producer);
     }
 
     match &args.url {
@@ -267,6 +286,79 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+/// Download lifecycle smoke. Pre-writes a known payload to a temp
+/// file, asks WebKit to download it (via `webkit_web_view_download_uri`
+/// against the `file://` URL), polls for `DownloadStarted` +
+/// `DownloadFinished` events, and verifies the destination file
+/// matches.
+///
+/// `file://` is used (rather than the `scry://` custom scheme) because
+/// WebKit's download path bypasses custom URI scheme handlers — those
+/// fire on resource-load only. A round-trip through the network
+/// process needs a "real" scheme.
+fn run_download_test(producer: &WebKitGtkProducer) -> Result<(), Box<dyn std::error::Error>> {
+    let payload = b"scrying download payload\n";
+    let source_path = std::env::temp_dir().join("scrying-download-source.bin");
+    std::fs::write(&source_path, payload)?;
+    let download_url = format!("file://{}", source_path.display());
+    println!("kicking off download of {download_url}");
+    producer.download_url(&download_url)?;
+
+    let started = producer.wait_for_navigation_event(Duration::from_secs(3), |e| {
+        matches!(e, NavigationEvent::DownloadStarted { .. })
+    });
+    let destination = match started {
+        Some(NavigationEvent::DownloadStarted {
+            id,
+            url,
+            destination_path,
+            ..
+        }) => {
+            println!("DownloadStarted id={id:?} url={url} dest={destination_path:?}");
+            destination_path
+        }
+        Some(other) => return Err(format!("FAIL: unexpected event {other:?}").into()),
+        None => return Err("FAIL: DownloadStarted never fired".into()),
+    };
+
+    let finished = producer.wait_for_navigation_event(Duration::from_secs(5), |e| {
+        matches!(e, NavigationEvent::DownloadFinished { .. })
+    });
+    match finished {
+        Some(NavigationEvent::DownloadFinished {
+            id, error: None, ..
+        }) => {
+            println!("DownloadFinished id={id:?} (no error)");
+        }
+        Some(NavigationEvent::DownloadFinished {
+            id, error: Some(e), ..
+        }) => {
+            return Err(format!("FAIL: download id={id:?} reported error {e}").into());
+        }
+        Some(other) => return Err(format!("FAIL: unexpected event {other:?}").into()),
+        None => return Err("FAIL: DownloadFinished never fired".into()),
+    }
+
+    // Confirm the bytes round-tripped to the producer's downloads
+    // directory.
+    let on_disk = std::fs::read(&destination)
+        .map_err(|e| format!("FAIL: cannot read {destination:?}: {e}"))?;
+    if on_disk == payload {
+        println!(
+            "PASS: downloaded file has expected payload ({} bytes)",
+            on_disk.len()
+        );
+        Ok(())
+    } else {
+        Err(format!(
+            "FAIL: payload mismatch — got {} bytes, expected {}",
+            on_disk.len(),
+            payload.len()
+        )
+        .into())
+    }
 }
 
 const POPUP_HTML: &str = r#"<!doctype html>
