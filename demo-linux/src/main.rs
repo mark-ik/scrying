@@ -18,7 +18,10 @@ use std::time::Duration;
 
 use dpi::PhysicalSize;
 use scrying::webkitgtk_producer::{WebKitGtkProducer, WebKitGtkProducerConfig};
-use scrying::{WebSurfaceCapabilities, WebSurfaceFrame, WebSurfaceProducer};
+use scrying::{
+    FocusReason, KeyEventKind, KeyModifierFlags, KeyboardInput, MouseEventKind, MouseInput,
+    MouseVirtualKeys, WebSurfaceCapabilities, WebSurfaceFrame, WebSurfaceProducer,
+};
 
 const DEFAULT_HTML: &str = r#"<!doctype html>
 <html><head><meta charset="utf-8"><title>scrying linux smoke</title></head>
@@ -35,6 +38,23 @@ window.chrome.webview.addEventListener('message', function(e) {
 });
 // Tell the host we're loaded.
 window.chrome.webview.postMessage('hello from page');
+</script></body></html>"#;
+
+const INPUT_HTML: &str = r#"<!doctype html>
+<html><head><meta charset="utf-8"><title>scrying input</title></head>
+<body>
+<button id="btn" style="position:absolute;left:100px;top:100px;width:200px;height:60px">click target</button>
+<script>
+var btn = document.getElementById('btn');
+btn.addEventListener('mousedown', function(e) {
+    window.chrome.webview.postMessage('mousedown@' + e.clientX + ',' + e.clientY + ' trusted=' + e.isTrusted);
+});
+btn.addEventListener('mouseup', function(e) {
+    window.chrome.webview.postMessage('mouseup@' + e.clientX + ',' + e.clientY + ' trusted=' + e.isTrusted);
+});
+document.addEventListener('keydown', function(e) {
+    window.chrome.webview.postMessage('keydown:' + e.key + ' trusted=' + e.isTrusted);
+});
 </script></body></html>"#;
 
 fn main() -> ExitCode {
@@ -71,6 +91,7 @@ struct Args {
     snapshot_test: bool,
     probe_only: bool,
     scripted: bool,
+    input_test: bool,
     width: u32,
     height: u32,
 }
@@ -84,6 +105,7 @@ impl Args {
             snapshot_test: false,
             probe_only: false,
             scripted: false,
+            input_test: false,
             width: 800,
             height: 600,
         };
@@ -112,6 +134,7 @@ impl Args {
                 "--snapshot-test" => out.snapshot_test = true,
                 "--probe-only" => out.probe_only = true,
                 "--scripted" => out.scripted = true,
+                "--input-test" => out.input_test = true,
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -127,7 +150,7 @@ fn print_help() {
     println!("demo-linux — WebKitGTK runtime probe for scrying");
     println!();
     println!("USAGE: demo-linux [--url URL] [--out PATH] [--width N] [--height N]");
-    println!("                  [--snapshot-test] [--scripted] [--probe-only]");
+    println!("                  [--snapshot-test] [--scripted] [--input-test] [--probe-only]");
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -153,6 +176,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.scripted {
         return run_scripted(&mut producer, nav_timeout);
+    }
+    if args.input_test {
+        return run_input_test(&mut producer, nav_timeout);
     }
 
     match &args.url {
@@ -196,6 +222,91 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 format!("FAIL: expected CpuRgba frame, got mode {:?}", other.mode()).into(),
             );
         }
+    }
+    Ok(())
+}
+
+/// Synthesized input smoke. Loads a page with mouse + keyboard
+/// handlers that postMessage back, then drives `send_mouse_input` /
+/// `send_keyboard_input` and asserts the page-side listeners observed
+/// the synthesized events.
+fn run_input_test(
+    producer: &mut WebKitGtkProducer,
+    nav_timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("loading input-test page");
+    producer.navigate_to_string(INPUT_HTML, nav_timeout)?;
+
+    // Focus the page so document-level keyboard listeners have a
+    // target. `move_focus` is a no-op for handlers attached to
+    // `document` itself, but worth calling — it'll matter once we
+    // upgrade to native GdkEvent dispatch.
+    producer.move_focus(FocusReason::Programmatic)?;
+
+    // Centre of the button (x=100..300, y=100..160).
+    let target = (200, 130);
+    let no_mods = MouseVirtualKeys::default();
+
+    println!("sending LeftButtonDown @ {target:?}");
+    producer.send_mouse_input(MouseInput {
+        kind: MouseEventKind::LeftButtonDown,
+        virtual_keys: no_mods,
+        mouse_data: 0,
+        point: target,
+    })?;
+    match producer
+        .wait_for_web_message(Duration::from_secs(2))
+        .as_deref()
+    {
+        Some("mousedown@200,130 trusted=true") => {
+            println!("PASS: mousedown — isTrusted=true (native GdkEvent path)")
+        }
+        Some("mousedown@200,130 trusted=false") => {
+            println!("PASS (degraded): mousedown — isTrusted=false (JS fallback path)")
+        }
+        other => return Err(format!("FAIL: mousedown — got {other:?}").into()),
+    }
+
+    println!("sending LeftButtonUp @ {target:?}");
+    producer.send_mouse_input(MouseInput {
+        kind: MouseEventKind::LeftButtonUp,
+        virtual_keys: no_mods,
+        mouse_data: 0,
+        point: target,
+    })?;
+    match producer
+        .wait_for_web_message(Duration::from_secs(2))
+        .as_deref()
+    {
+        Some("mouseup@200,130 trusted=true") => {
+            println!("PASS: mouseup — isTrusted=true (native GdkEvent path)")
+        }
+        Some("mouseup@200,130 trusted=false") => {
+            println!("PASS (degraded): mouseup — isTrusted=false (JS fallback path)")
+        }
+        other => return Err(format!("FAIL: mouseup — got {other:?}").into()),
+    }
+
+    println!("sending keydown 'a'");
+    producer.send_keyboard_input(KeyboardInput {
+        kind: KeyEventKind::Down,
+        virtual_key_code: 0x41, // 'A' physical key
+        characters: "a".to_string(),
+        characters_ignoring_modifiers: "a".to_string(),
+        modifiers: KeyModifierFlags::default(),
+        is_repeat: false,
+    })?;
+    match producer
+        .wait_for_web_message(Duration::from_secs(2))
+        .as_deref()
+    {
+        Some("keydown:a trusted=true") => {
+            println!("PASS: keydown — isTrusted=true (native GdkEvent path)")
+        }
+        Some("keydown:a trusted=false") => {
+            println!("PASS (degraded): keydown — isTrusted=false (JS fallback path)")
+        }
+        other => return Err(format!("FAIL: keydown — got {other:?}").into()),
     }
     Ok(())
 }

@@ -57,6 +57,8 @@
 mod capture;
 mod config;
 mod helpers;
+mod input;
+mod input_native;
 mod navigation;
 mod producer;
 mod script_message;

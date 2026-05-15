@@ -7,10 +7,12 @@ use gtk::prelude::*;
 use webkit2gtk::{SettingsExt, WebInspectorExt, WebViewExt};
 
 use crate::{
-    NavigationEvent, WebSurfaceCapabilities, WebSurfaceError, WebSurfaceFrame, WebSurfaceMode,
-    WebSurfaceProducer, WebSurfaceSettings,
+    FocusReason, KeyboardInput, MouseInput, NavigationEvent, PointerInput, WebSurfaceCapabilities,
+    WebSurfaceError, WebSurfaceFrame, WebSurfaceMode, WebSurfaceProducer, WebSurfaceSettings,
 };
 
+use super::input;
+use super::input_native;
 use super::navigation::{arm_navigation, wait_for_load};
 use super::producer::WebKitGtkProducer;
 use super::script_message;
@@ -97,6 +99,51 @@ impl WebSurfaceProducer for WebKitGtkProducer {
 
     fn poll_navigation_event(&mut self) -> Option<NavigationEvent> {
         self.nav_state.borrow_mut().events.pop_front()
+    }
+
+    fn send_mouse_input(&mut self, event: MouseInput) -> Result<(), WebSurfaceError> {
+        // Primary: native `GdkEvent` dispatch (page handlers see
+        // `isTrusted = true`). Falls back to JS-event synthesis if
+        // the WebView's `GdkWindow` isn't realized yet — DOM event
+        // handlers still fire, just with `isTrusted = false`.
+        match input_native::dispatch_mouse(&self.webview, event) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                self.run_input_js(&input::mouse_event_js(event));
+                Ok(())
+            }
+        }
+    }
+
+    fn send_pointer_input(&mut self, event: PointerInput) -> Result<(), WebSurfaceError> {
+        match input_native::dispatch_pointer(&self.webview, event) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                self.run_input_js(&input::pointer_event_js(event));
+                Ok(())
+            }
+        }
+    }
+
+    fn send_keyboard_input(&mut self, event: KeyboardInput) -> Result<(), WebSurfaceError> {
+        match input_native::dispatch_keyboard(&self.webview, event.clone()) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                let js = input::keyboard_event_js(&event);
+                if !js.is_empty() {
+                    self.run_input_js(&js);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn move_focus(&mut self, _reason: FocusReason) -> Result<(), WebSurfaceError> {
+        input_native::focus(&self.webview)?;
+        // Also nudge JS-side focus so `document.activeElement` is
+        // sensible even before the user has clicked anywhere.
+        self.run_input_js(input::focus_page_js());
+        Ok(())
     }
 
     fn capture_snapshot_png(&mut self) -> Result<Vec<u8>, WebSurfaceError> {

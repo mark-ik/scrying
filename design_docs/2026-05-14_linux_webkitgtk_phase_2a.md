@@ -187,12 +187,87 @@ rows that are `?` for Linux WebKitGTK 4.1. Order, smallest first:
 7. **CI** — `scripts/test-linux.sh` + `.github/workflows/test-linux.yml`
    running `demo-linux --snapshot-test` and `--probe-only`.
 
-Deferred to Phase 2b *heavy*: **input forwarding** (mouse / pointer /
-keyboard / focus / cursor reporting). The offscreen-WebView shape has
-no natural input flow — GTK only forwards events to focused widgets in
-realized windows. The path is synthesized `GdkEvent` dispatch via
-`gtk_main_do_event` (GTK 3), plus a custom cursor-shape signal handler
-on the WebView. Distinct sub-slice with its own design notes.
+### Phase 2b *heavy* (landed 2026-05-14): synthesized DOM event dispatch
+
+Mouse, keyboard, pointer, and focus forwarding land via JS event
+synthesis through `evaluate_javascript` — same shape the macOS
+WKWebView producer uses for `send_pointer_input` ("mouse-shaped JS
+pointer events" in the parity matrix), generalized to all input
+kinds. Lives in
+[`scrying/src/webkitgtk_producer/input.rs`](../scrying/src/webkitgtk_producer/input.rs).
+
+Event-kind mapping:
+
+- `MouseInput` → `MouseEvent` (`mousedown` / `mouseup` / `dblclick` /
+  `mousemove` / `mouseleave`) or `WheelEvent` (`wheel` with
+  `deltaX` / `deltaY` from the WebView2-shaped 120-per-notch
+  convention).
+- `PointerInput` → `PointerEvent` (`pointerdown` / `pointerup` /
+  `pointermove` / `pointerenter` / `pointerleave` / `pointercancel`).
+- `KeyboardInput` → `KeyboardEvent` (`keydown` / `keyup`) on
+  `document.activeElement` with `key`, `code`, `keyCode`, modifier
+  flags, and `repeat` plumbed through.
+- `FocusReason` (any) → `Widget::grab_focus()` on the WebView plus
+  `document.body.focus()` for a sensible JS-side target.
+
+**Fidelity caveat:** synthesized events arrive with
+`event.isTrusted === false`. Pages that gate behaviour on
+`isTrusted` (autoplay user-gesture checks, click-fraud defences,
+`requestFullscreen()`) refuse them. Native click side-effects the
+engine fires from real gestures — form submission via Enter,
+native context menu, focus stealing — don't fire. For most DOM
+event handlers and form-field updates the path works; the
+`demo-linux --input-test` mode verifies a click round-trip
+(button `mousedown` / `mouseup` handlers postMessage back, host
+asserts on the response) and a `keydown` round-trip.
+
+### Phase 2c (landed 2026-05-14): native `GdkEvent` dispatch — `isTrusted = true`
+
+The native path lives in
+[`scrying/src/webkitgtk_producer/input_native.rs`](../scrying/src/webkitgtk_producer/input_native.rs).
+Synthesizes `GdkEventButton` / `GdkEventMotion` / `GdkEventScroll` /
+`GdkEventCrossing` / `GdkEventKey` against the WebView's realized
+`GdkWindow` (the offscreen window's child surface) and dispatches via
+`gtk_main_do_event`. Result: DOM events arriving at page handlers
+report `event.isTrusted === true`, fire native click side-effects,
+and let WebKit's engine-level shortcut handling run.
+
+Architecture notes:
+
+- **Field setting** through gdk-rs's `event.downcast_mut::<EventButton>()` →
+  `&mut gdk_sys::GdkEventButton` raw struct access. Safe within an
+  `unsafe` window for the `g_object_ref`-then-assign on the window
+  pointer. The device pointer goes through the higher-level
+  `event.set_device(Some(&device))` API which handles the
+  event-type-specific storage details (some types carry device
+  inline, some in a private side table).
+- **Refcount discipline**: `gdk_event_free` walks the event's fields
+  and unrefs owned `GObject` pointers. The producer's
+  `widget.window()` / `seat.pointer()` references are bumped via
+  `g_object_ref` before assignment so the event's destructor takes
+  out the right ref count without underflowing the host's.
+- **Pointer fallback**: the JS-event path
+  ([`super::input`](../scrying/src/webkitgtk_producer/input.rs))
+  remains compiled as a fallback for the case where the WebView's
+  `GdkWindow` isn't realized yet — that path produces
+  `isTrusted = false` events but at least DOM handlers still fire.
+- **Verified by [`demo-linux --input-test`](../demo-linux/src/main.rs)**:
+  asserts on `trusted=true` in the page-side messages. PASSES on
+  Fedora 44 + Wayland.
+
+Open items that didn't land in Phase 2c:
+
+- **Full IME (CJK / non-Latin preedit + commit)** — requires wiring a
+  `GtkIMContext` against the WebView, listening for `preedit-changed`
+  / `commit` signals, and bridging to the host-side text-input
+  contract that the macOS producer carries (`TextInputFocused` /
+  `TextInputChanged` / `TextInputBlurred` events, caret-rect plumbing).
+  Separate sub-slice.
+- **True multi-touch `EventTouch`** — `dispatch_pointer` currently
+  routes through the mouse path. Real touch needs per-sequence
+  `GdkEventTouch` synthesis with `event_sequence` tracking.
+- **Cursor-shape reporting** — observe the WebView's `GdkWindow`
+  cursor via property notify, push as `CursorShape` for `poll_cursor_shape`.
 
 ## Phase 4 plan (WPE)
 

@@ -29,6 +29,7 @@ MODES=(
     --probe-only
     --snapshot-test
     --scripted
+    --input-test
 )
 
 echo "==> building demo-linux"

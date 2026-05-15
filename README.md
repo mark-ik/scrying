@@ -63,6 +63,7 @@ cargo run -p demo-linux                                                # default
 cargo run -p demo-linux -- --probe-only                                # capability probe + exit
 cargo run -p demo-linux -- --snapshot-test --out /tmp/snap.png         # exit 1 on empty/zero-pixel snapshot
 cargo run -p demo-linux -- --scripted                                  # bidirectional JS-messaging round-trip
+cargo run -p demo-linux -- --input-test                                # synthesized mouse + keyboard reaches page handlers
 cargo run -p demo-linux -- --url https://example.com --out example.png # real-page snapshot
 # All assertion modes at once (headless via offscreen WebView)
 bash scripts/test-linux.sh

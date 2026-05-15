@@ -7,6 +7,8 @@ use std::rc::Rc;
 use dpi::PhysicalSize;
 use gtk::prelude::*;
 use webkit2gtk::{WebContext, WebView, WebViewExt, WebsiteDataManager};
+// `webkit2gtk::gio::Cancellable::NONE` is reached through the
+// `webkit2gtk` re-export in `run_input_js`; no separate import.
 
 use crate::{WebSurfaceCapabilities, WebSurfaceError};
 
@@ -112,5 +114,19 @@ impl WebKitGtkProducer {
     /// Current configured render size, in physical pixels.
     pub fn size(&self) -> PhysicalSize<u32> {
         self.size
+    }
+
+    /// Fire-and-forget JS dispatch — used by the input-forwarding path
+    /// to push synthesized DOM events at page handlers. No completion
+    /// callback because input is one-way; the JS errors out silently if
+    /// the page doesn't have a sensible target element.
+    pub(crate) fn run_input_js(&self, js: &str) {
+        self.webview.evaluate_javascript(
+            js,
+            None,
+            None,
+            webkit2gtk::gio::Cancellable::NONE,
+            |_| {},
+        );
     }
 }
