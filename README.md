@@ -70,6 +70,8 @@ cargo run -p demo-linux -- --popup-test                                # target=
 cargo run -p demo-linux -- --download-test                             # file:// download lifecycle → DownloadStarted/Finished events
 cargo run -p demo-linux -- --cursor-test                               # hover-a-link → CursorShape::Pointer via mouse-target-changed
 cargo run -p demo-linux -- --ime-test                                  # autofocus input → TextInputFocused with element metadata
+cargo run -p demo-linux -- --drag-test                                 # send_drag_input Enter → Drop reaches page handler
+cargo run -p demo-linux -- --text-test                                 # send_text("hi") round-trips through native key dispatch
 cargo run -p demo-linux -- --url https://example.com --out example.png # real-page snapshot
 # All assertion modes at once (headless via offscreen WebView)
 bash scripts/test-linux.sh

@@ -21,9 +21,10 @@ use std::time::Duration;
 use dpi::PhysicalSize;
 use scrying::webkitgtk_producer::{WebKitGtkProducer, WebKitGtkProducerConfig};
 use scrying::{
-    Cookie, CursorShape, FocusReason, KeyEventKind, KeyModifierFlags, KeyboardInput,
-    MouseEventKind, MouseInput, MouseVirtualKeys, NavigationEvent, UrlSchemeHandlerFn,
-    UrlSchemeResponse, WebSurfaceCapabilities, WebSurfaceFrame, WebSurfaceProducer,
+    Cookie, CursorShape, DragEventKind, DragInput, FocusReason, KeyEventKind, KeyModifierFlags,
+    KeyboardInput, MouseEventKind, MouseInput, MouseVirtualKeys, NavigationEvent,
+    UrlSchemeHandlerFn, UrlSchemeResponse, WebSurfaceCapabilities, WebSurfaceFrame,
+    WebSurfaceProducer,
 };
 
 const DEFAULT_HTML: &str = r#"<!doctype html>
@@ -101,6 +102,8 @@ struct Args {
     download_test: bool,
     cursor_test: bool,
     ime_test: bool,
+    drag_test: bool,
+    text_test: bool,
     width: u32,
     height: u32,
 }
@@ -121,6 +124,8 @@ impl Args {
             download_test: false,
             cursor_test: false,
             ime_test: false,
+            drag_test: false,
+            text_test: false,
             width: 800,
             height: 600,
         };
@@ -156,6 +161,8 @@ impl Args {
                 "--download-test" => out.download_test = true,
                 "--cursor-test" => out.cursor_test = true,
                 "--ime-test" => out.ime_test = true,
+                "--drag-test" => out.drag_test = true,
+                "--text-test" => out.text_test = true,
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -173,7 +180,8 @@ fn print_help() {
     println!("USAGE: demo-linux [--url URL] [--out PATH] [--width N] [--height N]");
     println!("                  [--snapshot-test] [--scripted] [--input-test] [--cookie-test]");
     println!("                  [--scheme-test] [--popup-test] [--download-test]");
-    println!("                  [--cursor-test] [--ime-test] [--probe-only]");
+    println!("                  [--cursor-test] [--ime-test] [--drag-test] [--text-test]");
+    println!("                  [--probe-only]");
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -255,6 +263,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.ime_test {
         return run_ime_test(&mut producer, nav_timeout);
     }
+    if args.drag_test {
+        return run_drag_test(&mut producer, nav_timeout);
+    }
+    if args.text_test {
+        return run_text_test(&mut producer, nav_timeout);
+    }
 
     match &args.url {
         Some(url) => {
@@ -299,6 +313,131 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+const DRAG_HTML: &str = r#"<!doctype html>
+<html><head><meta charset="utf-8"></head>
+<body style="margin:0">
+<div id="zone" style="position:absolute;left:50px;top:50px;width:300px;height:200px;background:#fef3c7;color:#92400e;display:flex;align-items:center;justify-content:center;font:bold 18px system-ui"
+     ondragenter="window.chrome.webview.postMessage('dragenter@' + event.clientX + ',' + event.clientY)"
+     ondragover="event.preventDefault()"
+     ondrop="event.preventDefault(); window.chrome.webview.postMessage('drop@' + event.clientX + ',' + event.clientY)">
+drop zone
+</div>
+</body></html>"#;
+
+const TEXT_HTML: &str = r#"<!doctype html>
+<html><head><meta charset="utf-8"></head>
+<body style="margin:0">
+<input id="t" autofocus
+       style="position:absolute;left:50px;top:50px;width:300px;height:40px;font:16px system-ui"
+       oninput="window.chrome.webview.postMessage('value=' + this.value)">
+</body></html>"#;
+
+/// Drag-and-drop forwarding smoke. Loads a page with a drop zone
+/// listening for `dragenter` / `drop` events; sends the same trio
+/// through `send_drag_input` (Enter → Over → Drop) and asserts the
+/// page-side handlers observe both endpoints. JS-synthesis path
+/// only — `event.dataTransfer.files` is empty.
+fn run_drag_test(
+    producer: &mut WebKitGtkProducer,
+    nav_timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("loading drag-test page");
+    producer.navigate_to_string(DRAG_HTML, nav_timeout)?;
+
+    let target = (200, 150);
+    let no_mods = MouseVirtualKeys::default();
+    println!("sending DragInput::Enter @ {target:?}");
+    producer.send_drag_input(DragInput {
+        kind: DragEventKind::Enter,
+        virtual_keys: no_mods,
+        point: target,
+        allowed_effects: 0,
+    })?;
+    match producer
+        .wait_for_web_message(Duration::from_secs(3))
+        .as_deref()
+    {
+        Some("dragenter@200,150") => println!("PASS: dragenter reached the drop zone"),
+        other => return Err(format!("FAIL: dragenter — got {other:?}").into()),
+    }
+
+    // Required for drop to fire — page must preventDefault on dragover.
+    producer.send_drag_input(DragInput {
+        kind: DragEventKind::Over,
+        virtual_keys: no_mods,
+        point: target,
+        allowed_effects: 0,
+    })?;
+
+    println!("sending DragInput::Drop @ {target:?}");
+    producer.send_drag_input(DragInput {
+        kind: DragEventKind::Drop,
+        virtual_keys: no_mods,
+        point: target,
+        allowed_effects: 0,
+    })?;
+    match producer
+        .wait_for_web_message(Duration::from_secs(3))
+        .as_deref()
+    {
+        Some("drop@200,150") => {
+            println!("PASS: drop reached the drop zone");
+            Ok(())
+        }
+        other => Err(format!("FAIL: drop — got {other:?}").into()),
+    }
+}
+
+/// IME-commit / send_text smoke. Loads a page with an `<input
+/// autofocus>` that postMessages its value on every `input` event;
+/// pushes the string "hi" through `send_text` and asserts the page
+/// observes the accumulated value.
+fn run_text_test(
+    producer: &mut WebKitGtkProducer,
+    nav_timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("loading text-test page");
+    producer.navigate_to_string(TEXT_HTML, nav_timeout)?;
+
+    // Drain any stale focus events from the autofocus on page load.
+    while producer.poll_navigation_event().is_some() {}
+    while producer.poll_web_message().is_some() {}
+
+    println!("sending text \"hi\"");
+    producer.send_text("hi")?;
+
+    // Expect two messages: "value=h", "value=hi". The page fires
+    // `input` after each keystroke updates the field. Drain them and
+    // assert the final state.
+    let mut last_value: Option<String> = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match producer.wait_for_web_message(Duration::from_millis(200)) {
+            Some(msg) => {
+                if let Some(rest) = msg.strip_prefix("value=") {
+                    last_value = Some(rest.to_string());
+                }
+            }
+            None => {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+            }
+        }
+        if last_value.as_deref() == Some("hi") {
+            break;
+        }
+    }
+    match last_value.as_deref() {
+        Some("hi") => {
+            println!("PASS: send_text round-tripped \"hi\" into the focused input");
+            Ok(())
+        }
+        Some(other) => Err(format!("FAIL: input value ended as {other:?}, expected \"hi\"").into()),
+        None => Err("FAIL: input element never observed any keystrokes".into()),
+    }
 }
 
 const CURSOR_HTML: &str = r#"<!doctype html>

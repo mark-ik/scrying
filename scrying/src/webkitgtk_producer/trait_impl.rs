@@ -7,7 +7,7 @@ use gtk::prelude::*;
 use webkit2gtk::{SettingsExt, WebInspectorExt, WebViewExt};
 
 use crate::{
-    CursorShape, FocusReason, KeyboardInput, MouseInput, NavigationEvent, PointerInput,
+    CursorShape, DragInput, FocusReason, KeyboardInput, MouseInput, NavigationEvent, PointerInput,
     WebSurfaceCapabilities, WebSurfaceError, WebSurfaceFrame, WebSurfaceMode, WebSurfaceProducer,
     WebSurfaceSettings,
 };
@@ -151,6 +151,16 @@ impl WebSurfaceProducer for WebKitGtkProducer {
         Ok(())
     }
 
+    fn send_drag_input(&mut self, event: DragInput) -> Result<(), WebSurfaceError> {
+        // JS-event synthesis only — native `GdkEventDND` needs a
+        // `GdkDragContext` from a real drag source that we can't
+        // fabricate cleanly. Drop handlers that read event types and
+        // coordinates still work; `event.dataTransfer.files` is empty
+        // because there's no real drag payload.
+        self.run_input_js(&input::drag_event_js(event));
+        Ok(())
+    }
+
     fn capture_snapshot_png(&mut self) -> Result<Vec<u8>, WebSurfaceError> {
         WebKitGtkProducer::capture_snapshot_png(self)
     }
@@ -228,5 +238,44 @@ impl WebSurfaceProducer for WebKitGtkProducer {
                 "WebKitGTK WebView has no inspector".into(),
             )),
         }
+    }
+}
+
+impl WebKitGtkProducer {
+    /// Forward a string of committed text to the WebView one
+    /// character at a time, as a synthesized native key-down + key-up
+    /// pair per character. Each event flows through the Phase 2c
+    /// [`input_native`] path, so page handlers see
+    /// `event.isTrusted = true` and the engine's IM context receives
+    /// the input through its normal pipeline.
+    ///
+    /// Use case: the host has a real OS IME (winit's `Ime::Commit`,
+    /// AppKit's `NSTextInputClient::insertText:`, etc.) and needs to
+    /// push the committed string into the offscreen WebView. Preedit
+    /// (composition-in-progress) is not forwarded — most hosts
+    /// render preedit themselves and only commit completed text into
+    /// the WebView.
+    pub fn send_text(&mut self, text: &str) -> Result<(), WebSurfaceError> {
+        for c in text.chars() {
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf).to_string();
+            self.send_keyboard_input(KeyboardInput {
+                kind: crate::KeyEventKind::Down,
+                virtual_key_code: 0,
+                characters: s.clone(),
+                characters_ignoring_modifiers: s.clone(),
+                modifiers: crate::KeyModifierFlags::default(),
+                is_repeat: false,
+            })?;
+            self.send_keyboard_input(KeyboardInput {
+                kind: crate::KeyEventKind::Up,
+                virtual_key_code: 0,
+                characters: s.clone(),
+                characters_ignoring_modifiers: s,
+                modifiers: crate::KeyModifierFlags::default(),
+                is_repeat: false,
+            })?;
+        }
+        Ok(())
     }
 }

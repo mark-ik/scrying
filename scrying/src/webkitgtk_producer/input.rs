@@ -20,8 +20,8 @@
 //! upgrade would close the trust gap.
 
 use crate::{
-    KeyEventKind, KeyboardInput, MouseEventKind, MouseInput, MouseVirtualKeys, PointerEventKind,
-    PointerInput,
+    DragEventKind, DragInput, KeyEventKind, KeyboardInput, MouseEventKind, MouseInput,
+    MouseVirtualKeys, PointerEventKind, PointerInput,
 };
 
 use super::script_message::escape_for_js;
@@ -152,6 +152,40 @@ pub(crate) fn keyboard_event_js(input: &KeyboardInput) -> String {
 /// the webview region or tabs into it.
 pub(crate) fn focus_page_js() -> &'static str {
     "(function() { if (document.body) document.body.focus(); })();"
+}
+
+/// JS source for a `DragEvent` dispatch. Native `GdkEventDND` would
+/// give us `isTrusted = true` and a real `DataTransfer`, but it
+/// requires a `GdkDragContext` from a real drag source — those can't
+/// be synthesized cleanly without a drag origin widget. Pages whose
+/// drop handlers only observe event coordinates and types still
+/// work via this synthesis path; pages that read `event.dataTransfer.files`
+/// will see an empty list.
+pub(crate) fn drag_event_js(input: DragInput) -> String {
+    let type_name = match input.kind {
+        DragEventKind::Enter => "dragenter",
+        DragEventKind::Over => "dragover",
+        DragEventKind::Leave => "dragleave",
+        DragEventKind::Drop => "drop",
+    };
+    let (x, y) = (input.point.0, input.point.1);
+    format!(
+        r#"(function() {{
+    var x = {x}, y = {y};
+    var t = document.elementFromPoint(x, y) || document.body;
+    if (!t) return;
+    var dt;
+    try {{ dt = new DataTransfer(); }} catch (e) {{ dt = null; }}
+    t.dispatchEvent(new DragEvent("{type_name}", {{
+        bubbles: true, cancelable: true, view: window,
+        clientX: x, clientY: y,
+        ctrlKey: {ctrl}, shiftKey: {shift},
+        dataTransfer: dt
+    }}));
+}})();"#,
+        ctrl = bool_lit(input.virtual_keys.control),
+        shift = bool_lit(input.virtual_keys.shift),
+    )
 }
 
 fn mouse_kind_to_type(kind: MouseEventKind) -> (&'static str, u32, bool) {
