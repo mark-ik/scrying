@@ -13,3 +13,12 @@ edition = "2024"
 license = "MPL-2.0"
 repository = "https://github.com/mark-ik/wgpu-scry"
 version = "0.1.0"
+
+# Centralized load-bearing pins. Aligned with the wider Mere ecosystem
+# (mere/Cargo.toml's workspace.dependencies) so cargo unifies versions
+# when scry is path-dep'd from mere-host-runtime / scrying-tile-engine.
+[workspace.dependencies]
+wgpu = "29"
+winit = "0.30.13"
+raw-window-handle = "0.6.2"
+dpi = "0.1.2"

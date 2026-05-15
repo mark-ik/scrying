@@ -18,14 +18,14 @@ webkitgtk-fallback = [
 ]
 
 [dependencies]
-dpi = "0.1.2"
+dpi.workspace = true
 image = "0.25"
 # Color-space conversion math used by the WKWebView producer's
 # adaptive Display-P3 / extended-linear capture path. We only pull
 # in the gamut conversions; no rendering-extras features.
 palette = { version = "0.7", default-features = false, features = ["std"] }
 thiserror = "2.0.17"
-wgpu = { version = "29.0.1", features = ["metal"] }
+wgpu = { workspace = true, features = ["metal"] }
 wgpu-hal = "29.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
