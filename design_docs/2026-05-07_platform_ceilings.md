@@ -468,10 +468,10 @@ column. WebKitGTK 4.1 reflects Phase 2a (post-2026-05-14). WebKitGTK
 | Scroll wheel forwarding | ✅ 0.2.0 | ✅ 0.4.0 | ✅ Phase 2c (native `GdkEventScroll`, smooth-scroll path) | ? | ? |
 | Touch + pen forwarding | ✅ | ✅ 0.4.x (mouse-shaped JS pointer events) | 🟡 Phase 2c (mouse-shaped native `GdkEvent`; true `EventTouch` per-sequence tracking deferred) | ? | ? |
 | Keyboard forwarding (basic) | 🟡 (CDP-backed `send_keyboard_input` works in pure visual hosting; Window-to-Visual input passes but exposes visible child HWNDs) | ✅ 0.4.0 | ✅ Phase 2c (native `GdkEventKey`, keyval via `gdk_unicode_to_keyval`, `isTrusted = true`) | ? | ? |
-| IME (CJK / non-Latin) | 🟡 (baseline host-owned bridge proven: focused editable/caret events -> winit IME area -> CDP composition/commit; full TSF text-store parity remains future work) | ✅ 0.4.0 (via NSTextInputClient) | 🟡 Phase 2c (key dispatch is `isTrusted = true` so engine-level shortcuts fire; full IM-context preedit/commit bridge is future work) | ? | ? |
+| IME (CJK / non-Latin) | 🟡 (baseline host-owned bridge proven: focused editable/caret events -> winit IME area -> CDP composition/commit; full TSF text-store parity remains future work) | ✅ 0.4.0 (via NSTextInputClient) | 🟡 Phase 2e (focused-editable state via JS user-script: TextInputFocused / TextInputChanged / TextInputBlurred with element kind, input type, input mode, autocomplete, caret rect; full GtkIMContext preedit/commit bridge still pending) | ? | ? |
 | Drag-and-drop into webview | ✅ (concrete OLE `IDataObject` helpers; trait reports data-object requirement) | — capture (SPI-blocked) / ✅ overlay (auto) | ? | ? | ? |
 | Focus management | ✅ 0.2.0 | ✅ 0.4.0 | ✅ Phase 2b (`Widget::grab_focus` + JS `document.body.focus()`) | ? | ? |
-| Cursor-change reporting | ✅ | ✅ 0.4.0 | ? | ? | ? |
+| Cursor-change reporting | ✅ | ✅ 0.4.0 | ✅ Phase 2e (semantic `CursorShape` from WebKit's `mouse-target-changed` hit-test context; covers Pointer / Text / Default) | ? | ? |
 | Navigation events (start/source/complete) | ✅ 0.2.0 | ✅ 0.4.0 | ✅ Phase 2b (`poll_navigation_event` draining FIFO from `load-changed` / `load-failed`) | ? | ? |
 | Title-changed event | ✅ 0.2.0 | ✅ 0.4.0 (KVO) | ✅ Phase 2b (`notify::title` signal → `NavigationEvent::TitleChanged`) | ? | ? |
 | JS messaging (bidirectional) | ✅ 0.2.0 | ✅ 0.4.0 | ✅ Phase 2b (script-message handler + injected `window.chrome.webview` shim; round-trip verified by `demo-linux --scripted`) | ? | ? |
