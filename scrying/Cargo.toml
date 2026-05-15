@@ -16,6 +16,11 @@ webkitgtk-fallback = [
     "dep:soup",
     "dep:webkit2gtk",
 ]
+# Mutually exclusive with `webkitgtk-fallback` in practice (both pull
+# incompatible glib / gtk crate-version trees). The producer-alias
+# selection in `lib.rs` lets `webkit6` win if both are enabled, but
+# expect noisier build output and a larger dependency graph.
+webkit6 = ["dep:gtk4", "dep:webkit6"]
 
 [dependencies]
 dpi = "0.1.2"
@@ -52,6 +57,16 @@ javascriptcore = { package = "javascriptcore-rs", version = "1.1", optional = tr
 # `soup::Cookie` values. Pinned to 0.5 to match webkit2gtk 2.0.2's
 # transitive dep.
 soup = { package = "soup3", version = "0.5", optional = true }
+
+# Modern gtk-rs GTK 4 + WebKitGTK 6.0 line for the parallel
+# `webkit6_producer/` module. Pulls in glib 0.22 / gdk4 / gio 0.22 /
+# soup3 0.9 / javascriptcore 1.x as transitives. System packages at
+# build time:
+#   sudo dnf install -y gtk4-devel webkitgtk6.0-devel
+# The `v2_44` feature gate matches Fedora 44's webkitgtk6.0 2.52.3
+# (≥ 2.44), opening the newer API surface (evaluate_javascript, etc.)
+gtk4 = { version = "0.11", optional = true }
+webkit6 = { version = "0.6", features = ["v2_44"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Single objc2 0.6.x line. Default features kept on all of these — slim

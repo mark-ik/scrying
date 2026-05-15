@@ -50,19 +50,36 @@ pub mod wpe_producer;
 #[cfg(all(target_os = "linux", feature = "webkitgtk-fallback"))]
 pub mod webkitgtk_producer;
 
-// Linux producer selection. The two producers are co-equal: enable the
-// `webkitgtk-fallback` feature on distributions that ship
-// `libwebkit2gtk-4.1` (Fedora, Ubuntu LTS, …) to use the WebKitGTK
-// producer; leave it off to keep the WPE scaffold as the default
-// `PlatformWebSurfaceProducer`. Both targets coexist behind the
-// `WebSurfaceProducer` trait so host code is unchanged.
-#[cfg(all(target_os = "linux", feature = "webkitgtk-fallback"))]
+#[cfg(all(target_os = "linux", feature = "webkit6"))]
+pub mod webkit6_producer;
+
+// Linux producer selection. Three co-equal backends — pick one via
+// cargo feature:
+//   webkit6              → WebKitGTK 6.0 / GTK 4 (newest, libadwaita line)
+//   webkitgtk-fallback   → WebKitGTK 4.1 / GTK 3 (widest installed base, Tauri-shaped)
+//   (neither)            → WPE scaffold (DMABUF / Vulkan; Phase 4)
+// When both `webkit6` and `webkitgtk-fallback` are on, `webkit6` wins.
+#[cfg(all(target_os = "linux", feature = "webkit6"))]
+pub use webkit6_producer::{
+    WebKit6Producer as PlatformWebSurfaceProducer,
+    WebKit6ProducerConfig as PlatformWebSurfaceConfig,
+};
+
+#[cfg(all(
+    target_os = "linux",
+    feature = "webkitgtk-fallback",
+    not(feature = "webkit6")
+))]
 pub use webkitgtk_producer::{
     WebKitGtkProducer as PlatformWebSurfaceProducer,
     WebKitGtkProducerConfig as PlatformWebSurfaceConfig,
 };
 
-#[cfg(all(target_os = "linux", not(feature = "webkitgtk-fallback")))]
+#[cfg(all(
+    target_os = "linux",
+    not(feature = "webkit6"),
+    not(feature = "webkitgtk-fallback")
+))]
 pub use wpe_producer::{
     WpeProducer as PlatformWebSurfaceProducer, WpeProducerConfig as PlatformWebSurfaceConfig,
 };
@@ -102,11 +119,23 @@ impl SystemWebviewBackend {
         {
             Self::WkWebView
         }
-        #[cfg(all(target_os = "linux", feature = "webkitgtk-fallback"))]
+        #[cfg(all(target_os = "linux", feature = "webkit6"))]
         {
             Self::WebKitGtk
         }
-        #[cfg(all(target_os = "linux", not(feature = "webkitgtk-fallback")))]
+        #[cfg(all(
+            target_os = "linux",
+            feature = "webkitgtk-fallback",
+            not(feature = "webkit6")
+        ))]
+        {
+            Self::WebKitGtk
+        }
+        #[cfg(all(
+            target_os = "linux",
+            not(feature = "webkit6"),
+            not(feature = "webkitgtk-fallback")
+        ))]
         {
             Self::Wpe
         }
@@ -211,12 +240,27 @@ fn linux_wpe_capabilities() -> WebSurfaceCapabilities {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "webkitgtk-fallback"))]
+// WebKitGTK capabilities shim: `webkit6` wins over `webkitgtk-fallback`
+// when both features are enabled. With neither, returns an "unsupported"
+// stub used for type-name printing in cross-platform code paths.
+#[cfg(all(target_os = "linux", feature = "webkit6"))]
+fn linux_webkitgtk_capabilities() -> WebSurfaceCapabilities {
+    webkit6_producer::linux_webkit6_capabilities()
+}
+
+#[cfg(all(
+    target_os = "linux",
+    feature = "webkitgtk-fallback",
+    not(feature = "webkit6")
+))]
 fn linux_webkitgtk_capabilities() -> WebSurfaceCapabilities {
     webkitgtk_producer::linux_webkitgtk_capabilities()
 }
 
-#[cfg(not(all(target_os = "linux", feature = "webkitgtk-fallback")))]
+#[cfg(not(all(
+    target_os = "linux",
+    any(feature = "webkit6", feature = "webkitgtk-fallback")
+)))]
 fn linux_webkitgtk_capabilities() -> WebSurfaceCapabilities {
     WebSurfaceCapabilities {
         backend: SystemWebviewBackend::WebKitGtk,
@@ -231,7 +275,7 @@ fn linux_webkitgtk_capabilities() -> WebSurfaceCapabilities {
             crate::native_frame::UnsupportedReason::PlatformNotImplemented,
         ),
         supported_frames: Vec::new(),
-        reason: "WebKitGTK producer is only available on Linux with the `webkitgtk-fallback` feature enabled.",
+        reason: "WebKitGTK producer is only available on Linux with the `webkitgtk-fallback` (GTK 3 / WebKitGTK 4.1) or `webkit6` (GTK 4 / WebKitGTK 6.0) feature enabled.",
     }
 }
 
