@@ -13,6 +13,7 @@ webkitgtk-fallback = [
     "dep:glib",
     "dep:gtk",
     "dep:javascriptcore",
+    "dep:soup",
     "dep:webkit2gtk",
 ]
 
@@ -47,6 +48,10 @@ glib = { version = "0.18", optional = true }
 # delivered by the WebKit UserContentManager. Pinned to 1.1 to match
 # webkit2gtk 2.0.2's transitive dep.
 javascriptcore = { package = "javascriptcore-rs", version = "1.1", optional = true }
+# libsoup 3 cookie type — the WebKit CookieManager API operates on
+# `soup::Cookie` values. Pinned to 0.5 to match webkit2gtk 2.0.2's
+# transitive dep.
+soup = { package = "soup3", version = "0.5", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Single objc2 0.6.x line. Default features kept on all of these — slim

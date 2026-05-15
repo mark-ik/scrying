@@ -56,6 +56,7 @@
 
 mod capture;
 mod config;
+mod cookies;
 mod helpers;
 mod input;
 mod input_native;

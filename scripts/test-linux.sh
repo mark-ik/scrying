@@ -30,6 +30,7 @@ MODES=(
     --snapshot-test
     --scripted
     --input-test
+    --cookie-test
 )
 
 echo "==> building demo-linux"

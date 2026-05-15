@@ -19,7 +19,7 @@ use std::time::Duration;
 use dpi::PhysicalSize;
 use scrying::webkitgtk_producer::{WebKitGtkProducer, WebKitGtkProducerConfig};
 use scrying::{
-    FocusReason, KeyEventKind, KeyModifierFlags, KeyboardInput, MouseEventKind, MouseInput,
+    Cookie, FocusReason, KeyEventKind, KeyModifierFlags, KeyboardInput, MouseEventKind, MouseInput,
     MouseVirtualKeys, WebSurfaceCapabilities, WebSurfaceFrame, WebSurfaceProducer,
 };
 
@@ -92,6 +92,7 @@ struct Args {
     probe_only: bool,
     scripted: bool,
     input_test: bool,
+    cookie_test: bool,
     width: u32,
     height: u32,
 }
@@ -106,6 +107,7 @@ impl Args {
             probe_only: false,
             scripted: false,
             input_test: false,
+            cookie_test: false,
             width: 800,
             height: 600,
         };
@@ -135,6 +137,7 @@ impl Args {
                 "--probe-only" => out.probe_only = true,
                 "--scripted" => out.scripted = true,
                 "--input-test" => out.input_test = true,
+                "--cookie-test" => out.cookie_test = true,
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -150,7 +153,9 @@ fn print_help() {
     println!("demo-linux — WebKitGTK runtime probe for scrying");
     println!();
     println!("USAGE: demo-linux [--url URL] [--out PATH] [--width N] [--height N]");
-    println!("                  [--snapshot-test] [--scripted] [--input-test] [--probe-only]");
+    println!(
+        "                  [--snapshot-test] [--scripted] [--input-test] [--cookie-test] [--probe-only]"
+    );
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -179,6 +184,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.input_test {
         return run_input_test(&mut producer, nav_timeout);
+    }
+    if args.cookie_test {
+        return run_cookie_test(&producer);
     }
 
     match &args.url {
@@ -223,6 +231,48 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+    Ok(())
+}
+
+/// Cookie store round-trip smoke. Sets a cookie, reads it back via
+/// `request_cookies_for_url`, asserts the value matches; then
+/// deletes and re-reads to confirm absence. No navigation involved
+/// — exercises the `WebsiteDataManager` cookie store directly.
+fn run_cookie_test(producer: &WebKitGtkProducer) -> Result<(), Box<dyn std::error::Error>> {
+    let url = "http://test.local/path";
+    let cookie = Cookie {
+        name: "scrying_test".to_string(),
+        value: "phase2d".to_string(),
+        domain: "test.local".to_string(),
+        path: "/".to_string(),
+        expires_at: None,
+        is_secure: false,
+        is_http_only: false,
+    };
+
+    println!("setting cookie scrying_test=phase2d for {url}");
+    producer.set_cookie(&cookie)?;
+
+    let cookies = producer.request_cookies_for_url(url)?;
+    println!("got {} cookie(s) for {url}", cookies.len());
+    match cookies.iter().find(|c| c.name == "scrying_test") {
+        Some(c) if c.value == "phase2d" => {
+            println!("PASS: cookie round-tripped (name=scrying_test value=phase2d)")
+        }
+        Some(c) => {
+            return Err(format!("FAIL: cookie value differs — got {:?}", c.value).into());
+        }
+        None => return Err("FAIL: cookie not present after set_cookie".into()),
+    }
+
+    println!("deleting cookie");
+    producer.delete_cookie(&cookie)?;
+
+    let after = producer.request_cookies_for_url(url)?;
+    if after.iter().any(|c| c.name == "scrying_test") {
+        return Err("FAIL: cookie still present after delete_cookie".into());
+    }
+    println!("PASS: cookie absent after delete_cookie");
     Ok(())
 }
 
