@@ -34,6 +34,8 @@ MODES=(
     --scheme-test
     --popup-test
     --download-test
+    --cursor-test
+    --ime-test
 )
 
 echo "==> building demo-linux"

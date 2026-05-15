@@ -7,8 +7,9 @@ use gtk::prelude::*;
 use webkit2gtk::{SettingsExt, WebInspectorExt, WebViewExt};
 
 use crate::{
-    FocusReason, KeyboardInput, MouseInput, NavigationEvent, PointerInput, WebSurfaceCapabilities,
-    WebSurfaceError, WebSurfaceFrame, WebSurfaceMode, WebSurfaceProducer, WebSurfaceSettings,
+    CursorShape, FocusReason, KeyboardInput, MouseInput, NavigationEvent, PointerInput,
+    WebSurfaceCapabilities, WebSurfaceError, WebSurfaceFrame, WebSurfaceMode, WebSurfaceProducer,
+    WebSurfaceSettings,
 };
 
 use super::input;
@@ -99,6 +100,10 @@ impl WebSurfaceProducer for WebKitGtkProducer {
 
     fn poll_navigation_event(&mut self) -> Option<NavigationEvent> {
         self.nav_state.borrow_mut().events.pop_front()
+    }
+
+    fn poll_cursor_shape(&mut self) -> Option<CursorShape> {
+        self.cursor_shape.borrow_mut().take()
     }
 
     fn send_mouse_input(&mut self, event: MouseInput) -> Result<(), WebSurfaceError> {

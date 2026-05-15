@@ -57,8 +57,10 @@
 mod capture;
 mod config;
 mod cookies;
+mod cursor;
 mod downloads;
 mod helpers;
+mod ime;
 mod input;
 mod input_native;
 mod navigation;

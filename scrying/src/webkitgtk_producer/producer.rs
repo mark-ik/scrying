@@ -10,11 +10,13 @@ use webkit2gtk::{WebContext, WebView, WebViewExt, WebsiteDataManager};
 // `webkit2gtk::gio::Cancellable::NONE` is reached through the
 // `webkit2gtk` re-export in `run_input_js`; no separate import.
 
-use crate::{UrlSchemeHandlerFn, WebSurfaceCapabilities, WebSurfaceError};
+use crate::{CursorShape, UrlSchemeHandlerFn, WebSurfaceCapabilities, WebSurfaceError};
 
 use super::config::WebKitGtkProducerConfig;
+use super::cursor;
 use super::downloads;
 use super::helpers::ensure_gtk_init;
+use super::ime;
 use super::navigation::{NavState, install_load_signals};
 use super::scheme_handler;
 use super::script_message;
@@ -40,6 +42,9 @@ pub struct WebKitGtkProducer {
     /// `script-message-received::scry` signal handler and drained by
     /// [`crate::WebSurfaceProducer::poll_web_message`].
     pub(crate) web_messages: Rc<RefCell<VecDeque<String>>>,
+    /// Latest cursor shape requested by WebKit's `mouse-target-changed`
+    /// signal. Drained by [`crate::WebSurfaceProducer::poll_cursor_shape`].
+    pub(crate) cursor_shape: Rc<RefCell<Option<CursorShape>>>,
 }
 
 impl WebKitGtkProducer {
@@ -102,7 +107,11 @@ impl WebKitGtkProducer {
         let web_messages: Rc<RefCell<VecDeque<String>>> = Rc::new(RefCell::new(VecDeque::new()));
         if let Some(ucm) = WebViewExt::user_content_manager(&webview) {
             script_message::install(&ucm, &web_messages);
+            ime::install(&ucm, &nav_state);
         }
+
+        let cursor_shape: Rc<RefCell<Option<CursorShape>>> = Rc::new(RefCell::new(None));
+        cursor::install(&webview, &cursor_shape);
 
         Ok(Self {
             capabilities: super::linux_webkitgtk_capabilities(),
@@ -115,6 +124,7 @@ impl WebKitGtkProducer {
             generation: Cell::new(0),
             nav_state,
             web_messages,
+            cursor_shape,
         })
     }
 

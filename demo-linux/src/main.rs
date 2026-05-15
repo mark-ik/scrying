@@ -21,9 +21,9 @@ use std::time::Duration;
 use dpi::PhysicalSize;
 use scrying::webkitgtk_producer::{WebKitGtkProducer, WebKitGtkProducerConfig};
 use scrying::{
-    Cookie, FocusReason, KeyEventKind, KeyModifierFlags, KeyboardInput, MouseEventKind, MouseInput,
-    MouseVirtualKeys, NavigationEvent, UrlSchemeHandlerFn, UrlSchemeResponse,
-    WebSurfaceCapabilities, WebSurfaceFrame, WebSurfaceProducer,
+    Cookie, CursorShape, FocusReason, KeyEventKind, KeyModifierFlags, KeyboardInput,
+    MouseEventKind, MouseInput, MouseVirtualKeys, NavigationEvent, UrlSchemeHandlerFn,
+    UrlSchemeResponse, WebSurfaceCapabilities, WebSurfaceFrame, WebSurfaceProducer,
 };
 
 const DEFAULT_HTML: &str = r#"<!doctype html>
@@ -99,6 +99,8 @@ struct Args {
     scheme_test: bool,
     popup_test: bool,
     download_test: bool,
+    cursor_test: bool,
+    ime_test: bool,
     width: u32,
     height: u32,
 }
@@ -117,6 +119,8 @@ impl Args {
             scheme_test: false,
             popup_test: false,
             download_test: false,
+            cursor_test: false,
+            ime_test: false,
             width: 800,
             height: 600,
         };
@@ -150,6 +154,8 @@ impl Args {
                 "--scheme-test" => out.scheme_test = true,
                 "--popup-test" => out.popup_test = true,
                 "--download-test" => out.download_test = true,
+                "--cursor-test" => out.cursor_test = true,
+                "--ime-test" => out.ime_test = true,
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -166,7 +172,8 @@ fn print_help() {
     println!();
     println!("USAGE: demo-linux [--url URL] [--out PATH] [--width N] [--height N]");
     println!("                  [--snapshot-test] [--scripted] [--input-test] [--cookie-test]");
-    println!("                  [--scheme-test] [--popup-test] [--download-test] [--probe-only]");
+    println!("                  [--scheme-test] [--popup-test] [--download-test]");
+    println!("                  [--cursor-test] [--ime-test] [--probe-only]");
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -242,6 +249,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.download_test {
         return run_download_test(&producer);
     }
+    if args.cursor_test {
+        return run_cursor_test(&mut producer, nav_timeout);
+    }
+    if args.ime_test {
+        return run_ime_test(&mut producer, nav_timeout);
+    }
 
     match &args.url {
         Some(url) => {
@@ -286,6 +299,99 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+const CURSOR_HTML: &str = r#"<!doctype html>
+<html><head><meta charset="utf-8"></head>
+<body style="margin:0">
+<a href="https://example.com" id="lnk"
+   style="position:absolute;left:100px;top:100px;width:200px;height:50px;
+   background:#e0f2fe;color:#075985;display:block;text-align:center;
+   line-height:50px;text-decoration:none;font:bold 18px system-ui">hover me</a>
+</body></html>"#;
+
+const IME_HTML: &str = r#"<!doctype html>
+<html><head><meta charset="utf-8"></head>
+<body style="margin:0">
+<input id="email" type="email" inputmode="email" autocomplete="email"
+       autofocus placeholder="email"
+       style="position:absolute;left:50px;top:50px;width:300px;height:40px;
+       font:16px system-ui">
+</body></html>"#;
+
+/// Cursor-shape reporting smoke. Moves the mouse over a styled
+/// anchor and asserts `poll_cursor_shape` returns
+/// [`CursorShape::Pointer`] — surfaced via
+/// `mouse-target-changed`'s hit-test context.
+fn run_cursor_test(
+    producer: &mut WebKitGtkProducer,
+    nav_timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("loading cursor-test page");
+    producer.navigate_to_string(CURSOR_HTML, nav_timeout)?;
+
+    let no_mods = MouseVirtualKeys::default();
+    println!("moving mouse over plain background first to establish baseline");
+    producer.send_mouse_input(MouseInput {
+        kind: MouseEventKind::Move,
+        virtual_keys: no_mods,
+        mouse_data: 0,
+        point: (500, 400),
+    })?;
+
+    println!("moving mouse over the link @ (200, 125)");
+    producer.send_mouse_input(MouseInput {
+        kind: MouseEventKind::Move,
+        virtual_keys: no_mods,
+        mouse_data: 0,
+        point: (200, 125),
+    })?;
+    let shape = producer.wait_for_cursor_shape(Duration::from_secs(3), |s| {
+        matches!(s, CursorShape::Pointer)
+    });
+    match shape {
+        Some(CursorShape::Pointer) => {
+            println!("PASS: hovering link surfaced CursorShape::Pointer");
+            Ok(())
+        }
+        Some(other) => Err(format!("FAIL: got unexpected cursor shape {other:?}").into()),
+        None => Err("FAIL: never observed Pointer cursor".into()),
+    }
+}
+
+/// IME / focus-tracking smoke. Loads a page with an `<input
+/// type="email" autofocus>`, asserts the injected JS focus observer
+/// posts `TextInputFocused` with the right element-kind / input-type
+/// metadata.
+fn run_ime_test(
+    producer: &mut WebKitGtkProducer,
+    nav_timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("loading ime-test page");
+    producer.navigate_to_string(IME_HTML, nav_timeout)?;
+
+    let evt = producer.wait_for_navigation_event(Duration::from_secs(3), |e| {
+        matches!(e, NavigationEvent::TextInputFocused { .. })
+    });
+    let state = match evt {
+        Some(NavigationEvent::TextInputFocused { state }) => state,
+        Some(other) => return Err(format!("FAIL: unexpected event {other:?}").into()),
+        None => return Err("FAIL: TextInputFocused never fired".into()),
+    };
+    println!(
+        "TextInputFocused element_kind={} input_type={} input_mode={} autocomplete={}",
+        state.element_kind, state.input_type, state.input_mode, state.autocomplete
+    );
+    if state.element_kind == "input"
+        && state.input_type == "email"
+        && state.input_mode == "email"
+        && state.autocomplete == "email"
+    {
+        println!("PASS: IME focus state matches the page's <input type=\"email\">");
+        Ok(())
+    } else {
+        Err(format!("FAIL: IME focus state mismatch — {state:?}").into())
+    }
 }
 
 /// Download lifecycle smoke. Pre-writes a known payload to a temp
