@@ -1,0 +1,15 @@
+[package]
+name = "demo-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Linux WebKitGTK runtime probe for scrying"
+
+[[bin]]
+name = "demo-linux"
+path = "src/main.rs"
+
+[dependencies]
+dpi = "0.1.2"
+image = "0.25"
+scrying = { path = "../scrying", features = ["webkitgtk-fallback"] }

@@ -1,0 +1,83 @@
+name: test-linux
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Cancel in-flight runs for the same ref when a new commit lands —
+# we only care about the latest state.
+concurrency:
+  group: test-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  demo-linux-test-suite:
+    name: demo-linux test suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-latest currently maps to Ubuntu 24.04, which ships
+        # libwebkit2gtk-4.1-dev (matching the producer's target).
+        # Older runners (22.04) ship libwebkit2gtk-4.0-dev — not
+        # compatible without bindings rework.
+        os: [ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # System packages required by the webkitgtk-fallback feature
+      # and the demo-linux + cross-platform smoke. Mirrors the Fedora
+      # `dnf install` line in the README, translated to Ubuntu names.
+      # libxkbcommon-x11-dev intentionally omitted — Ubuntu ships it
+      # bundled with libxkbcommon-dev.
+      - name: Install system dev packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libvulkan-dev mesa-vulkan-drivers \
+            libxkbcommon-dev libwayland-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libxcb1-dev \
+            xvfb
+
+      # Cache the cargo registry + workspace target so repeat runs skip
+      # the wgpu/winit/webkit2gtk-sys recompile.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # Library + helpers unit tests. No display needed.
+      - name: cargo test (scrying lib)
+        run: cargo test -p scrying --lib
+
+      # Verify both feature configurations build cleanly. Default features
+      # use the WPE alias scaffold; the webkitgtk-fallback feature pulls in
+      # the real producer.
+      - name: cargo check (default features)
+        run: cargo check -p scrying -p demo-scrying-winit
+
+      - name: cargo check (webkitgtk-fallback feature)
+        run: cargo check -p scrying --features webkitgtk-fallback
+
+      - name: cargo build demo-linux
+        run: cargo build -p demo-linux
+
+      # demo-linux integration suite under Xvfb. GH runners are
+      # headless; xvfb-run provides a virtual X server so GDK +
+      # WebKitGTK can initialize. The demo's own env-var setup
+      # (WEBKIT_DISABLE_DMABUF_RENDERER / WEBKIT_DISABLE_COMPOSITING_MODE)
+      # forces the CPU snapshot path so no real GPU is required.
+      - name: xvfb-run bash scripts/test-linux.sh
+        run: xvfb-run -a bash scripts/test-linux.sh
