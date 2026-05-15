@@ -22,8 +22,8 @@ use dpi::PhysicalSize;
 use scrying::webkitgtk_producer::{WebKitGtkProducer, WebKitGtkProducerConfig};
 use scrying::{
     Cookie, FocusReason, KeyEventKind, KeyModifierFlags, KeyboardInput, MouseEventKind, MouseInput,
-    MouseVirtualKeys, UrlSchemeHandlerFn, UrlSchemeResponse, WebSurfaceCapabilities,
-    WebSurfaceFrame, WebSurfaceProducer,
+    MouseVirtualKeys, NavigationEvent, UrlSchemeHandlerFn, UrlSchemeResponse,
+    WebSurfaceCapabilities, WebSurfaceFrame, WebSurfaceProducer,
 };
 
 const DEFAULT_HTML: &str = r#"<!doctype html>
@@ -97,6 +97,7 @@ struct Args {
     input_test: bool,
     cookie_test: bool,
     scheme_test: bool,
+    popup_test: bool,
     width: u32,
     height: u32,
 }
@@ -113,6 +114,7 @@ impl Args {
             input_test: false,
             cookie_test: false,
             scheme_test: false,
+            popup_test: false,
             width: 800,
             height: 600,
         };
@@ -144,6 +146,7 @@ impl Args {
                 "--input-test" => out.input_test = true,
                 "--cookie-test" => out.cookie_test = true,
                 "--scheme-test" => out.scheme_test = true,
+                "--popup-test" => out.popup_test = true,
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -160,7 +163,7 @@ fn print_help() {
     println!();
     println!("USAGE: demo-linux [--url URL] [--out PATH] [--width N] [--height N]");
     println!(
-        "                  [--snapshot-test] [--scripted] [--input-test] [--cookie-test] [--scheme-test] [--probe-only]"
+        "                  [--snapshot-test] [--scripted] [--input-test] [--cookie-test] [--scheme-test] [--popup-test] [--probe-only]"
     );
 }
 
@@ -217,6 +220,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.scheme_test {
         return run_scheme_test(&mut producer, nav_timeout);
     }
+    if args.popup_test {
+        return run_popup_test(&mut producer, nav_timeout);
+    }
 
     match &args.url {
         Some(url) => {
@@ -261,6 +267,66 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+const POPUP_HTML: &str = r#"<!doctype html>
+<html><head><meta charset="utf-8"></head>
+<body>
+<a id="lnk" href="https://example.com/popup-target" target="_blank"
+   style="position:absolute;left:50px;top:50px;width:300px;height:60px;
+   background:#fef3c7;display:block;text-align:center;line-height:60px;
+   text-decoration:none;color:#92400e;font:bold 20px system-ui">popup link</a>
+</body></html>"#;
+
+/// New-window / popup intercept smoke. Clicks a `target="_blank"`
+/// anchor via our native GdkEvent path (isTrusted=true, counts as a
+/// user gesture so WebKit doesn't pop-block) and asserts that
+/// `connect_create` fires with the popup URL — surfaced as a
+/// `NavigationEvent::NewWindowRequested`.
+fn run_popup_test(
+    producer: &mut WebKitGtkProducer,
+    nav_timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("loading popup-test page");
+    producer.navigate_to_string(POPUP_HTML, nav_timeout)?;
+
+    // Drain any nav events from the load itself so we don't get a
+    // stale match from the predicate.
+    while let Some(_) = producer.poll_navigation_event() {}
+
+    // Centre of the anchor (x=50..350, y=50..110).
+    let target = (200, 80);
+    let no_mods = MouseVirtualKeys::default();
+    println!("clicking popup anchor @ {target:?}");
+    producer.send_mouse_input(MouseInput {
+        kind: MouseEventKind::LeftButtonDown,
+        virtual_keys: no_mods,
+        mouse_data: 0,
+        point: target,
+    })?;
+    producer.send_mouse_input(MouseInput {
+        kind: MouseEventKind::LeftButtonUp,
+        virtual_keys: no_mods,
+        mouse_data: 0,
+        point: target,
+    })?;
+
+    let evt = producer.wait_for_navigation_event(Duration::from_secs(3), |e| {
+        matches!(e, NavigationEvent::NewWindowRequested { .. })
+    });
+    match evt {
+        Some(NavigationEvent::NewWindowRequested { url })
+            if url == "https://example.com/popup-target" =>
+        {
+            println!("PASS: NewWindowRequested fired with the popup URL");
+            Ok(())
+        }
+        Some(NavigationEvent::NewWindowRequested { url }) => {
+            Err(format!("FAIL: unexpected popup URL: {url:?}").into())
+        }
+        Some(other) => Err(format!("FAIL: unexpected event {other:?}").into()),
+        None => Err("FAIL: NewWindowRequested never fired".into()),
+    }
 }
 
 /// Custom URL scheme smoke. The producer was built with a `scry://`

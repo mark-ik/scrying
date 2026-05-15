@@ -480,8 +480,8 @@ column. WebKitGTK 4.1 reflects Phase 2a (post-2026-05-14). WebKitGTK
 | Profile / cookie API / storage | ✅ | ✅ 0.4.0 (per-profile UUID + cookie API) | ✅ Phase 2d (data_dir-rooted `WebsiteDataManager`; per-URI `request_cookies_for_url` / `set_cookie` / `delete_cookie` on `CookieManager`) | ? | ? |
 | Custom URL schemes | ✅ (virtual hosts) | ✅ | ✅ Phase 2d (`new_with_url_schemes` constructor; `WebContext::register_uri_scheme` + `URISchemeResponse` with content-type, status, and extra `MessageHeaders`) | ? | ? |
 | Downloads | 🟡 (live pause/resume; no portable resume-data blob) | ✅ | ? | ? | ? |
-| New-window / popup intercept | ✅ | ✅ | ? | ? | ? |
-| Process-failure recovery | ✅ | ✅ | ? | ? | ? |
+| New-window / popup intercept | ✅ | ✅ | ✅ Phase 2d (`connect_create` returns `None` to suppress; surfaces `NavigationEvent::NewWindowRequested`; verified via `target="_blank"` anchor + isTrusted-true native click) | ? | ? |
+| Process-failure recovery | ✅ | ✅ | 🟡 Phase 2d (`connect_web_process_terminated` wired → `NavigationEvent::ContentProcessTerminated`; runtime verification deferred — needs a deliberate web-process crash harness) | ? | ? |
 | **Cross-API GPU sync** | explicit D3D12 fence when supplied; barrier fallback | MTLSharedEvent signal + producer wait | — (CpuRgba; no native frame) | DMABUF + future sync (Phase 5+) | VkSemaphore (explicit, Phase 4) |
 | Pre-composition extraction | — | — | — | — | ✅ (only platform) |
 | Sub-iframe / sub-frame capture | — | — | — | — | — |

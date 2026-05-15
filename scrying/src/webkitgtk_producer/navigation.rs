@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use webkit2gtk::{LoadEvent, WebView, WebViewExt};
+use webkit2gtk::{LoadEvent, URIRequestExt, WebView, WebViewExt};
 
 use crate::{NavigationEvent, WebSurfaceError};
 
@@ -97,6 +97,35 @@ pub(crate) fn install_load_signals(webview: &WebView, state: &Rc<RefCell<NavStat
                 });
         }
     });
+
+    // Popup intercept: `window.open(...)`, `target="_blank"` clicks,
+    // JS-triggered popups. Return `None` to suppress the engine-level
+    // popup unconditionally — browser-shape consumers observe
+    // `NavigationEvent::NewWindowRequested` and decide whether to
+    // open a new tab, ignore, etc.
+    let s = state.clone();
+    webview.connect_create(move |_view, nav_action| {
+        let url = nav_action
+            .request()
+            .and_then(|r| r.uri())
+            .map(|g| g.to_string())
+            .unwrap_or_default();
+        s.borrow_mut()
+            .events
+            .push_back(NavigationEvent::NewWindowRequested { url });
+        None
+    });
+
+    // Content-process termination (crash). The producer's WebView
+    // becomes non-rendering; the host should reload or load a fresh
+    // URL. We don't suppress the engine's default behaviour (which
+    // is to show its crash page) — just surface the event.
+    let s = state.clone();
+    webview.connect_web_process_terminated(move |_view, _reason| {
+        s.borrow_mut()
+            .events
+            .push_back(NavigationEvent::ContentProcessTerminated);
+    });
 }
 
 /// Block (pumping the GTK main loop) until the most recent navigation
@@ -148,5 +177,30 @@ impl WebKitGtkProducer {
     /// URI of the most recently committed navigation, if any.
     pub fn committed_uri(&self) -> Option<String> {
         self.nav_state.borrow().committed_uri.clone()
+    }
+
+    /// Pump the GTK main loop until a [`NavigationEvent`] matching
+    /// `predicate` arrives or `timeout` elapses. Drains non-matching
+    /// events along the way (they're dropped), so callers should
+    /// register interest before driving whatever action would
+    /// trigger the wait.
+    pub fn wait_for_navigation_event<F: Fn(&NavigationEvent) -> bool>(
+        &self,
+        timeout: std::time::Duration,
+        predicate: F,
+    ) -> Option<NavigationEvent> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            while let Some(event) = self.nav_state.borrow_mut().events.pop_front() {
+                if predicate(&event) {
+                    return Some(event);
+                }
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            gtk::main_iteration_do(false);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 }

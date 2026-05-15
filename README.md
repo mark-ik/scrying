@@ -66,6 +66,7 @@ cargo run -p demo-linux -- --scripted                                  # bidirec
 cargo run -p demo-linux -- --input-test                                # synthesized mouse + keyboard reaches page handlers
 cargo run -p demo-linux -- --cookie-test                               # cookie store set / get / delete round-trip
 cargo run -p demo-linux -- --scheme-test                               # custom URL scheme (scry://) → page handler round-trip
+cargo run -p demo-linux -- --popup-test                                # target=_blank anchor click → NewWindowRequested intercept
 cargo run -p demo-linux -- --url https://example.com --out example.png # real-page snapshot
 # All assertion modes at once (headless via offscreen WebView)
 bash scripts/test-linux.sh
