@@ -24,9 +24,7 @@ impl CompositionRoot {
     ///
     /// `parent_hwnd` must be a live top-level HWND for the lifetime of the
     /// returned root and every producer attached to it.
-    pub unsafe fn new(
-        parent_hwnd: *mut std::ffi::c_void,
-    ) -> Result<Arc<Self>, WebSurfaceError> {
+    pub unsafe fn new(parent_hwnd: *mut std::ffi::c_void) -> Result<Arc<Self>, WebSurfaceError> {
         if parent_hwnd.is_null() {
             return Err(WebSurfaceError::Platform(
                 "parent HWND was null".to_string(),

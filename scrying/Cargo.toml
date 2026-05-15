@@ -8,7 +8,13 @@ description = "Capability-driven system-webview frame adapter — scry into WebV
 
 [features]
 default = []
-webkitgtk-fallback = ["dep:gdk", "dep:glib", "dep:gtk", "dep:webkit2gtk"]
+webkitgtk-fallback = [
+    "dep:gdk",
+    "dep:glib",
+    "dep:gtk",
+    "dep:javascriptcore",
+    "dep:webkit2gtk",
+]
 
 [dependencies]
 dpi = "0.1.2"
@@ -36,6 +42,11 @@ webkit2gtk = { version = "2.0", features = ["v2_40"], optional = true }
 gtk = { version = "0.18", optional = true }
 gdk = { version = "0.18", optional = true }
 glib = { version = "0.18", optional = true }
+# Pulls in JavaScriptCore Value introspection (`ValueExt::to_str`) so
+# the JS-messaging path can extract strings out of `JavascriptResult`s
+# delivered by the WebKit UserContentManager. Pinned to 1.1 to match
+# webkit2gtk 2.0.2's transitive dep.
+javascriptcore = { package = "javascriptcore-rs", version = "1.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Single objc2 0.6.x line. Default features kept on all of these — slim

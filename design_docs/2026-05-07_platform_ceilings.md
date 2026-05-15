@@ -1,6 +1,6 @@
 # Platform ceilings and parity roadmap
 
-**Status:** living document. Last refreshed 2026-05-11 against post-0.4.x source.
+**Status:** living document. Last refreshed 2026-05-14 against post-0.4.x source. The Linux section is superseded by [`2026-05-14_linux_webkitgtk_phase_2a.md`](2026-05-14_linux_webkitgtk_phase_2a.md), which records the three-co-equal-backends decision and Phase 2a outcomes.
 
 This records, for each of the three target platforms, the **upper bound of
 what the platform's native webview can deliver to a host wgpu pipeline**,
@@ -336,13 +336,21 @@ SPI-blocked.
 
 ---
 
-### Linux — WPE (primary) or WebKitGTK (fallback)
+### Linux — three co-equal WebKit-family backends
 
-Two backends, two ceilings. WPE is the strategically correct choice
-for embeddable GPU-handoff frames; WebKitGTK is the ubiquitous-
-distribution fallback.
+Three backends, three ceilings, all selected via mutually-exclusive
+cargo features. WebKitGTK 4.1 (GTK 3) has the widest installed base
+today — Tauri 1/2 still targets it, every Tauri-shipped Linux app
+pulls it in, and legacy GNOME/GTK 3 embedders use it. WPE is the
+strategically strongest GPU-handoff path (DMABUF + VkSemaphore on
+Vulkan). WebKitGTK 6.0 (GTK 4 + libadwaita) is the modern GNOME line
+gaining adoption. Build order is the installed-base order — WebKitGTK
+4.1 first, then WPE, then WebKitGTK 6.0 — see
+[`2026-05-14_linux_webkitgtk_phase_2a.md`](2026-05-14_linux_webkitgtk_phase_2a.md)
+for the rationale for treating these as co-equal rather than
+primary/fallback.
 
-#### WPE + DMABUF + Vulkan (primary)
+#### WPE + DMABUF + Vulkan
 
 **Capture path (planned):** `WPEWebView` with `WPEViewBackendDMABuf` →
 per-frame DMABUF fd + format/modifier + `VkSemaphore` for ordering →
@@ -385,13 +393,20 @@ wgpu Vulkan `VK_KHR_external_memory_fd` import.
   things like printing (less well-developed than WebView2) and
   Wayland/X11 abstraction edges.
 
-#### WebKitGTK + wlroots screencopy (fallback)
+#### WebKitGTK 4.1 (GTK 3) — offscreen CPU snapshot (today) + future GPU upgrades
 
-**Capture path (fallback):** `WebKitWebView` as a `GtkWidget` in an
-offscreen `GtkOffscreenWindow` → `zwlr_screencopy_manager_v1`
-(wlroots-class compositors) → wl_buffer (DMABUF or shm) → wgpu
-import. Or GTK's PaintCallback compositing-mode → cairo surface →
-CPU upload.
+**Capture path (today, Phase 2a):** `WebKitWebView` as a `GtkWidget`
+in a producer-owned `GtkOffscreenWindow` → `webkit_web_view_get_snapshot`
+async → `cairo::ImageSurface` (ARGB32) → un-premultiplied RGBA →
+[`WebSurfaceFrame::CpuRgba`](../scrying/src/lib.rs). Latency is
+engine-bound (≥50 ms per snapshot); the tier is honestly `CpuSnapshot`,
+not `ImportedTexture`.
+
+**Future GPU capture upgrades (deferred):** `zwlr_screencopy_manager_v1`
+on wlroots-class compositors → wl_buffer (DMABUF or shm) → wgpu import;
+or WebKitGTK's accelerated-compositing DMABUF renderer (2.46+) →
+DMABUF fd → Vulkan import. Same Vulkan import plumbing as the WPE
+producer — see Phase 4. Compositor-dependent.
 
 **Ceiling (lower than WPE):**
 
@@ -411,18 +426,25 @@ CPU upload.
   XDG portals). X11 / non-wlroots compositors fall back to the cairo
   snapshot path.
 
-**Strategic position:** WPE is the load-bearing path. WebKitGTK fallback
-matters only for distributions where WPE isn't readily packaged.
-Wrapper-driven GTK embedding tends to force the WebKitGTK path, which is
-one of the reasons scrying keeps WPE as the primary Linux target.
+**Strategic position:** the three backends serve overlapping but
+distinct downstream shapes. WebKitGTK 4.1 meets Tauri-shaped
+consumers where they are today and is the load-bearing default on
+Fedora / Ubuntu LTS / similar packaged distributions. WPE is the
+load-bearing choice when GPU-handoff frames matter and the
+deployment can ship WPE + `wpebackend-fdo`. WebKitGTK 6.0 follows
+GNOME's GTK 4 trajectory as that ecosystem catches up. Pick the
+feature that matches your packaging.
 
-**Current scrying state:** [`wpe_producer`](../scrying/src/wpe_producer.rs)
-is now the selected Linux primary scaffold and carries the DMABUF
-native-frame contract. [`webkitgtk_producer`](../scrying/src/webkitgtk_producer.rs)
-remains the fallback planning skeleton behind the `webkitgtk-fallback`
-feature. Linux `WebSurfaceCapabilities` still reports unsupported
-capture until the WPE FFI callback bridge and Vulkan DMABUF importer
-are wired and checked on Linux.
+**Current scrying state (post-Phase 2a):**
+[`webkitgtk_producer`](../scrying/src/webkitgtk_producer/) is **shipping**
+on the `webkitgtk-fallback` feature — offscreen WebView,
+`webkit_web_view_get_snapshot` → `CpuRgba`, navigate + resize +
+load-event signal handlers wired. The
+[`demo-linux`](../demo-linux/) workspace member exercises the path
+end-to-end on a Wayland session.
+[`wpe_producer`](../scrying/src/wpe_producer.rs) is still the
+DMABUF scaffold pending Phase 4 (FFI bridge + Vulkan import).
+WebKitGTK 6.0 (`gtk4` + `webkit6` siblings) is deferred to Phase 5+.
 
 ---
 
@@ -432,33 +454,37 @@ What every platform's producer should implement to hit the **parity
 baseline**. Every row that's `?` on a platform is a gap to close;
 every row marked `—` is structurally not on that platform.
 
-| Capability | Windows WV2 | macOS WKWebView | Linux WPE | Linux WebKitGTK |
-| --- | --- | --- | --- | --- |
-| Imported GPU texture per frame | ✅ 0.1.0 | ✅ 0.4.0 | ? | ? (degraded) |
-| Resize / offset | ✅ | ✅ 0.4.0 | ? | ? |
-| Navigate (URL + HTML) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
-| Reload / Stop / Back / Forward | ✅ | ✅ | ? | ? |
-| Mouse forwarding (buttons + move + leave) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
-| Scroll wheel forwarding | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
-| Touch + pen forwarding | ✅ | ✅ 0.4.x (mouse-shaped JS pointer events) | ? | ? |
-| Keyboard forwarding (basic) | 🟡 (CDP-backed `send_keyboard_input` works in pure visual hosting; Window-to-Visual input passes but exposes visible child HWNDs) | ✅ 0.4.0 | ? | ? |
-| IME (CJK / non-Latin) | 🟡 (baseline host-owned bridge proven: focused editable/caret events -> winit IME area -> CDP composition/commit; full TSF text-store parity remains future work) | ✅ 0.4.0 (via NSTextInputClient) | ? | ? |
-| Drag-and-drop into webview | ✅ (concrete OLE `IDataObject` helpers; trait reports data-object requirement) | — capture (SPI-blocked) / ✅ overlay (auto) | ? | ? |
-| Focus management | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
-| Cursor-change reporting | ✅ | ✅ 0.4.0 | ? | ? |
-| Navigation events (start/source/complete) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
-| Title-changed event | ✅ 0.2.0 | ✅ 0.4.0 (KVO) | ? | ? |
-| JS messaging (bidirectional) | ✅ 0.2.0 | ✅ 0.4.0 | ? | ? |
-| PNG / CPU snapshot | ✅ 0.2.0 | ✅ 0.4.0 (CPU RGBA) | ? (`get_snapshot`) | ? |
-| Settings (zoom, UA, JS, devtools) | ✅ | ✅ | ? | ? |
-| Profile / cookie API / storage | ✅ | ✅ 0.4.0 (per-profile UUID + cookie API) | ? | ? |
-| Custom URL schemes | ✅ (virtual hosts) | ✅ | ? | ? |
-| Downloads | 🟡 (live pause/resume; no portable resume-data blob) | ✅ | ? | ? |
-| New-window / popup intercept | ✅ | ✅ | ? | ? |
-| Process-failure recovery | ✅ | ✅ | ? | ? |
-| **Cross-API GPU sync** | explicit D3D12 fence when supplied; barrier fallback | MTLSharedEvent signal + producer wait | VkSemaphore (explicit) | wl_buffer (implicit) |
-| Pre-composition extraction | — | — | ✅ (only platform) | — |
-| Sub-iframe / sub-frame capture | — | — | — | — |
+Linux ships three co-equal WebKit-family backends; each gets its own
+column. WebKitGTK 4.1 reflects Phase 2a (post-2026-05-14). WebKitGTK
+6.0 and WPE remain `?` pending Phase 5+ and Phase 4 respectively.
+
+| Capability | Windows WV2 | macOS WKWebView | Linux WebKitGTK 4.1 | Linux WebKitGTK 6.0 | Linux WPE |
+| --- | --- | --- | --- | --- | --- |
+| Imported GPU texture per frame | ✅ 0.1.0 | ✅ 0.4.0 | — (CPU-snapshot tier today) | ? | ? |
+| Resize / offset | ✅ | ✅ 0.4.0 | ✅ Phase 2a | ? | ? |
+| Navigate (URL + HTML) | ✅ 0.2.0 | ✅ 0.4.0 | ✅ Phase 2a | ? | ? |
+| Reload / Stop / Back / Forward | ✅ | ✅ | ✅ Phase 2b | ? | ? |
+| Mouse forwarding (buttons + move + leave) | ✅ 0.2.0 | ✅ 0.4.0 | ? (Phase 2b heavy) | ? | ? |
+| Scroll wheel forwarding | ✅ 0.2.0 | ✅ 0.4.0 | ? (Phase 2b heavy) | ? | ? |
+| Touch + pen forwarding | ✅ | ✅ 0.4.x (mouse-shaped JS pointer events) | ? | ? | ? |
+| Keyboard forwarding (basic) | 🟡 (CDP-backed `send_keyboard_input` works in pure visual hosting; Window-to-Visual input passes but exposes visible child HWNDs) | ✅ 0.4.0 | ? (Phase 2b heavy) | ? | ? |
+| IME (CJK / non-Latin) | 🟡 (baseline host-owned bridge proven: focused editable/caret events -> winit IME area -> CDP composition/commit; full TSF text-store parity remains future work) | ✅ 0.4.0 (via NSTextInputClient) | ? | ? | ? |
+| Drag-and-drop into webview | ✅ (concrete OLE `IDataObject` helpers; trait reports data-object requirement) | — capture (SPI-blocked) / ✅ overlay (auto) | ? | ? | ? |
+| Focus management | ✅ 0.2.0 | ✅ 0.4.0 | ? (Phase 2b heavy) | ? | ? |
+| Cursor-change reporting | ✅ | ✅ 0.4.0 | ? | ? | ? |
+| Navigation events (start/source/complete) | ✅ 0.2.0 | ✅ 0.4.0 | ✅ Phase 2b (`poll_navigation_event` draining FIFO from `load-changed` / `load-failed`) | ? | ? |
+| Title-changed event | ✅ 0.2.0 | ✅ 0.4.0 (KVO) | ✅ Phase 2b (`notify::title` signal → `NavigationEvent::TitleChanged`) | ? | ? |
+| JS messaging (bidirectional) | ✅ 0.2.0 | ✅ 0.4.0 | ✅ Phase 2b (script-message handler + injected `window.chrome.webview` shim; round-trip verified by `demo-linux --scripted`) | ? | ? |
+| PNG / CPU snapshot | ✅ 0.2.0 | ✅ 0.4.0 (CPU RGBA) | ✅ Phase 2a (CpuRgba) + ✅ Phase 2b (`capture_snapshot_png`) | ? | ? (`get_snapshot`) |
+| Settings (zoom, UA, JS, devtools) | ✅ | ✅ | 🟡 Phase 2b (zoom / JS-enabled / devtools / UA via `WebKitSettings`; default context menus + accelerator keys + inactive scheduling policy don't map onto WebKitGTK 4.1 settings cleanly) | ? | ? |
+| Profile / cookie API / storage | ✅ | ✅ 0.4.0 (per-profile UUID + cookie API) | 🟡 Phase 2a (data_dir wired via `WebsiteDataManager`; cookie API Phase 2b) | ? | ? |
+| Custom URL schemes | ✅ (virtual hosts) | ✅ | ? | ? | ? |
+| Downloads | 🟡 (live pause/resume; no portable resume-data blob) | ✅ | ? | ? | ? |
+| New-window / popup intercept | ✅ | ✅ | ? | ? | ? |
+| Process-failure recovery | ✅ | ✅ | ? | ? | ? |
+| **Cross-API GPU sync** | explicit D3D12 fence when supplied; barrier fallback | MTLSharedEvent signal + producer wait | — (CpuRgba; no native frame) | DMABUF + future sync (Phase 5+) | VkSemaphore (explicit, Phase 4) |
+| Pre-composition extraction | — | — | — | — | ✅ (only platform) |
+| Sub-iframe / sub-frame capture | — | — | — | — | — |
 
 The bottom three rows are *structural ceilings* — `—` means "not
 possible without upstream API additions". Everything else is just work.
@@ -1059,11 +1085,20 @@ responder-chain questions when adding follow-up macOS slices.
 
 ---
 
-- **Linux WPE producer completion**: WPE FFI callback bridge,
+- **Linux WPE producer completion (Phase 4)**: WPE FFI callback bridge,
   DMABUF + VkSemaphore acquire path, Vulkan importer, plus
-  input/event model.
-- **Linux WebKitGTK fallback**: probably ships only if a downstream
-  consumer needs it; otherwise WPE-only is the cleaner story.
+  input/event model. Blocked on WPE + `wpebackend-fdo` runtime
+  packaging (not in Fedora 44's repos; needs COPR / source build).
+- **Linux WebKitGTK 4.1 Phase 2b**: reload/stop/back/forward,
+  `poll_navigation_event`, title-changed, `apply_settings`, JS
+  messaging via `WebKitUserContentManager`. Input forwarding follows
+  as the Phase 2b *heavy* sub-slice — synthesized `GdkEvent` dispatch
+  against the offscreen WebView.
+- **Linux WebKitGTK 6.0 sibling (Phase 5+)**: `gtk4 = 0.11` +
+  `webkit6 = 0.6` sibling producer behind a `webkit6` feature flag
+  mutually exclusive with `webkitgtk-fallback`. Open offscreen-rendering
+  question (`GtkOffscreenWindow` removed in GTK 4) needs empirical
+  verification.
 
 ---
 
@@ -1117,10 +1152,12 @@ required.
 
 ## Open questions
 
-- **Linux fallback packaging**: `wpe_producer` is now the primary module
-  and `webkitgtk_producer` remains the fallback skeleton. Decide whether
-  WebKitGTK should stay in-tree behind the `webkitgtk-fallback` feature
-  or move to a separate fallback crate.
+- **Linux producer packaging**: all three Linux producers stay in-tree
+  behind mutually-exclusive cargo features (`webkitgtk-fallback`,
+  `webkit6`, `wpe`). Decided 2026-05-14 — see
+  [`2026-05-14_linux_webkitgtk_phase_2a.md`](2026-05-14_linux_webkitgtk_phase_2a.md).
+  Open: whether `webkitgtk-fallback` should be renamed (`webkitgtk` /
+  `webkitgtk4_1`) now that "fallback" framing is dropped.
 - **Windows runtime distribution**: do we document the WebView2
   Evergreen runtime requirement, or also support fixed-version
   bundling? Affects producer construction (different

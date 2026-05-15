@@ -47,10 +47,22 @@ pub use wkwebview_producer::{
 #[cfg(target_os = "linux")]
 pub mod wpe_producer;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "webkitgtk-fallback"))]
 pub mod webkitgtk_producer;
 
-#[cfg(target_os = "linux")]
+// Linux producer selection. The two producers are co-equal: enable the
+// `webkitgtk-fallback` feature on distributions that ship
+// `libwebkit2gtk-4.1` (Fedora, Ubuntu LTS, …) to use the WebKitGTK
+// producer; leave it off to keep the WPE scaffold as the default
+// `PlatformWebSurfaceProducer`. Both targets coexist behind the
+// `WebSurfaceProducer` trait so host code is unchanged.
+#[cfg(all(target_os = "linux", feature = "webkitgtk-fallback"))]
+pub use webkitgtk_producer::{
+    WebKitGtkProducer as PlatformWebSurfaceProducer,
+    WebKitGtkProducerConfig as PlatformWebSurfaceConfig,
+};
+
+#[cfg(all(target_os = "linux", not(feature = "webkitgtk-fallback")))]
 pub use wpe_producer::{
     WpeProducer as PlatformWebSurfaceProducer, WpeProducerConfig as PlatformWebSurfaceConfig,
 };
@@ -82,13 +94,24 @@ pub enum SystemWebviewBackend {
 
 impl SystemWebviewBackend {
     pub fn detect() -> Self {
-        if cfg!(target_os = "windows") {
+        #[cfg(target_os = "windows")]
+        {
             Self::WebView2
-        } else if cfg!(target_os = "macos") {
+        }
+        #[cfg(target_os = "macos")]
+        {
             Self::WkWebView
-        } else if cfg!(target_os = "linux") {
+        }
+        #[cfg(all(target_os = "linux", feature = "webkitgtk-fallback"))]
+        {
+            Self::WebKitGtk
+        }
+        #[cfg(all(target_os = "linux", not(feature = "webkitgtk-fallback")))]
+        {
             Self::Wpe
-        } else {
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        {
             Self::Unknown
         }
     }
@@ -138,19 +161,7 @@ impl WebSurfaceCapabilities {
                 }
             }
             SystemWebviewBackend::Wpe => linux_wpe_capabilities(),
-            SystemWebviewBackend::WebKitGtk => Self {
-                backend: SystemWebviewBackend::WebKitGtk,
-                preferred_mode: WebSurfaceMode::NativeChildOverlay,
-                imported_texture: CapabilityStatus::Unsupported(
-                    crate::native_frame::UnsupportedReason::NativeImportNotYetImplemented,
-                ),
-                native_child_overlay: CapabilityStatus::Supported,
-                cpu_snapshot: CapabilityStatus::Unsupported(
-                    crate::native_frame::UnsupportedReason::NativeImportNotYetImplemented,
-                ),
-                supported_frames: Vec::new(),
-                reason: "WebKitGTK is a Linux fallback skeleton; the load-bearing WPE DMABUF producer is selected by default on Linux.",
-            },
+            SystemWebviewBackend::WebKitGtk => linux_webkitgtk_capabilities(),
             SystemWebviewBackend::Unknown => Self {
                 backend: SystemWebviewBackend::Unknown,
                 preferred_mode: WebSurfaceMode::Unsupported,
@@ -197,6 +208,30 @@ fn linux_wpe_capabilities() -> WebSurfaceCapabilities {
         ),
         supported_frames: Vec::new(),
         reason: "WPE is only available on Linux.",
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "webkitgtk-fallback"))]
+fn linux_webkitgtk_capabilities() -> WebSurfaceCapabilities {
+    webkitgtk_producer::linux_webkitgtk_capabilities()
+}
+
+#[cfg(not(all(target_os = "linux", feature = "webkitgtk-fallback")))]
+fn linux_webkitgtk_capabilities() -> WebSurfaceCapabilities {
+    WebSurfaceCapabilities {
+        backend: SystemWebviewBackend::WebKitGtk,
+        preferred_mode: WebSurfaceMode::Unsupported,
+        imported_texture: CapabilityStatus::Unsupported(
+            crate::native_frame::UnsupportedReason::PlatformNotImplemented,
+        ),
+        native_child_overlay: CapabilityStatus::Unsupported(
+            crate::native_frame::UnsupportedReason::PlatformNotImplemented,
+        ),
+        cpu_snapshot: CapabilityStatus::Unsupported(
+            crate::native_frame::UnsupportedReason::PlatformNotImplemented,
+        ),
+        supported_frames: Vec::new(),
+        reason: "WebKitGTK producer is only available on Linux with the `webkitgtk-fallback` feature enabled.",
     }
 }
 

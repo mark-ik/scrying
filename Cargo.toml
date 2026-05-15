@@ -4,6 +4,7 @@ members = [
     "demo-scrying-winit",
     "demo-win",
     "demo-mac",
+    "demo-linux",
 ]
 resolver = "3"
 
