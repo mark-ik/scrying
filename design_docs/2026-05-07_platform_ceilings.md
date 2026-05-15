@@ -478,7 +478,7 @@ column. WebKitGTK 4.1 reflects Phase 2a (post-2026-05-14). WebKitGTK
 | PNG / CPU snapshot | ✅ 0.2.0 | ✅ 0.4.0 (CPU RGBA) | ✅ Phase 2a (CpuRgba) + ✅ Phase 2b (`capture_snapshot_png`) | ? | ? (`get_snapshot`) |
 | Settings (zoom, UA, JS, devtools) | ✅ | ✅ | 🟡 Phase 2b (zoom / JS-enabled / devtools / UA via `WebKitSettings`; default context menus + accelerator keys + inactive scheduling policy don't map onto WebKitGTK 4.1 settings cleanly) | ? | ? |
 | Profile / cookie API / storage | ✅ | ✅ 0.4.0 (per-profile UUID + cookie API) | ✅ Phase 2d (data_dir-rooted `WebsiteDataManager`; per-URI `request_cookies_for_url` / `set_cookie` / `delete_cookie` on `CookieManager`) | ? | ? |
-| Custom URL schemes | ✅ (virtual hosts) | ✅ | ? | ? | ? |
+| Custom URL schemes | ✅ (virtual hosts) | ✅ | ✅ Phase 2d (`new_with_url_schemes` constructor; `WebContext::register_uri_scheme` + `URISchemeResponse` with content-type, status, and extra `MessageHeaders`) | ? | ? |
 | Downloads | 🟡 (live pause/resume; no portable resume-data blob) | ✅ | ? | ? | ? |
 | New-window / popup intercept | ✅ | ✅ | ? | ? | ? |
 | Process-failure recovery | ✅ | ✅ | ? | ? | ? |

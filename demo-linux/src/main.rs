@@ -12,15 +12,18 @@
 
 #![cfg(target_os = "linux")]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use dpi::PhysicalSize;
 use scrying::webkitgtk_producer::{WebKitGtkProducer, WebKitGtkProducerConfig};
 use scrying::{
     Cookie, FocusReason, KeyEventKind, KeyModifierFlags, KeyboardInput, MouseEventKind, MouseInput,
-    MouseVirtualKeys, WebSurfaceCapabilities, WebSurfaceFrame, WebSurfaceProducer,
+    MouseVirtualKeys, UrlSchemeHandlerFn, UrlSchemeResponse, WebSurfaceCapabilities,
+    WebSurfaceFrame, WebSurfaceProducer,
 };
 
 const DEFAULT_HTML: &str = r#"<!doctype html>
@@ -93,6 +96,7 @@ struct Args {
     scripted: bool,
     input_test: bool,
     cookie_test: bool,
+    scheme_test: bool,
     width: u32,
     height: u32,
 }
@@ -108,6 +112,7 @@ impl Args {
             scripted: false,
             input_test: false,
             cookie_test: false,
+            scheme_test: false,
             width: 800,
             height: 600,
         };
@@ -138,6 +143,7 @@ impl Args {
                 "--scripted" => out.scripted = true,
                 "--input-test" => out.input_test = true,
                 "--cookie-test" => out.cookie_test = true,
+                "--scheme-test" => out.scheme_test = true,
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -154,7 +160,7 @@ fn print_help() {
     println!();
     println!("USAGE: demo-linux [--url URL] [--out PATH] [--width N] [--height N]");
     println!(
-        "                  [--snapshot-test] [--scripted] [--input-test] [--cookie-test] [--probe-only]"
+        "                  [--snapshot-test] [--scripted] [--input-test] [--cookie-test] [--scheme-test] [--probe-only]"
     );
 }
 
@@ -175,7 +181,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = std::env::temp_dir().join("scrying-demo-linux-data");
     let config =
         WebKitGtkProducerConfig::new(PhysicalSize::new(args.width, args.height), &data_dir);
-    let mut producer = WebKitGtkProducer::new(config)?;
+    let mut producer = if args.scheme_test {
+        let mut schemes: HashMap<String, UrlSchemeHandlerFn> = HashMap::new();
+        schemes.insert(
+            "scry".to_string(),
+            Arc::new(|uri: &str| {
+                let body = format!(
+                    "<!doctype html><html><body><script>\
+                 window.chrome.webview.postMessage('scheme served: {uri}');\
+                 </script></body></html>"
+                );
+                UrlSchemeResponse {
+                    mime_type: "text/html".to_string(),
+                    body: body.into_bytes(),
+                    headers: vec![("X-Scry-Source".to_string(), "demo-linux".to_string())],
+                }
+            }),
+        );
+        WebKitGtkProducer::new_with_url_schemes(config, schemes)?
+    } else {
+        WebKitGtkProducer::new(config)?
+    };
 
     let nav_timeout = Duration::from_secs(5);
 
@@ -187,6 +213,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.cookie_test {
         return run_cookie_test(&producer);
+    }
+    if args.scheme_test {
+        return run_scheme_test(&mut producer, nav_timeout);
     }
 
     match &args.url {
@@ -232,6 +261,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+/// Custom URL scheme smoke. The producer was built with a `scry://`
+/// scheme handler that returns an HTML body postMessage-ing the
+/// served URI back; navigating to `scry://hello` should result in
+/// the host observing that message.
+fn run_scheme_test(
+    producer: &mut WebKitGtkProducer,
+    nav_timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("navigating to scry://hello");
+    producer.navigate_to_url("scry://hello", nav_timeout)?;
+    match producer
+        .wait_for_web_message(Duration::from_secs(3))
+        .as_deref()
+    {
+        Some("scheme served: scry://hello") => {
+            println!("PASS: scry:// scheme handler served the page");
+            Ok(())
+        }
+        Some(other) => Err(format!("FAIL: unexpected scheme message {other:?}").into()),
+        None => Err("FAIL: scheme handler never delivered a page-side message".into()),
+    }
 }
 
 /// Cookie store round-trip smoke. Sets a cookie, reads it back via

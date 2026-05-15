@@ -62,6 +62,7 @@ mod input;
 mod input_native;
 mod navigation;
 mod producer;
+mod scheme_handler;
 mod script_message;
 mod trait_impl;
 

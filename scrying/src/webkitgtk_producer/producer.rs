@@ -1,7 +1,7 @@
 //! [`WebKitGtkProducer`] struct, construction, and shared inherent helpers.
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use dpi::PhysicalSize;
@@ -10,11 +10,12 @@ use webkit2gtk::{WebContext, WebView, WebViewExt, WebsiteDataManager};
 // `webkit2gtk::gio::Cancellable::NONE` is reached through the
 // `webkit2gtk` re-export in `run_input_js`; no separate import.
 
-use crate::{WebSurfaceCapabilities, WebSurfaceError};
+use crate::{UrlSchemeHandlerFn, WebSurfaceCapabilities, WebSurfaceError};
 
 use super::config::WebKitGtkProducerConfig;
 use super::helpers::ensure_gtk_init;
 use super::navigation::{NavState, install_load_signals};
+use super::scheme_handler;
 use super::script_message;
 
 /// Linux WebKitGTK producer.
@@ -46,6 +47,17 @@ impl WebKitGtkProducer {
     /// at `config.data_dir`, builds the offscreen WebView, and wires
     /// load-event signal handlers.
     pub fn new(config: WebKitGtkProducerConfig) -> Result<Self, WebSurfaceError> {
+        Self::new_with_url_schemes(config, HashMap::new())
+    }
+
+    /// Construct the producer with custom URL scheme handlers
+    /// registered against the producer's `WebContext` before the
+    /// `WebView` is built — so the very first navigation can already
+    /// resolve `myapp://...` URIs.
+    pub fn new_with_url_schemes(
+        config: WebKitGtkProducerConfig,
+        url_schemes: HashMap<String, UrlSchemeHandlerFn>,
+    ) -> Result<Self, WebSurfaceError> {
         ensure_gtk_init()?;
 
         if config.size.width == 0 || config.size.height == 0 {
@@ -67,6 +79,9 @@ impl WebKitGtkProducer {
             .base_cache_directory(&data_dir_str)
             .build();
         let context = WebContext::with_website_data_manager(&data_manager);
+        if !url_schemes.is_empty() {
+            scheme_handler::register_all(&context, url_schemes);
+        }
         let webview = WebView::with_context(&context);
 
         let offscreen = gtk::OffscreenWindow::new();

@@ -65,6 +65,7 @@ cargo run -p demo-linux -- --snapshot-test --out /tmp/snap.png         # exit 1 
 cargo run -p demo-linux -- --scripted                                  # bidirectional JS-messaging round-trip
 cargo run -p demo-linux -- --input-test                                # synthesized mouse + keyboard reaches page handlers
 cargo run -p demo-linux -- --cookie-test                               # cookie store set / get / delete round-trip
+cargo run -p demo-linux -- --scheme-test                               # custom URL scheme (scry://) → page handler round-trip
 cargo run -p demo-linux -- --url https://example.com --out example.png # real-page snapshot
 # All assertion modes at once (headless via offscreen WebView)
 bash scripts/test-linux.sh
