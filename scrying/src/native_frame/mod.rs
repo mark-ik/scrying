@@ -11,6 +11,9 @@
 mod error;
 mod sync;
 
+#[cfg(target_os = "linux")]
+mod dmabuf;
+
 #[cfg(target_os = "windows")]
 mod sync_dx12;
 
@@ -315,16 +318,7 @@ fn import_dmabuf_image(
 ) -> Result<ImportedTexture, InteropError> {
     #[cfg(target_os = "linux")]
     {
-        if host.backend != InteropBackend::Vulkan {
-            return Err(InteropError::BackendMismatch {
-                expected: "Vulkan",
-                actual: "non-Vulkan",
-            });
-        }
-        let _ = frame;
-        return Err(InteropError::Unsupported(
-            UnsupportedReason::NativeImportNotYetImplemented,
-        ));
+        return dmabuf::import(frame, host);
     }
 
     #[cfg(not(target_os = "linux"))]

@@ -1,0 +1,237 @@
+//! Linux DMABUF → wgpu Vulkan texture import.
+//!
+//! Phase 4a slice 1 — single-plane DMABUF import through wgpu-hal's
+//! Vulkan escape hatch. Uses three Vulkan extensions, all of which
+//! Mesa + the Renoir / Intel / NVIDIA-current Linux drivers support
+//! out of the box:
+//!
+//! - `VK_KHR_external_memory_fd` — imports the DMABUF file descriptor
+//!   as a `VkDeviceMemory` backing.
+//! - `VK_EXT_image_drm_format_modifier` — creates a `VkImage` whose
+//!   tiling matches the DMABUF's DRM format modifier so the consumer's
+//!   sampling pipeline understands the producer's memory layout.
+//! - `VK_KHR_external_memory` — the umbrella extension implied by the
+//!   above two.
+//!
+//! The function-pointer side is intentionally minimal — `vkAllocateMemory`
+//! accepts a chained `VkImportMemoryFdInfoKHR` to do the fd import in
+//! the standard allocation path, so we don't load any KHR loader
+//! structs. `vkGetMemoryFdPropertiesKHR` (which would refine the memory
+//! type selection) is also skipped — we pick from the image's
+//! `memory_type_bits` directly and rely on `vkAllocateMemory` to
+//! reject the choice if it's fd-incompatible.
+//!
+//! Multi-plane DMABUFs (NV12 / P010 / YUV420), the `DRM_FORMAT_MOD_INVALID`
+//! implicit-modifier path, and `VK_KHR_external_semaphore_fd` import for
+//! the explicit producer-sync semaphore land in follow-on slices.
+
+#![cfg(target_os = "linux")]
+
+use ash::vk;
+use wgpu::wgc::api::Vulkan;
+
+use super::{DmaBufImage, HostWgpuContext, ImportedTexture, InteropError, UnsupportedReason};
+
+pub(super) fn import(
+    frame: &DmaBufImage,
+    host: &HostWgpuContext,
+) -> Result<ImportedTexture, InteropError> {
+    if host.backend != super::InteropBackend::Vulkan {
+        return Err(InteropError::BackendMismatch {
+            expected: "Vulkan",
+            actual: "non-Vulkan",
+        });
+    }
+    if frame.planes.is_empty() {
+        return Err(InteropError::InvalidFrame("DmaBufImage has no planes"));
+    }
+    if frame.planes.len() > 1 {
+        // Multi-plane DMABUFs (NV12 / P010 / YUV420) would need
+        // separate `VkSubresourceLayout` per plane and matching DRM
+        // modifier handling. Deferred to Phase 4a.2.
+        return Err(InteropError::Unsupported(
+            UnsupportedReason::NativeImportNotYetImplemented,
+        ));
+    }
+
+    let vk_format = vk_format_from_dmabuf(frame).ok_or_else(|| {
+        InteropError::Vulkan(format!(
+            "unsupported DRM fourcc {:#010x} (wgpu format {:?})",
+            frame.drm_format, frame.format
+        ))
+    })?;
+
+    let width = frame.size.width;
+    let height = frame.size.height;
+
+    let texture = unsafe {
+        let hal_device = host
+            .device
+            .as_hal::<Vulkan>()
+            .ok_or(InteropError::BackendMismatch {
+                expected: "Vulkan",
+                actual: "non-Vulkan",
+            })?;
+        let raw_device: &ash::Device = hal_device.raw_device();
+
+        // ---- 1. Build VkImage with DMABUF + DRM-modifier chain ----
+        let plane_layouts = [vk::SubresourceLayout {
+            offset: frame.planes[0].offset as u64,
+            size: 0, // implementation-defined; ignored for DMABUFs
+            row_pitch: frame.planes[0].stride as u64,
+            array_pitch: 0,
+            depth_pitch: 0,
+        }];
+
+        let mut drm_modifier_info = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
+            .drm_format_modifier(frame.drm_modifier)
+            .plane_layouts(&plane_layouts);
+
+        let mut external_memory_info = vk::ExternalMemoryImageCreateInfo::default()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk_format)
+            .extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
+            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .push_next(&mut external_memory_info)
+            .push_next(&mut drm_modifier_info);
+
+        let vk_image = raw_device
+            .create_image(&image_info, None)
+            .map_err(|e| InteropError::Vulkan(format!("vkCreateImage: {e}")))?;
+
+        // ---- 2. Memory requirements + memory-type selection ----
+        let mem_reqs = raw_device.get_image_memory_requirements(vk_image);
+        let memory_type_index = first_set_bit(mem_reqs.memory_type_bits).ok_or_else(|| {
+            raw_device.destroy_image(vk_image, None);
+            InteropError::Vulkan(
+                "vkGetImageMemoryRequirements reported no compatible memory types".into(),
+            )
+        })?;
+
+        // ---- 3. Allocate VkDeviceMemory importing the DMABUF fd ----
+        // Per the Vulkan spec, ownership of `fd` transfers to the
+        // driver on success — we must NOT close it ourselves
+        // afterwards. On failure, ownership stays with the caller,
+        // but the `DmaBufImage` is consumed by the producer's frame
+        // path already, so we don't try to recover the fd.
+        let mut import_info = vk::ImportMemoryFdInfoKHR::default()
+            .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
+            .fd(frame.planes[0].fd);
+        let mut dedicated_info = vk::MemoryDedicatedAllocateInfo::default().image(vk_image);
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(mem_reqs.size)
+            .memory_type_index(memory_type_index)
+            .push_next(&mut dedicated_info)
+            .push_next(&mut import_info);
+
+        let vk_memory = match raw_device.allocate_memory(&alloc_info, None) {
+            Ok(m) => m,
+            Err(e) => {
+                raw_device.destroy_image(vk_image, None);
+                return Err(InteropError::Vulkan(format!("vkAllocateMemory: {e}")));
+            }
+        };
+
+        if let Err(e) = raw_device.bind_image_memory(vk_image, vk_memory, 0) {
+            raw_device.free_memory(vk_memory, None);
+            raw_device.destroy_image(vk_image, None);
+            return Err(InteropError::Vulkan(format!("vkBindImageMemory: {e}")));
+        }
+
+        // ---- 4. Wrap as wgpu_hal::vulkan::Texture ----
+        let hal_descriptor = wgpu_hal::TextureDescriptor {
+            label: Some("scrying-dmabuf-import"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: frame.format,
+            usage: wgpu_types::TextureUses::RESOURCE | wgpu_types::TextureUses::COPY_SRC,
+            memory_flags: wgpu_hal::MemoryFlags::empty(),
+            view_formats: Vec::new(),
+        };
+        let hal_texture = hal_device.texture_from_raw(
+            vk_image,
+            &hal_descriptor,
+            None,
+            // `TextureMemory::Dedicated` hands the VkDeviceMemory to
+            // wgpu-hal which frees it when the wgpu::Texture drops.
+            // The DMABUF fd already transferred ownership to Vulkan,
+            // so the fd cleanup happens automatically too.
+            wgpu_hal::vulkan::TextureMemory::Dedicated(vk_memory),
+        );
+
+        // ---- 5. Wrap as wgpu::Texture ----
+        host.device.create_texture_from_hal::<Vulkan>(
+            hal_texture,
+            &wgpu::TextureDescriptor {
+                label: Some("scrying-dmabuf-import"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                format: frame.format,
+                dimension: wgpu::TextureDimension::D2,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            },
+        )
+    };
+
+    Ok(ImportedTexture {
+        texture,
+        format: frame.format,
+        size: frame.size,
+        generation: frame.generation,
+        consumer_sync: frame.producer_sync,
+    })
+}
+
+/// Translate DRM fourcc (the `drm_format` field) to a Vulkan format.
+/// Only the BGRA/RGBA single-plane cases that WebKit's offscreen
+/// DMABUF renderer actually produces today. Returns `None` for
+/// anything we haven't validated.
+fn vk_format_from_dmabuf(frame: &DmaBufImage) -> Option<vk::Format> {
+    // linux/drm_fourcc.h — little-endian byte-order so the bytes in
+    // memory are reversed vs. the human-readable fourcc.
+    const DRM_FORMAT_ARGB8888: u32 = 0x34325241; // 'AR24' (BGRA bytes-in-memory)
+    const DRM_FORMAT_ABGR8888: u32 = 0x34324241; // 'AB24' (RGBA bytes-in-memory)
+    const DRM_FORMAT_XRGB8888: u32 = 0x34325258; // 'XR24'
+    const DRM_FORMAT_XBGR8888: u32 = 0x34324258; // 'XB24'
+
+    match frame.drm_format {
+        DRM_FORMAT_ARGB8888 | DRM_FORMAT_XRGB8888 => Some(vk::Format::B8G8R8A8_UNORM),
+        DRM_FORMAT_ABGR8888 | DRM_FORMAT_XBGR8888 => Some(vk::Format::R8G8B8A8_UNORM),
+        _ => None,
+    }
+}
+
+/// Lowest set bit in the memory-type-bits mask, or `None` if
+/// `mask == 0`.
+fn first_set_bit(mask: u32) -> Option<u32> {
+    if mask == 0 {
+        None
+    } else {
+        Some(mask.trailing_zeros())
+    }
+}
