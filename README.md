@@ -13,6 +13,7 @@ This repo was extracted from [`wgpu-graft`](https://github.com/mark-ik/wgpu-graf
 | [`demo-win`](demo-win/) | Windows runtime probe. Drives the WebView2 CompositionController path into a wgpu texture, including WGC capture, shared D3D texture import, resize, input, navigation/message/cursor event drains, and optional readback/fence diagnostics. |
 | [`demo-mac`](demo-mac/) | macOS host probe. Hosts a `WkWebViewProducer` against a winit window's `NSView`; flagged modes drive nav / input / JS-messaging / SCK-capture / per-profile-data-store paths so each producer slice gets exercised at runtime. See [`demo-mac/README.md`](demo-mac/README.md). |
 | [`demo-linux`](demo-linux/) | Linux WebKitGTK 4.1 runtime probe. Hosts a `WebKitGtkProducer` in a producer-owned `GtkOffscreenWindow`, navigates to inline HTML or a URL, takes a CPU RGBA snapshot via `webkit_web_view_get_snapshot`, and writes it as a PNG. Flags: `--probe-only`, `--snapshot-test`, `--url`, `--out`, `--width`, `--height`. |
+| [`demo-linux6`](demo-linux6/) | Linux WebKitGTK 6.0 / GTK 4 runtime probe. Same shape as `demo-linux` but built against the `webkit6` feature — uses `gtk4::Window` + `webkit6::WebView` and the `NetworkSession` data-dir model new to WebKitGTK 6.0. GTK 4 dropped `GtkOffscreenWindow`, so the producer keeps a tiny `opacity=0` top-level window mapped to satisfy WebKit's "must be visible to render" constraint. |
 
 See [`scrying/README.md`](scrying/README.md) for the producer/consumer contract, the Windows WGC + shared D3D11 path, and the future explicit-fence-sync work.
 
@@ -72,6 +73,10 @@ cargo run -p demo-linux -- --cursor-test                               # hover-a
 cargo run -p demo-linux -- --ime-test                                  # autofocus input → TextInputFocused with element metadata
 cargo run -p demo-linux -- --drag-test                                 # send_drag_input Enter → Drop reaches page handler
 cargo run -p demo-linux -- --text-test                                 # send_text("hi") round-trips through native key dispatch
+# Linux — WebKitGTK 6.0 / GTK 4 runtime probe (requires webkit6 feature)
+cargo run -p demo-linux6                                               # default HTML → snapshot.png via gtk4 + webkit6
+cargo run -p demo-linux6 -- --probe-only                               # capability probe + exit
+cargo run -p demo-linux6 -- --snapshot-test                            # exit 1 on empty / zero-pixel snapshot
 cargo run -p demo-linux -- --url https://example.com --out example.png # real-page snapshot
 # All assertion modes at once (headless via offscreen WebView)
 bash scripts/test-linux.sh
@@ -80,11 +85,15 @@ bash scripts/test-linux.sh
 Linux system-package prerequisites (Fedora 44 names; translate for Debian / Ubuntu / Arch):
 
 ```bash
+# WebKitGTK 4.1 (GTK 3 line) — `webkitgtk-fallback` feature
 sudo dnf install -y gcc gcc-c++ \
   webkit2gtk4.1-devel \
   vulkan-loader-devel vulkan-headers mesa-vulkan-drivers \
   libxkbcommon-devel libxkbcommon-x11-devel wayland-devel \
   libX11-devel libXcursor-devel libXrandr-devel libXi-devel libxcb-devel
+
+# WebKitGTK 6.0 (GTK 4 line) — `webkit6` feature (optional, parallel sibling)
+sudo dnf install -y gtk4-devel webkitgtk6.0-devel
 ```
 
 `--*-test` modes default to a hidden window and `NSApplicationActivationPolicyProhibited` so they run silently in the background; pass `--visible` to watch the WKWebView in real time. `--capture-test` is the one exception — it forces visibility because SCK can't capture hidden windows, and is held out of `scripts/test-mac.sh` because Screen Recording permission can't be self-granted (CI runners need a `tccutil` pre-grant). `.github/workflows/test-mac.yml` runs the rest of the suite on every push to master against `macos-latest`.

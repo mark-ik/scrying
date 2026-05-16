@@ -1,0 +1,15 @@
+[package]
+name = "demo-linux6"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Linux WebKitGTK 6.0 (GTK 4) runtime probe for scrying"
+
+[[bin]]
+name = "demo-linux6"
+path = "src/main.rs"
+
+[dependencies]
+dpi = "0.1.2"
+image = "0.25"
+scrying = { path = "../scrying", features = ["webkit6"] }

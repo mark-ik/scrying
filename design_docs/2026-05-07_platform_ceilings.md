@@ -460,9 +460,9 @@ column. WebKitGTK 4.1 reflects Phase 2a (post-2026-05-14). WebKitGTK
 
 | Capability | Windows WV2 | macOS WKWebView | Linux WebKitGTK 4.1 | Linux WebKitGTK 6.0 | Linux WPE |
 | --- | --- | --- | --- | --- | --- |
-| Imported GPU texture per frame | ✅ 0.1.0 | ✅ 0.4.0 | — (CPU-snapshot tier today) | ? | ? |
-| Resize / offset | ✅ | ✅ 0.4.0 | ✅ Phase 2a | ? | ? |
-| Navigate (URL + HTML) | ✅ 0.2.0 | ✅ 0.4.0 | ✅ Phase 2a | ? | ? |
+| Imported GPU texture per frame | ✅ 0.1.0 | ✅ 0.4.0 | — (CPU-snapshot tier today) | — (CPU-snapshot tier today) | ? |
+| Resize / offset | ✅ | ✅ 0.4.0 | ✅ Phase 2a | ✅ Phase 5 first slice | ? |
+| Navigate (URL + HTML) | ✅ 0.2.0 | ✅ 0.4.0 | ✅ Phase 2a | ✅ Phase 5 first slice | ? |
 | Reload / Stop / Back / Forward | ✅ | ✅ | ✅ Phase 2b | ? | ? |
 | Mouse forwarding (buttons + move + leave) | ✅ 0.2.0 | ✅ 0.4.0 | ✅ Phase 2c (native `GdkEvent` via `gtk_main_do_event`, page handlers see `isTrusted = true`) | ? | ? |
 | Scroll wheel forwarding | ✅ 0.2.0 | ✅ 0.4.0 | ✅ Phase 2c (native `GdkEventScroll`, smooth-scroll path) | ? | ? |
@@ -475,7 +475,7 @@ column. WebKitGTK 4.1 reflects Phase 2a (post-2026-05-14). WebKitGTK
 | Navigation events (start/source/complete) | ✅ 0.2.0 | ✅ 0.4.0 | ✅ Phase 2b (`poll_navigation_event` draining FIFO from `load-changed` / `load-failed`) | ? | ? |
 | Title-changed event | ✅ 0.2.0 | ✅ 0.4.0 (KVO) | ✅ Phase 2b (`notify::title` signal → `NavigationEvent::TitleChanged`) | ? | ? |
 | JS messaging (bidirectional) | ✅ 0.2.0 | ✅ 0.4.0 | ✅ Phase 2b (script-message handler + injected `window.chrome.webview` shim; round-trip verified by `demo-linux --scripted`) | ? | ? |
-| PNG / CPU snapshot | ✅ 0.2.0 | ✅ 0.4.0 (CPU RGBA) | ✅ Phase 2a (CpuRgba) + ✅ Phase 2b (`capture_snapshot_png`) | ? | ? (`get_snapshot`) |
+| PNG / CPU snapshot | ✅ 0.2.0 | ✅ 0.4.0 (CPU RGBA) | ✅ Phase 2a (CpuRgba) + ✅ Phase 2b (`capture_snapshot_png`) | ✅ Phase 5 first slice (CpuRgba via `webkit_web_view_get_snapshot` → `gdk::Texture::download` → un-premultiplied RGBA; opacity=0 window kept mapped so WebKit's renderer engages) | ? (`get_snapshot`) |
 | Settings (zoom, UA, JS, devtools) | ✅ | ✅ | 🟡 Phase 2b (zoom / JS-enabled / devtools / UA via `WebKitSettings`; default context menus + accelerator keys + inactive scheduling policy don't map onto WebKitGTK 4.1 settings cleanly) | ? | ? |
 | Profile / cookie API / storage | ✅ | ✅ 0.4.0 (per-profile UUID + cookie API) | ✅ Phase 2d (data_dir-rooted `WebsiteDataManager`; per-URI `request_cookies_for_url` / `set_cookie` / `delete_cookie` on `CookieManager`) | ? | ? |
 | Custom URL schemes | ✅ (virtual hosts) | ✅ | ✅ Phase 2d (`new_with_url_schemes` constructor; `WebContext::register_uri_scheme` + `URISchemeResponse` with content-type, status, and extra `MessageHeaders`) | ? | ? |

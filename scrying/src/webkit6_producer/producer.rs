@@ -6,8 +6,7 @@ use std::rc::Rc;
 use dpi::PhysicalSize;
 use webkit6::gtk;
 use webkit6::gtk::prelude::*;
-use webkit6::prelude::*;
-use webkit6::{WebContext, WebView, WebsiteDataManager};
+use webkit6::{NetworkSession, WebContext, WebView};
 
 use crate::{WebSurfaceCapabilities, WebSurfaceError};
 
@@ -23,7 +22,10 @@ pub struct WebKit6Producer {
     pub(crate) webview: WebView,
     pub(crate) window: gtk::Window,
     pub(crate) _context: WebContext,
-    pub(crate) _data_manager: WebsiteDataManager,
+    /// WebKitGTK 6.0 split website-data + cache directories out of
+    /// `WebContext` into a separate `NetworkSession` (1:1 with a
+    /// WebView). Held for lifetime — the WebView refs it internally.
+    pub(crate) _network_session: NetworkSession,
     pub(crate) size: PhysicalSize<u32>,
     pub(crate) offset: (f32, f32),
     pub(crate) generation: Cell<u64>,
@@ -52,29 +54,39 @@ impl WebKit6Producer {
             ))
         })?;
 
+        // WebKitGTK 6.0 moved data + cache directory configuration
+        // out of `WebContext` (which is process-wide) and into a new
+        // `NetworkSession` type that's 1:1 with the WebView. Build
+        // both and wire them to the view via `WebViewBuilder`.
         let data_dir_str = config.data_dir.to_string_lossy().to_string();
-        let data_manager = WebsiteDataManager::builder()
-            .base_data_directory(&data_dir_str)
-            .base_cache_directory(&data_dir_str)
+        let network_session = NetworkSession::new(Some(&data_dir_str), Some(&data_dir_str));
+        let context = WebContext::new();
+        let webview = WebView::builder()
+            .web_context(&context)
+            .network_session(&network_session)
             .build();
-        let context = WebContext::builder()
-            .website_data_manager(&data_manager)
-            .build();
-        let webview = WebView::builder().web_context(&context).build();
 
-        // GTK 4 has no GtkOffscreenWindow — use a hidden top-level
-        // window. WebKit's GPU process renders independently of
-        // widget visibility, so snapshots still work while
-        // `present()` is never called.
+        // GTK 4 dropped `GtkOffscreenWindow`, and WebKitGTK 6.0
+        // refuses to snapshot a hidden surface ("There was an error
+        // creating the snapshot" — the renderer no-ops when the
+        // window isn't mapped). Workaround: keep the window mapped
+        // but visually invisible via `set_opacity(0.0)`. The
+        // compositor allocates the surface so WebKit's GPU process
+        // engages, but the window draws nothing on screen.
+        // Additionally we set the WebView's `set_size_request` to
+        // the requested capture dimensions while the host window
+        // itself can stay tiny — `present()` will then resize the
+        // window to fit the child (Wayland compositor permitting).
+        //
+        // A truly headless GTK 4 path (custom GtkRoot, direct
+        // GdkSurface creation, etc.) is future work.
         let window = gtk::Window::new();
         window.set_decorated(false);
         window.set_default_size(config.size.width as i32, config.size.height as i32);
         webview.set_size_request(config.size.width as i32, config.size.height as i32);
         window.set_child(Some(&webview));
-        // Force widget hierarchy to realize without becoming visible.
-        // `realize()` allocates the GdkSurface so WebKit has something
-        // to render against.
-        window.realize();
+        window.set_opacity(0.0);
+        window.present();
 
         let nav_state = Rc::new(RefCell::new(NavState::default()));
         install_load_signals(&webview, &nav_state);
@@ -84,7 +96,7 @@ impl WebKit6Producer {
             webview,
             window,
             _context: context,
-            _data_manager: data_manager,
+            _network_session: network_session,
             size: config.size,
             offset: config.offset,
             generation: Cell::new(0),
