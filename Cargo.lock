@@ -601,6 +601,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "demo-linux6"
+version = "0.1.0"
+dependencies = [
+ "dpi",
+ "image",
+ "scrying",
+]
+
+[[package]]
 name = "demo-mac"
 version = "0.1.0"
 dependencies = [
