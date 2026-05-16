@@ -115,8 +115,23 @@ fn dmabuf_import_round_trip() {
     let stride = bo.stride();
     eprintln!("gbm BO: {WIDTH}x{HEIGHT} stride={stride} modifier={modifier:?}");
     let mut bo = bo;
-    if let Err(e) = bo.write(&pattern) {
-        eprintln!("SKIP: gbm BO write failed: {e}");
+    // `BufferObject::write` requires `BUFFEROBJECT_FLAGS::WRITE` at
+    // creation time, which the modifier-aware constructor doesn't
+    // surface. `map_mut` is the portable path — it mmap's the BO
+    // for CPU r/w and lets us copy per-row, respecting whatever
+    // stride Mesa chose.
+    let stride_usize = stride as usize;
+    let row_bytes = (WIDTH as usize) * 4;
+    let map_result = bo.map_mut(0, 0, WIDTH, HEIGHT, |mapped| {
+        let dst = mapped.buffer_mut();
+        for y in 0..HEIGHT as usize {
+            let dst_row = &mut dst[y * stride_usize..y * stride_usize + row_bytes];
+            let src_row = &pattern[y * row_bytes..(y + 1) * row_bytes];
+            dst_row.copy_from_slice(src_row);
+        }
+    });
+    if let Err(e) = map_result {
+        eprintln!("SKIP: gbm_bo_map failed: {e}");
         return;
     }
 
