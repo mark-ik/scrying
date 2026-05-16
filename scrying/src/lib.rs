@@ -8,8 +8,8 @@ use thiserror::Error;
 #[cfg(target_os = "windows")]
 pub use native_frame::Dx12FenceSynchronizer;
 pub use native_frame::{
-    CapabilityStatus, Dx12SharedTexture, HostWgpuContext, ImportOptions, ImportedTexture,
-    InteropBackend, InteropError, MetalTextureRef, NativeFrame, NativeFrameKind,
+    CapabilityStatus, DmaBufImage, DmaBufPlane, Dx12SharedTexture, HostWgpuContext, ImportOptions,
+    ImportedTexture, InteropBackend, InteropError, MetalTextureRef, NativeFrame, NativeFrameKind,
     ProducerCapabilities, SyncMechanism, TextureImporter, UnsupportedReason, WgpuTextureImporter,
 };
 
