@@ -21,16 +21,31 @@
 //! `memory_type_bits` directly and rely on `vkAllocateMemory` to
 //! reject the choice if it's fd-incompatible.
 //!
-//! Multi-plane DMABUFs (NV12 / P010 / YUV420), the `DRM_FORMAT_MOD_INVALID`
-//! implicit-modifier path, and `VK_KHR_external_semaphore_fd` import for
-//! the explicit producer-sync semaphore land in follow-on slices.
+//! Multi-plane DMABUFs (NV12 / P010 / YUV420) and the
+//! `DRM_FORMAT_MOD_INVALID` implicit-modifier path are deferred to
+//! Phase 4a.5. The Phase 4a.2 `VK_KHR_external_semaphore_fd` import for
+//! the producer-sync semaphore is wired here: when `frame.semaphore_fd`
+//! is `Some`, the importer loads `vkImportSemaphoreFdKHR` via
+//! `vkGetDeviceProcAddr` (no ash high-level wrapper needed), imports
+//! the semaphore, submits a wait-only `vkQueueSubmit` directly on the
+//! consumer queue's `vk::Queue` (reached via
+//! `wgpu::Queue::as_hal::<Vulkan>().as_raw()`), drains via
+//! `vkQueueWaitIdle`, and destroys the semaphore. The CPU-side drain
+//! is pessimistic — a future iteration can defer cleanup via a fence
+//! ring so the consumer can issue work concurrently with the
+//! producer's render.
 
 #![cfg(target_os = "linux")]
+
+use std::ffi::c_void;
+use std::mem;
 
 use ash::vk;
 use wgpu::wgc::api::Vulkan;
 
-use super::{DmaBufImage, HostWgpuContext, ImportedTexture, InteropError, UnsupportedReason};
+use super::{
+    DmaBufImage, HostWgpuContext, ImportedTexture, InteropError, SyncMechanism, UnsupportedReason,
+};
 
 pub(super) fn import(
     frame: &DmaBufImage,
@@ -179,7 +194,7 @@ pub(super) fn import(
         );
 
         // ---- 5. Wrap as wgpu::Texture ----
-        host.device.create_texture_from_hal::<Vulkan>(
+        let wgpu_texture = host.device.create_texture_from_hal::<Vulkan>(
             hal_texture,
             &wgpu::TextureDescriptor {
                 label: Some("scrying-dmabuf-import"),
@@ -195,7 +210,21 @@ pub(super) fn import(
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             },
-        )
+        );
+
+        // ---- 6. Optional: producer-sync semaphore wait ----
+        if let (Some(semaphore_fd), SyncMechanism::ExplicitExternalSemaphore) =
+            (frame.semaphore_fd, frame.producer_sync)
+        {
+            if let Err(e) = wait_on_producer_semaphore(host, raw_device, semaphore_fd) {
+                // The texture is valid; the wait failed. Surface the
+                // error so callers can decide whether the data is
+                // safe to sample (probably not).
+                return Err(e);
+            }
+        }
+
+        wgpu_texture
     };
 
     Ok(ImportedTexture {
@@ -205,6 +234,118 @@ pub(super) fn import(
         generation: frame.generation,
         consumer_sync: frame.producer_sync,
     })
+}
+
+/// Import the producer's binary `VkSemaphore` from the supplied
+/// opaque fd, inject a wait-only `vkQueueSubmit` on the consumer's
+/// `vk::Queue`, drain via `vkQueueWaitIdle`, then destroy the
+/// semaphore.
+///
+/// Thread-safety: `wgpu::Queue::as_hal` returns a Deref guard that
+/// does **not** lock the underlying queue — Vulkan queues are
+/// externally synchronized, so calling `vkQueueSubmit` from this
+/// path while wgpu submits from another thread is undefined
+/// behaviour. The Phase 4a.2 contract is single-threaded import:
+/// callers must ensure no other wgpu queue work is in flight on
+/// this queue during `import_frame`. A future iteration that adds
+/// a wgpu-hal `Queue::add_wait_semaphore` upstream would lift this
+/// restriction.
+unsafe fn wait_on_producer_semaphore(
+    host: &HostWgpuContext,
+    raw_device: &ash::Device,
+    semaphore_fd: i32,
+) -> Result<(), InteropError> {
+    // Load `vkImportSemaphoreFdKHR` by walking from the system
+    // `libvulkan.so` loader → `vkGetDeviceProcAddr` → the device-
+    // scoped extension function. We don't have an `ash::Instance`
+    // (wgpu doesn't expose it from `Device::as_hal`), so we go
+    // through `ash::Entry` which dlopens libvulkan itself. Vulkan's
+    // spec guarantees `vkGetInstanceProcAddr(VK_NULL_HANDLE,
+    // "vkGetDeviceProcAddr")` returns the device-proc loader.
+    let entry = unsafe { ash::Entry::load() }
+        .map_err(|e| InteropError::Vulkan(format!("ash::Entry::load (libvulkan): {e}")))?;
+    let get_device_proc_ptr = unsafe {
+        entry.get_instance_proc_addr(vk::Instance::null(), c"vkGetDeviceProcAddr".as_ptr())
+    };
+    let get_device_proc_addr: vk::PFN_vkGetDeviceProcAddr = match get_device_proc_ptr {
+        Some(p) => unsafe { mem::transmute::<_, vk::PFN_vkGetDeviceProcAddr>(p) },
+        None => {
+            return Err(InteropError::Vulkan(
+                "vkGetInstanceProcAddr(NULL, vkGetDeviceProcAddr) returned null".into(),
+            ));
+        }
+    };
+    let raw_proc =
+        unsafe { get_device_proc_addr(raw_device.handle(), c"vkImportSemaphoreFdKHR".as_ptr()) };
+    if raw_proc.is_none() {
+        return Err(InteropError::Vulkan(
+            "vkGetDeviceProcAddr(vkImportSemaphoreFdKHR) returned null; \
+             VK_KHR_external_semaphore_fd not enabled on this device"
+                .into(),
+        ));
+    }
+    type PfnImportSemaphoreFd = unsafe extern "system" fn(vk::Device, *const c_void) -> vk::Result;
+    let import_fd: PfnImportSemaphoreFd = unsafe { mem::transmute_copy(&raw_proc) };
+
+    // Create an empty VkSemaphore.
+    let create_info = vk::SemaphoreCreateInfo::default();
+    let vk_semaphore = unsafe {
+        raw_device
+            .create_semaphore(&create_info, None)
+            .map_err(|e| InteropError::Vulkan(format!("vkCreateSemaphore: {e}")))?
+    };
+
+    // Import the producer's fd into the semaphore. Per the Vulkan
+    // spec, OPAQUE_FD imports transfer ownership of the fd to the
+    // driver on success.
+    let import_info = vk::ImportSemaphoreFdInfoKHR::default()
+        .semaphore(vk_semaphore)
+        .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD)
+        .fd(semaphore_fd);
+    let result = unsafe { import_fd(raw_device.handle(), &import_info as *const _ as *const _) };
+    if result != vk::Result::SUCCESS {
+        unsafe { raw_device.destroy_semaphore(vk_semaphore, None) };
+        return Err(InteropError::Vulkan(format!(
+            "vkImportSemaphoreFdKHR failed: {result:?}"
+        )));
+    }
+
+    // Reach the underlying vk::Queue via wgpu's HAL escape. The
+    // returned guard is a Deref proxy; the raw handle is valid for
+    // direct vkQueueSubmit calls as long as we don't race against
+    // other wgpu work (see the function-level note above).
+    let queue_guard =
+        unsafe { host.queue.as_hal::<Vulkan>() }.ok_or(InteropError::BackendMismatch {
+            expected: "Vulkan",
+            actual: "non-Vulkan",
+        })?;
+    let vk_queue = queue_guard.as_raw();
+
+    let wait_stages = [vk::PipelineStageFlags::ALL_COMMANDS];
+    let wait_semaphores = [vk_semaphore];
+    let submit_info = vk::SubmitInfo::default()
+        .wait_semaphores(&wait_semaphores)
+        .wait_dst_stage_mask(&wait_stages);
+
+    let submit_result =
+        unsafe { raw_device.queue_submit(vk_queue, &[submit_info], vk::Fence::null()) };
+    if let Err(e) = submit_result {
+        unsafe { raw_device.destroy_semaphore(vk_semaphore, None) };
+        return Err(InteropError::Vulkan(format!(
+            "vkQueueSubmit(wait_semaphores=[producer]): {e}"
+        )));
+    }
+
+    // CPU-side drain so we can destroy the semaphore safely. Future
+    // iterations can swap this for a fence-tracked deferred cleanup
+    // so the consumer keeps running concurrently with the producer.
+    let drain_result = unsafe { raw_device.queue_wait_idle(vk_queue) };
+    unsafe { raw_device.destroy_semaphore(vk_semaphore, None) };
+    if let Err(e) = drain_result {
+        return Err(InteropError::Vulkan(format!("vkQueueWaitIdle: {e}")));
+    }
+
+    Ok(())
 }
 
 /// Translate DRM fourcc (the `drm_format` field) to a Vulkan format.
