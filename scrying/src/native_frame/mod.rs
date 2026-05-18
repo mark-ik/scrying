@@ -12,7 +12,7 @@ mod error;
 mod sync;
 
 #[cfg(target_os = "linux")]
-mod dmabuf;
+pub(crate) mod dmabuf;
 
 #[cfg(target_os = "windows")]
 mod sync_dx12;

@@ -189,7 +189,27 @@ impl WebSurfaceCapabilities {
                     reason: "WKWebView producer: ScreenCaptureKit → IOSurface → MTLTexture path is wired (requires Screen Recording permission and a Metal-backed host wgpu device); falls back to NativeChildOverlay if the host isn't on Metal, and CpuSnapshot via takeSnapshot: is always available.",
                 }
             }
-            SystemWebviewBackend::Wpe => linux_wpe_capabilities(),
+            SystemWebviewBackend::Wpe => {
+                let mut caps = linux_wpe_capabilities();
+                // After Phase 4a, the WPE column's `imported_texture`
+                // depends on whether the host's wgpu Vulkan device
+                // has the DMABUF extensions the import path needs.
+                // Without a host (None probe), we keep the
+                // conservative "NativeImportNotYetImplemented" stub.
+                #[cfg(target_os = "linux")]
+                if let Some(host) = host {
+                    match crate::native_frame::dmabuf::probe_dmabuf_extensions(host) {
+                        Ok(()) => {
+                            caps.imported_texture = CapabilityStatus::Supported;
+                            caps.preferred_mode = WebSurfaceMode::ImportedTexture;
+                        }
+                        Err(reason) => {
+                            caps.imported_texture = CapabilityStatus::Unsupported(reason);
+                        }
+                    }
+                }
+                caps
+            }
             SystemWebviewBackend::WebKitGtk => linux_webkitgtk_capabilities(),
             SystemWebviewBackend::Unknown => Self {
                 backend: SystemWebviewBackend::Unknown,

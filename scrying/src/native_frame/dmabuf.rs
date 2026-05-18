@@ -376,3 +376,55 @@ fn first_set_bit(mask: u32) -> Option<u32> {
         Some(mask.trailing_zeros())
     }
 }
+
+/// Capability probe surfaced by [`crate::WebSurfaceCapabilities::probe`]
+/// (and any caller that wants to short-circuit before constructing a
+/// `DmaBufImage`).
+///
+/// Returns `Ok(())` if the host's wgpu device has the Vulkan
+/// extensions [`import`] needs at runtime. Returns
+/// [`super::UnsupportedReason`] otherwise so callers can downgrade
+/// `imported_texture` in the capability struct.
+///
+/// Cheap to call once at host setup; not designed for per-frame use
+/// (dlopens libvulkan via `ash::Entry::load`).
+pub(crate) fn probe_dmabuf_extensions(
+    host: &super::HostWgpuContext,
+) -> Result<(), super::UnsupportedReason> {
+    if host.backend != super::InteropBackend::Vulkan {
+        return Err(super::UnsupportedReason::HostBackendMismatch);
+    }
+
+    let hal_device = unsafe { host.device.as_hal::<Vulkan>() }
+        .ok_or(super::UnsupportedReason::HostBackendMismatch)?;
+    let raw_device: &ash::Device = hal_device.raw_device();
+
+    let entry = unsafe { ash::Entry::load() }
+        .map_err(|_| super::UnsupportedReason::NativeImportNotYetImplemented)?;
+    let raw_proc = unsafe {
+        entry.get_instance_proc_addr(vk::Instance::null(), c"vkGetDeviceProcAddr".as_ptr())
+    };
+    let get_device_proc_addr: vk::PFN_vkGetDeviceProcAddr = match raw_proc {
+        Some(p) => unsafe { mem::transmute::<_, vk::PFN_vkGetDeviceProcAddr>(p) },
+        None => return Err(super::UnsupportedReason::NativeImportNotYetImplemented),
+    };
+
+    // Signature functions of the device extensions the import path
+    // depends on. `vkImportMemoryFdKHR` itself isn't probed directly
+    // — `vkAllocateMemory` accepts the import-fd chain struct so the
+    // function pointer is never resolved separately; but
+    // `vkGetMemoryFdPropertiesKHR` is the marker we can query for
+    // VK_KHR_external_memory_fd availability.
+    let required = [
+        c"vkGetMemoryFdPropertiesKHR", // VK_KHR_external_memory_fd
+        c"vkGetImageDrmFormatModifierPropertiesEXT", // VK_EXT_image_drm_format_modifier
+    ];
+    for name in required {
+        let ptr = unsafe { get_device_proc_addr(raw_device.handle(), name.as_ptr()) };
+        if ptr.is_none() {
+            return Err(super::UnsupportedReason::NativeImportNotYetImplemented);
+        }
+    }
+
+    Ok(())
+}
