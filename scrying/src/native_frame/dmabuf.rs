@@ -216,7 +216,10 @@ pub(super) fn import(
         if let (Some(semaphore_fd), SyncMechanism::ExplicitExternalSemaphore) =
             (frame.semaphore_fd, frame.producer_sync)
         {
-            if let Err(e) = wait_on_producer_semaphore(host, raw_device, semaphore_fd) {
+            let ash_instance = hal_device.shared_instance().raw_instance();
+            if let Err(e) =
+                wait_on_producer_semaphore(host, ash_instance, raw_device, semaphore_fd)
+            {
                 // The texture is valid; the wait failed. Surface the
                 // error so callers can decide whether the data is
                 // safe to sample (probably not).
@@ -252,31 +255,21 @@ pub(super) fn import(
 /// restriction.
 unsafe fn wait_on_producer_semaphore(
     host: &HostWgpuContext,
+    ash_instance: &ash::Instance,
     raw_device: &ash::Device,
     semaphore_fd: i32,
 ) -> Result<(), InteropError> {
-    // Load `vkImportSemaphoreFdKHR` by walking from the system
-    // `libvulkan.so` loader → `vkGetDeviceProcAddr` → the device-
-    // scoped extension function. We don't have an `ash::Instance`
-    // (wgpu doesn't expose it from `Device::as_hal`), so we go
-    // through `ash::Entry` which dlopens libvulkan itself. Vulkan's
-    // spec guarantees `vkGetInstanceProcAddr(VK_NULL_HANDLE,
-    // "vkGetDeviceProcAddr")` returns the device-proc loader.
-    let entry = unsafe { ash::Entry::load() }
-        .map_err(|e| InteropError::Vulkan(format!("ash::Entry::load (libvulkan): {e}")))?;
-    let get_device_proc_ptr = unsafe {
-        entry.get_instance_proc_addr(vk::Instance::null(), c"vkGetDeviceProcAddr".as_ptr())
+    // Resolve `vkImportSemaphoreFdKHR` via the live wgpu-hal
+    // `ash::Instance` (reachable through
+    // `hal_device.shared_instance().raw_instance()`). Per Vulkan 1.2+
+    // `vkGetInstanceProcAddr(VK_NULL_HANDLE, …)` only returns the
+    // four global commands — going through the entry alone would
+    // return null. The ash `Instance` wraps the real `VkInstance`
+    // wgpu created so `get_device_proc_addr` resolves correctly.
+    let raw_proc = unsafe {
+        ash_instance
+            .get_device_proc_addr(raw_device.handle(), c"vkImportSemaphoreFdKHR".as_ptr())
     };
-    let get_device_proc_addr: vk::PFN_vkGetDeviceProcAddr = match get_device_proc_ptr {
-        Some(p) => unsafe { mem::transmute::<_, vk::PFN_vkGetDeviceProcAddr>(p) },
-        None => {
-            return Err(InteropError::Vulkan(
-                "vkGetInstanceProcAddr(NULL, vkGetDeviceProcAddr) returned null".into(),
-            ));
-        }
-    };
-    let raw_proc =
-        unsafe { get_device_proc_addr(raw_device.handle(), c"vkImportSemaphoreFdKHR".as_ptr()) };
     if raw_proc.is_none() {
         return Err(InteropError::Vulkan(
             "vkGetDeviceProcAddr(vkImportSemaphoreFdKHR) returned null; \
@@ -398,16 +391,7 @@ pub(crate) fn probe_dmabuf_extensions(
     let hal_device = unsafe { host.device.as_hal::<Vulkan>() }
         .ok_or(super::UnsupportedReason::HostBackendMismatch)?;
     let raw_device: &ash::Device = hal_device.raw_device();
-
-    let entry = unsafe { ash::Entry::load() }
-        .map_err(|_| super::UnsupportedReason::NativeImportNotYetImplemented)?;
-    let raw_proc = unsafe {
-        entry.get_instance_proc_addr(vk::Instance::null(), c"vkGetDeviceProcAddr".as_ptr())
-    };
-    let get_device_proc_addr: vk::PFN_vkGetDeviceProcAddr = match raw_proc {
-        Some(p) => unsafe { mem::transmute::<_, vk::PFN_vkGetDeviceProcAddr>(p) },
-        None => return Err(super::UnsupportedReason::NativeImportNotYetImplemented),
-    };
+    let ash_instance: &ash::Instance = hal_device.shared_instance().raw_instance();
 
     // Signature functions of the device extensions the import path
     // depends on. `vkImportMemoryFdKHR` itself isn't probed directly
@@ -420,7 +404,7 @@ pub(crate) fn probe_dmabuf_extensions(
         c"vkGetImageDrmFormatModifierPropertiesEXT", // VK_EXT_image_drm_format_modifier
     ];
     for name in required {
-        let ptr = unsafe { get_device_proc_addr(raw_device.handle(), name.as_ptr()) };
+        let ptr = unsafe { ash_instance.get_device_proc_addr(raw_device.handle(), name.as_ptr()) };
         if ptr.is_none() {
             return Err(super::UnsupportedReason::NativeImportNotYetImplemented);
         }
