@@ -37,7 +37,7 @@
 
 #![cfg(target_os = "linux")]
 
-use std::ffi::c_void;
+use std::ffi::{CStr, c_void};
 use std::mem;
 
 use ash::vk;
@@ -411,4 +411,106 @@ pub(crate) fn probe_dmabuf_extensions(
     }
 
     Ok(())
+}
+
+/// Errors that can occur while building a DMABUF-capable wgpu device
+/// via [`build_dmabuf_capable_device`].
+#[derive(Debug, thiserror::Error)]
+pub enum DmaBufDeviceError {
+    #[error("adapter backend is not Vulkan — DMABUF import is Linux/Vulkan-only")]
+    NotVulkanBackend,
+    #[error("physical device is missing required extensions: {0:?}")]
+    MissingExtensions(Vec<&'static str>),
+    #[error("vkEnumerateDeviceExtensionProperties failed: {0}")]
+    ExtensionEnumeration(String),
+    #[error("wgpu-hal Adapter::open_with_callback failed: {0}")]
+    HalOpen(String),
+    #[error("wgpu Adapter::create_device_from_hal failed: {0}")]
+    DeviceCreation(#[from] wgpu::RequestDeviceError),
+}
+
+/// Build a [`wgpu::Device`] + [`wgpu::Queue`] from `adapter` with the
+/// Vulkan device extensions [`import`] needs at runtime enabled:
+///
+/// - `VK_EXT_image_drm_format_modifier` — required by the
+///   `DRM_FORMAT_MODIFIER_EXT` tiling path on
+///   [`vk::ImageCreateInfo`].
+/// - `VK_KHR_external_semaphore_fd` — required by
+///   [`wait_on_producer_semaphore`] when
+///   `SyncMechanism::ExplicitExternalSemaphore` frames arrive.
+///
+/// `VK_KHR_external_memory_fd` is enabled by wgpu-hal already when
+/// the adapter exposes it; we don't push it again to avoid
+/// `VK_ERROR_VALIDATION_FAILED` from duplicate names.
+///
+/// Use this in place of [`wgpu::Adapter::request_device`] when you
+/// want [`WgpuTextureImporter`](crate::WgpuTextureImporter) to
+/// actually be able to import producer DMABUFs.
+///
+/// Returns [`DmaBufDeviceError::MissingExtensions`] when the
+/// physical device doesn't expose one or both of the required
+/// extensions — typically rare on modern Linux hardware (RADV / ANV /
+/// the NVIDIA proprietary driver all expose them on contemporary
+/// versions), but worth surfacing so callers can fall back to
+/// `request_device` + `CpuSnapshot`.
+pub fn build_dmabuf_capable_device(
+    adapter: &wgpu::Adapter,
+    desc: &wgpu::DeviceDescriptor<'_>,
+) -> Result<(wgpu::Device, wgpu::Queue), DmaBufDeviceError> {
+    const REQUIRED: &[&CStr] = &[
+        vk::EXT_IMAGE_DRM_FORMAT_MODIFIER_NAME,
+        vk::KHR_EXTERNAL_SEMAPHORE_FD_NAME,
+    ];
+
+    let hal_adapter = unsafe { adapter.as_hal::<Vulkan>() }
+        .ok_or(DmaBufDeviceError::NotVulkanBackend)?;
+
+    // Probe `vkEnumerateDeviceExtensionProperties` so we can return a
+    // structured "you're missing X" error instead of letting
+    // vkCreateDevice die with `ERROR_EXTENSION_NOT_PRESENT` and
+    // `hal_usage_error` panicking.
+    let pd = hal_adapter.raw_physical_device();
+    let ash_instance = hal_adapter.shared_instance().raw_instance();
+    let supported = unsafe { ash_instance.enumerate_device_extension_properties(pd) }
+        .map_err(|e| DmaBufDeviceError::ExtensionEnumeration(format!("{e}")))?;
+
+    let missing: Vec<&'static str> = REQUIRED
+        .iter()
+        .filter(|&&needle| {
+            !supported.iter().any(|prop| {
+                let name = prop.extension_name_as_c_str().unwrap_or_default();
+                name == needle
+            })
+        })
+        .map(|&n| n.to_str().unwrap_or("<invalid-utf8-ext-name>"))
+        .collect();
+    if !missing.is_empty() {
+        return Err(DmaBufDeviceError::MissingExtensions(missing));
+    }
+
+    // Walk wgpu-hal's `open_with_callback` so we get to mutate the
+    // extensions vec wgpu-hal built. Only push names that aren't
+    // already there — Vulkan rejects duplicates in
+    // `vkCreateDevice`.
+    let hal_open = unsafe {
+        hal_adapter.open_with_callback(
+            desc.required_features,
+            &desc.required_limits,
+            &desc.memory_hints,
+            Some(Box::new(|args| {
+                for &name in REQUIRED {
+                    if !args.extensions.iter().any(|e| *e == name) {
+                        args.extensions.push(name);
+                    }
+                }
+            })),
+        )
+    }
+    .map_err(|e| DmaBufDeviceError::HalOpen(format!("{e:?}")))?;
+
+    drop(hal_adapter);
+
+    let (device, queue) =
+        unsafe { adapter.create_device_from_hal::<Vulkan>(hal_open, desc) }?;
+    Ok((device, queue))
 }

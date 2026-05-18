@@ -536,11 +536,30 @@ fn make_vulkan_host() -> Option<(wgpu::Device, wgpu::Queue, HostWgpuContext)> {
         force_fallback_adapter: false,
     }))
     .ok()?;
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+
+    // Phase 4a.7 — use the scrying helper that enables
+    // VK_EXT_image_drm_format_modifier + VK_KHR_external_semaphore_fd
+    // at device creation time. Without these, the import path only
+    // works by accident (Mesa permissiveness) and the wait path
+    // SKIPs because the function pointers can't be resolved.
+    let desc = wgpu::DeviceDescriptor {
         label: Some("scrying-dmabuf-roundtrip-device"),
         ..Default::default()
-    }))
-    .ok()?;
+    };
+    let (device, queue) = match scrying::build_dmabuf_capable_device(&adapter, &desc) {
+        Ok(pair) => pair,
+        Err(scrying::DmaBufDeviceError::MissingExtensions(missing)) => {
+            eprintln!(
+                "SKIP: physical device missing required extensions: {missing:?}; \
+                 falling back is not useful for this test"
+            );
+            return None;
+        }
+        Err(e) => {
+            eprintln!("SKIP: build_dmabuf_capable_device failed: {e}");
+            return None;
+        }
+    };
     let host = HostWgpuContext::new(device.clone(), queue.clone());
     Some((device, queue, host))
 }

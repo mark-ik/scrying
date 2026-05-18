@@ -13,6 +13,9 @@ pub use native_frame::{
     ProducerCapabilities, SyncMechanism, TextureImporter, UnsupportedReason, WgpuTextureImporter,
 };
 
+#[cfg(target_os = "linux")]
+pub use native_frame::dmabuf::{DmaBufDeviceError, build_dmabuf_capable_device};
+
 #[cfg(target_os = "windows")]
 pub mod windows_capture;
 
