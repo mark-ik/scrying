@@ -523,9 +523,19 @@ fn assert_pixels_match(want: &[u8], got: &[u8]) {
 }
 
 fn make_vulkan_host() -> Option<(wgpu::Device, wgpu::Queue, HostWgpuContext)> {
+    // Turn on VK_LAYER_KHRONOS_validation so we catch any calls that
+    // only "work by accident" on permissive Mesa — e.g. feeding a
+    // DRM-modifier pNext chain to vkCreateImage on a device that
+    // hadn't enabled VK_EXT_image_drm_format_modifier. wgpu-hal logs
+    // a warning and proceeds without the layer if it isn't installed,
+    // so this is safe on boxes that lack `vulkan-validation-layers`.
+    // Validation messages route through `log`; run with
+    // `RUST_LOG=wgpu_hal=warn` (or `=info`) to surface them.
+    let flags = wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::DEBUG;
+    eprintln!("wgpu instance flags: {flags:?} (VK_LAYER_KHRONOS_validation requested)");
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
-        flags: wgpu::InstanceFlags::default(),
+        flags,
         memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
         backend_options: wgpu::BackendOptions::default(),
         display: None,
