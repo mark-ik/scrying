@@ -311,19 +311,30 @@ artifact.
 
 ## Phase 4 deliverables checklist
 
-- [ ] **4a.1** `import_dmabuf_image` implementation — single-plane,
+- [x] **4a.1** `import_dmabuf_image` implementation — single-plane,
       explicit modifier, no semaphore
-- [ ] **4a.2** `VK_KHR_external_semaphore_fd` import path through
-      `ExplicitExternalSemaphoreSynchronizer`
-- [ ] **4a.3** Capability probe — `HostWgpuContext` reports
+- [x] **4a.2** `VK_KHR_external_semaphore_fd` import path (wait-only
+      `vkQueueSubmit` on the consumer queue; runtime-exercised by 4a.6)
+- [x] **4a.3** Capability probe — `probe_dmabuf_extensions` reports
       required VK extensions, downgrades `imported_texture` if any
       are missing
-- [ ] **4a.4** Round-trip test: wgpu-rendered texture → DMABUF
-      export → re-import → pixel verify
-- [ ] **4a.5** Implicit-modifier (`DRM_FORMAT_MOD_INVALID`) support
-- [ ] **4b.1** Decide where the WPE bindings crates live
-- [ ] **4b.2** `wpe-sys` published — GIR-generated FFI for libwpe
-- [ ] **4b.3** `wpe-webkit-sys` + safe `wpe-webkit` published
+- [x] **4a.4** Round-trip test: libgbm-produced DMABUF → import →
+      readback → pixel verify (65536/65536)
+- [x] **4a.5** Implicit-modifier (`DRM_FORMAT_MOD_INVALID`) support —
+      substitute `DRM_FORMAT_MOD_LINEAR`; multi-plane (YUV/ycbcr)
+      deferred
+- [x] **4a.6** Signaled-semaphore round-trip exercising the 4a.2 wait
+      path end-to-end
+- [x] **4a.7** `build_dmabuf_capable_device` helper — enables
+      `VK_EXT_image_drm_format_modifier` + `VK_KHR_external_semaphore_fd`
+      at device creation (validated under `VK_LAYER_KHRONOS_validation`)
+- [x] **4b.1** Decide where the WPE bindings crates live →
+      [`2026-05-20_phase4b_wpe_bindings_decision.md`](2026-05-20_phase4b_wpe_bindings_decision.md):
+      inline in-tree FFI now, dedicated `wpe-rs` repo later
+- [ ] **4b.2** ~~`wpe-sys` GIR-generated~~ — superseded: libwpe is
+      plain C, bound via inline FFI (see 4b decision doc)
+- [ ] **4b.3** `wpe-webkit-sys` + safe `wpe-webkit` published (gir;
+      Gir.toml sketched in 4b decision doc; blocked on a WPE install)
 - [ ] **4c.1** Working WPE install on the dev machine (Flatpak SDK
       or COPR or source)
 - [ ] **4c.2** `wpe_producer` FFI bridge wired (`WPEViewBackendDMABuf`
