@@ -51,6 +51,9 @@ use scrying::{
 const WIDTH: u32 = 256;
 const HEIGHT: u32 = 256;
 const DRM_FORMAT_ARGB8888: u32 = 0x34325241; // 'AR24'
+/// linux/drm_fourcc.h `DRM_FORMAT_MOD_INVALID` — the producer didn't
+/// negotiate an explicit modifier. Phase 4a.5 treats this as linear.
+const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
 
 /// Mirror image of the import path's format choice: wgpu BGRA8 maps
 /// to DRM_FORMAT_ARGB8888 on little-endian (bytes in memory: B G R A).
@@ -301,6 +304,50 @@ fn dmabuf_import_with_signaled_semaphore() {
     assert_eq!(imported.format, WGPU_FORMAT);
     eprintln!(
         "imported texture (semaphore path): {}x{} format={:?} gen={}",
+        imported.size.width, imported.size.height, imported.format, imported.generation
+    );
+
+    let readback_bytes = read_back_texture(&fixture.device, &fixture.queue, &imported);
+    assert_pixels_match(&fixture.pattern, &readback_bytes);
+}
+
+/// Phase 4a.5: a producer that couldn't negotiate an explicit DRM
+/// modifier hands us `DRM_FORMAT_MOD_INVALID`. The fixture's BO is
+/// genuinely linear (allocated with the LINEAR modifier), so the
+/// importer's INVALID→LINEAR substitution should round-trip
+/// bit-for-bit. This is the common WebKit fallback case when EGL/
+/// Vulkan modifier negotiation isn't available.
+#[test]
+fn dmabuf_import_implicit_modifier() {
+    let Some(fixture) = setup_producer() else {
+        return;
+    };
+
+    let frame = DmaBufImage {
+        size: PhysicalSize::new(WIDTH, HEIGHT),
+        format: WGPU_FORMAT,
+        drm_format: DRM_FORMAT_ARGB8888,
+        drm_modifier: DRM_FORMAT_MOD_INVALID,
+        planes: vec![DmaBufPlane {
+            fd: fixture.dmabuf_fd,
+            offset: fixture.offset,
+            stride: fixture.stride,
+        }],
+        generation: 3,
+        producer_sync: SyncMechanism::None,
+        semaphore_fd: None,
+    };
+
+    let importer = WgpuTextureImporter::new(fixture.host);
+    let imported =
+        match importer.import_frame(&NativeFrame::DmaBufImage(frame), &ImportOptions::default()) {
+            Ok(t) => t,
+            Err(e) => {
+                panic!("FAIL: import_frame (implicit modifier) errored: {e}");
+            }
+        };
+    eprintln!(
+        "imported texture (implicit modifier): {}x{} format={:?} gen={}",
         imported.size.width, imported.size.height, imported.format, imported.generation
     );
 

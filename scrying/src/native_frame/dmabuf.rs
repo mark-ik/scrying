@@ -47,6 +47,12 @@ use super::{
     DmaBufImage, HostWgpuContext, ImportedTexture, InteropError, SyncMechanism, UnsupportedReason,
 };
 
+/// linux/drm_fourcc.h `DRM_FORMAT_MOD_LINEAR` — row-major, no tiling.
+const DRM_FORMAT_MOD_LINEAR: u64 = 0;
+/// linux/drm_fourcc.h `DRM_FORMAT_MOD_INVALID` = `fourcc_mod_code(NONE,
+/// (1<<56)-1)`. Signals "no explicit modifier negotiated".
+const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
+
 pub(super) fn import(
     frame: &DmaBufImage,
     host: &HostWgpuContext,
@@ -61,9 +67,16 @@ pub(super) fn import(
         return Err(InteropError::InvalidFrame("DmaBufImage has no planes"));
     }
     if frame.planes.len() > 1 {
-        // Multi-plane DMABUFs (NV12 / P010 / YUV420) would need
-        // separate `VkSubresourceLayout` per plane and matching DRM
-        // modifier handling. Deferred to Phase 4a.2.
+        // Multi-plane DMABUFs are deferred. In practice they mean YUV
+        // (NV12 / P010 / YUV420), which needs a multi-planar VkFormat
+        // plus a Vulkan sampler ycbcr conversion to sample — and wgpu
+        // 29 doesn't cleanly expose ycbcr conversion, so we couldn't
+        // hand back a sampleable wgpu::Texture even if we imported the
+        // VkImage. Our actual producer (WebKit's offscreen page
+        // surface) is single-plane BGRA, so this stays unimplemented
+        // until a producer emits multi-plane frames we can consume.
+        // (Explicit-modifier RGBA with compression aux planes is the
+        // one non-YUV multi-plane case; it's rare and also deferred.)
         return Err(InteropError::Unsupported(
             UnsupportedReason::NativeImportNotYetImplemented,
         ));
@@ -75,6 +88,26 @@ pub(super) fn import(
             frame.drm_format, frame.format
         ))
     })?;
+
+    // Phase 4a.5 — implicit-modifier handling. A producer that
+    // couldn't negotiate an explicit DRM modifier hands us
+    // `DRM_FORMAT_MOD_INVALID`. We can't feed that to
+    // `ImageDrmFormatModifierExplicitCreateInfoEXT` (it isn't a real
+    // modifier — the driver produces an undefined layout and reads
+    // back garbage). Substitute `DRM_FORMAT_MOD_LINEAR`, which lets us
+    // keep the explicit-modifier path (and its stride control) while
+    // treating the buffer as the linear layout that implicit-modifier
+    // producers — CPU producers and simple GBM allocations, including
+    // WebKit's fallback when EGL/Vulkan modifier negotiation isn't
+    // available — actually emit. GPU-tiled implicit buffers can't be
+    // imported this way; the producer must negotiate an explicit
+    // modifier (a fundamental DMABUF interop constraint, not a
+    // limitation we can paper over here).
+    let effective_modifier = if frame.drm_modifier == DRM_FORMAT_MOD_INVALID {
+        DRM_FORMAT_MOD_LINEAR
+    } else {
+        frame.drm_modifier
+    };
 
     let width = frame.size.width;
     let height = frame.size.height;
@@ -99,7 +132,7 @@ pub(super) fn import(
         }];
 
         let mut drm_modifier_info = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
-            .drm_format_modifier(frame.drm_modifier)
+            .drm_format_modifier(effective_modifier)
             .plane_layouts(&plane_layouts);
 
         let mut external_memory_info = vk::ExternalMemoryImageCreateInfo::default()
