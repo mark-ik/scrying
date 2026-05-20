@@ -76,10 +76,7 @@ fn poll_for_expected_keyboard_value(
     latest
 }
 
-fn log_keyboard_focus_diagnostics(
-    parent_hwnd: windows::Win32::Foundation::HWND,
-    label: &str,
-) {
+fn log_keyboard_focus_diagnostics(parent_hwnd: windows::Win32::Foundation::HWND, label: &str) {
     use windows::Win32::UI::Input::KeyboardAndMouse::GetFocus;
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetParent};
 
@@ -94,8 +91,8 @@ fn log_keyboard_focus_diagnostics(
     enumerate_descendants(parent_hwnd, &mut tree);
     for (depth, hwnd, class, visible) in tree {
         let indent = " ".repeat(depth * 2 + 2);
-        let parent = unsafe { GetParent(hwnd) }
-            .unwrap_or(windows::Win32::Foundation::HWND::default());
+        let parent =
+            unsafe { GetParent(hwnd) }.unwrap_or(windows::Win32::Foundation::HWND::default());
         let focus_mark = if hwnd == focused { " [FOCUS]" } else { "" };
         let fg_mark = if hwnd == foreground { " [FG]" } else { "" };
         let vis = if visible { "vis" } else { "hidden" };
@@ -144,15 +141,10 @@ fn enumerate_descendants(
 
     let mut ctx = Ctx { out, root };
     unsafe {
-        let _ = EnumChildWindows(
-            Some(root),
-            Some(cb),
-            LPARAM(&mut ctx as *mut _ as isize),
-        );
+        let _ = EnumChildWindows(Some(root), Some(cb), LPARAM(&mut ctx as *mut _ as isize));
     }
     ctx.out.sort_by_key(|&(d, h, _, _)| (d, h.0 as usize));
 }
-
 
 pub(crate) fn validate_platform_cdp_input(
     producer: &mut scrying::PlatformWebSurfaceProducer,

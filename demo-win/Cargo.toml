@@ -7,12 +7,12 @@ description = "Windows WebView2 composition runtime probe for scrying"
 
 [dependencies]
 pollster = "0.4.0"
-wgpu = { version = "29.0.1", features = ["metal"] }
-winit = "0.30.12"
+wgpu = { workspace = true, features = ["metal"] }
+winit.workspace = true
 scrying = { path = "../scrying" }
 
 [target.'cfg(windows)'.dependencies]
-raw-window-handle = "0.6"
+raw-window-handle.workspace = true
 webview2-com = "0.39.1"
 
 [target.'cfg(windows)'.dependencies.windows]

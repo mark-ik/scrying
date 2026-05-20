@@ -10,6 +10,6 @@ name = "demo-linux"
 path = "src/main.rs"
 
 [dependencies]
-dpi = "0.1.2"
+dpi.workspace = true
 image = "0.25"
 scrying = { path = "../scrying", features = ["webkitgtk-fallback"] }

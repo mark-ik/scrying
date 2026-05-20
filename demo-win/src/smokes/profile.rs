@@ -34,16 +34,10 @@ pub(crate) fn validate_platform_profile_store(
     pump_windows_messages_for(std::time::Duration::from_millis(250));
 
     let secondary_config = scrying::PlatformWebSurfaceConfig::new(
-        winit::dpi::PhysicalSize::new(
-            SMOKE_PROBE_WIDTH as u32,
-            SMOKE_PROBE_HEIGHT as u32,
-        ),
+        winit::dpi::PhysicalSize::new(SMOKE_PROBE_WIDTH as u32, SMOKE_PROBE_HEIGHT as u32),
         user_data_dir,
     )
-    .with_offset(
-        SMOKE_PROBE_X + SMOKE_PROBE_WIDTH + 24.0,
-        SMOKE_PROBE_Y,
-    )
+    .with_offset(SMOKE_PROBE_X + SMOKE_PROBE_WIDTH + 24.0, SMOKE_PROBE_Y)
     .with_diagnostic_backdrop((67, 61, 89));
     let mut secondary =
         unsafe { scrying::PlatformWebSurfaceProducer::new(parent_hwnd, secondary_config)? };
@@ -107,16 +101,10 @@ pub(crate) fn validate_platform_incognito_store(
     pump_windows_messages_for(std::time::Duration::from_millis(250));
 
     let persistent_config = scrying::PlatformWebSurfaceConfig::new(
-        winit::dpi::PhysicalSize::new(
-            SMOKE_PROBE_WIDTH as u32,
-            SMOKE_PROBE_HEIGHT as u32,
-        ),
+        winit::dpi::PhysicalSize::new(SMOKE_PROBE_WIDTH as u32, SMOKE_PROBE_HEIGHT as u32),
         user_data_dir,
     )
-    .with_offset(
-        SMOKE_PROBE_X + SMOKE_PROBE_WIDTH + 24.0,
-        SMOKE_PROBE_Y,
-    )
+    .with_offset(SMOKE_PROBE_X + SMOKE_PROBE_WIDTH + 24.0, SMOKE_PROBE_Y)
     .with_diagnostic_backdrop((59, 92, 72));
     let mut persistent =
         unsafe { scrying::PlatformWebSurfaceProducer::new(parent_hwnd, persistent_config)? };

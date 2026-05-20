@@ -613,10 +613,7 @@ pub(crate) fn run_platform_composition_visual_probe(
     // pixels without requiring a manual resize first.
     let (initial_size, initial_offset_x, initial_offset_y) = if cli.one_shot() {
         (
-            winit::dpi::PhysicalSize::new(
-                SMOKE_PROBE_WIDTH as u32,
-                SMOKE_PROBE_HEIGHT as u32,
-            ),
+            winit::dpi::PhysicalSize::new(SMOKE_PROBE_WIDTH as u32, SMOKE_PROBE_HEIGHT as u32),
             SMOKE_PROBE_X,
             SMOKE_PROBE_Y,
         )

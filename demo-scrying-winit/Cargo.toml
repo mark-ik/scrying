@@ -7,6 +7,6 @@ description = "Minimal winit + wgpu host probe for scrying"
 
 [dependencies]
 pollster = "0.4.0"
-wgpu = { version = "29.0.1", features = ["metal"] }
-winit = "0.30.12"
+wgpu = { workspace = true, features = ["metal"] }
+winit.workspace = true
 scrying = { path = "../scrying" }

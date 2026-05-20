@@ -33,10 +33,7 @@ pub(crate) fn validate_platform_scale_resize(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let samples = [
         winit::dpi::PhysicalSize::new(315, 195),
-        winit::dpi::PhysicalSize::new(
-            SMOKE_PROBE_WIDTH as u32,
-            SMOKE_PROBE_HEIGHT as u32,
-        ),
+        winit::dpi::PhysicalSize::new(SMOKE_PROBE_WIDTH as u32, SMOKE_PROBE_HEIGHT as u32),
     ];
     for target in samples {
         producer.resize(target)?;
