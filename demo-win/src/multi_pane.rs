@@ -110,13 +110,9 @@ impl MultiPaneSession {
             let producer = unsafe {
                 scrying::PlatformWebSurfaceProducer::new_attached(&composition_root, config)?
             };
-            producer.navigate_to_string(
-                &multi_pane_html(index),
-                std::time::Duration::from_secs(5),
-            )?;
-            println!(
-                "demo-win: multi-pane: pane {index} attached + navigated, rect={rect:?}"
-            );
+            producer
+                .navigate_to_string(&multi_pane_html(index), std::time::Duration::from_secs(5))?;
+            println!("demo-win: multi-pane: pane {index} attached + navigated, rect={rect:?}");
             panes.push(Pane {
                 index,
                 producer,
@@ -158,9 +154,7 @@ impl MultiPaneSession {
         let local_x = (cursor.x - pane.rect.x as f64) as i32;
         let local_y = (cursor.y - pane.rect.y as f64) as i32;
         if press {
-            let _ = pane
-                .producer
-                .move_focus(scrying::FocusReason::Programmatic);
+            let _ = pane.producer.move_focus(scrying::FocusReason::Programmatic);
         }
         let event = scrying::MouseInput {
             kind,
@@ -184,12 +178,18 @@ impl MultiPaneSession {
             while let Some(event) = pane.producer.poll_navigation_event() {
                 match event {
                     scrying::NavigationEvent::Completed { url, success } => {
-                        println!("[pane {}] [nav] completed (success={success}) -> {url}", pane.index);
+                        println!(
+                            "[pane {}] [nav] completed (success={success}) -> {url}",
+                            pane.index
+                        );
                     }
                     scrying::NavigationEvent::TextInputFocused { state } => {
                         println!(
                             "[pane {}] [text-input] focused {} type={} purpose={:?}",
-                            pane.index, state.element_kind, state.input_type, state.purpose()
+                            pane.index,
+                            state.element_kind,
+                            state.input_type,
+                            state.purpose()
                         );
                     }
                     scrying::NavigationEvent::TextInputBlurred => {
